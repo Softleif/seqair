@@ -803,20 +803,20 @@ mod tests {
     fn query_skips_trailing_unplaced_reads() {
         use super::super::owned_record::OwnedBamRecord;
         use crate::io::BgzfWriter;
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
 
         let mapped = OwnedBamRecord::builder(
             Some(tid(0)),
             Some(Pos0::new(100).unwrap()),
             b"mapped".to_vec(),
         )
-        .seq(vec![Base::A, Base::C, Base::G])
+        .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
         .build()
         .unwrap();
         // Fully unplaced read: ref_id = -1, pos = -1 (BAM wire), unmapped flag.
         let unplaced = OwnedBamRecord::builder(None, None, b"unplaced".to_vec())
             .flags(BamFlags::from(0x4))
-            .seq(vec![Base::A, Base::C, Base::G])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
             .build()
             .unwrap();
 
@@ -877,7 +877,7 @@ mod tests {
         use super::super::cigar::{CigarOp, CigarOpType, compute_end_pos};
         use super::super::owned_record::OwnedBamRecord;
         use hegel::generators as gs;
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
 
         let pos = tc.draw(gs::integers::<u32>().max_value(1_000));
         let n_ops = tc.draw(gs::integers::<usize>().max_value(4));
@@ -900,7 +900,7 @@ mod tests {
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), b"q".to_vec())
                 .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
                 .cigar(ops)
-                .seq(vec![Base::A; seq_len as usize])
+                .seq(vec![IupacBase::A; seq_len as usize])
                 .build()
                 .unwrap();
         let mut raw = Vec::new();

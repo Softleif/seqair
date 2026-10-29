@@ -1026,6 +1026,48 @@ mod tests {
         .map(|outcome| outcome.map(|record| record.kept))
     }
 
+    // r[verify sam.record.seq_decode+1]
+    // r[verify record_store.seq_lossless]
+    /// Every byte a SEQ field can hold (all but TAB and newline) is stored
+    /// as the code htslib's `seq_nt16_table` gives it; as `Base`, that
+    /// differs from `Base::from(byte)` exactly for the digits `0`..`3`.
+    #[test]
+    fn every_seq_byte_is_stored_as_htslib_reads_it() {
+        use crate::bam::test_util::HTSLIB_SEQ_NT16_TABLE;
+        use seqair_types::Base;
+        let seq: Vec<u8> = (0..=255u8).filter(|b| !matches!(b, b'\t' | b'\n')).collect();
+        let mut line = format!("read1\t0\tchr1\t1\t60\t{}M\t*\t0\t0\t", seq.len()).into_bytes();
+        line.extend_from_slice(&seq);
+        line.extend_from_slice(b"\t*");
+        let header = make_header();
+        let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
+            make_store_and_bufs();
+        let kept = parse_sam_line(
+            &line,
+            &header,
+            tid(0),
+            0,
+            10000,
+            &mut store,
+            &mut cigar_buf,
+            &mut bases_buf,
+            &mut qual_buf,
+            &mut aux_buf,
+            &mut (),
+        )
+        .expect("a SEQ of any bytes parses")
+        .expect("the line overlaps the region");
+        assert!(kept.kept);
+        let stored = store.record(crate::bam::test_util::ri(0)).expect("one record").seq();
+        assert_eq!(stored.len(), seq.len());
+        for (&byte, &code) in seq.iter().zip(stored) {
+            let expected = HTSLIB_SEQ_NT16_TABLE.get(usize::from(byte)).copied();
+            assert_eq!(Some(code.code()), expected, "byte {byte:#04x}");
+            let differs = code.to_base() != Base::from(byte);
+            assert_eq!(differs, b"0123".contains(&byte), "byte {byte:#04x}");
+        }
+    }
+
     #[test]
     fn error_too_few_fields() {
         let header = make_header();

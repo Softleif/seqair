@@ -32,7 +32,7 @@ use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::MappingQuality;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{BaseQuality, IupacBase};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -70,26 +70,26 @@ fn make_methylation_record(
     ml_probs: &[u8],
 ) -> OwnedBamRecord {
     let seq = vec![
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::C,
-        Base::G,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::C,
-        Base::G,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
     ];
     let mut aux = AuxData::new();
     aux.set_string(*b"MM", mm_str);
@@ -283,16 +283,16 @@ fn mm_ml_empty_values() {
         .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
         .seq(vec![
-            Base::A,
-            Base::C,
-            Base::G,
-            Base::T,
-            Base::A,
-            Base::C,
-            Base::G,
-            Base::T,
-            Base::A,
-            Base::C,
+            IupacBase::A,
+            IupacBase::C,
+            IupacBase::G,
+            IupacBase::T,
+            IupacBase::A,
+            IupacBase::C,
+            IupacBase::G,
+            IupacBase::T,
+            IupacBase::A,
+            IupacBase::C,
         ])
         .qual(vec![BaseQuality::from_byte(30); 10])
         .aux(aux)
@@ -339,12 +339,12 @@ fn mm_ml_large_tags() {
     let ml_probs: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
 
     // Need a sequence long enough for the CIGAR
-    let seq: Vec<Base> = (0..1000)
+    let seq: Vec<IupacBase> = (0..1000)
         .map(|i| match i % 4 {
-            0 => Base::A,
-            1 => Base::C,
-            2 => Base::G,
-            _ => Base::T,
+            0 => IupacBase::A,
+            1 => IupacBase::C,
+            2 => IupacBase::G,
+            _ => IupacBase::T,
         })
         .collect();
 
@@ -411,16 +411,16 @@ fn mm_ml_coexist_with_other_tags() {
             .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
             ])
             .qual(vec![BaseQuality::from_byte(30); 10])
             .aux(aux)

@@ -31,7 +31,7 @@ use seqair::vcf::{
 };
 use seqair::vcf::{FormatGt, InfoFloat};
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality, Pos0, Pos1};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, Pos0, Pos1};
 
 const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
 
@@ -103,7 +103,8 @@ fn bam_records(stream: &BamStream) -> Vec<OwnedBamRecord> {
                 pos = 0;
             }
             pos += step;
-            let seq: Vec<Base> = (0..len).map(|_| ACGT[(noise.next() % 4) as usize]).collect();
+            let seq: Vec<IupacBase> =
+                (0..len).map(|_| ACGT[(noise.next() % 4) as usize].into()).collect();
             let qual: Vec<BaseQuality> =
                 (0..len).map(|_| BaseQuality::from_byte(20 + (noise.next() % 20) as u8)).collect();
             let mut aux = AuxData::new();

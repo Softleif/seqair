@@ -12,6 +12,30 @@ use super::record_store::RecordStore;
 use seqair_types::{Base, IupacBase};
 use std::io::{Read, Seek};
 
+/// htslib's `seq_nt16_table` (`hts.c`), copied verbatim: the code htslib
+/// stores for each SEQ byte. An oracle independent of `IupacBase`.
+#[allow(dead_code, reason = "used by sibling test modules; cfg gates may hide some call sites")]
+#[rustfmt::skip]
+pub(crate) const HTSLIB_SEQ_NT16_TABLE: [u8; 256] = [
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+     1, 2, 4, 8, 15,15,15,15, 15,15,15,15, 15, 0 /*=*/,15,15,
+    15, 1,14, 2, 13,15,15, 4, 11,15,15,12, 15, 3,15,15,
+    15,15, 5, 6,  8, 8, 7, 9, 15,10,15,15, 15,15,15,15,
+    15, 1,14, 2, 13,15,15, 4, 11,15,15,12, 15, 3,15,15,
+    15,15, 5, 6,  8, 8, 7, 9, 15,10,15,15, 15,15,15,15,
+
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+    15,15,15,15, 15,15,15,15, 15,15,15,15, 15,15,15,15,
+];
+
 /// `bases` as the codes `push_fields` takes.
 #[allow(dead_code, reason = "used by sibling test modules; cfg gates may hide some call sites")]
 pub(crate) fn iupac(bases: &[Base]) -> Vec<IupacBase> {

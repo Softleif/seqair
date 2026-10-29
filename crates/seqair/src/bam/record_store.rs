@@ -2,7 +2,7 @@
 //!
 //! All variable-length data is packed into contiguous byte buffers:
 //! - **Name slab**: read names (qnames), accessed during dedup mate detection
-//! - **Bases slab**: decoded `Base` values per record, accessed per-position in pileup
+//! - **Bases slab**: each record's SEQ as `IupacBase` codes, accessed per-position in pileup
 //! - **Cigar slab**: packed CIGAR ops, append-only mutation during realignment
 //! - **Qual slab**: raw Phred bytes, hot in pileup per-base quality lookup
 //! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
@@ -95,7 +95,7 @@ fn fold_mul(a: u64, k: u64) -> u64 {
 }
 
 /// Compact BAM record with offsets into the store's slabs.
-// r[impl record_store.push_raw+2]
+// r[impl record_store.push_raw+3]
 // r[impl record_store.slim_record_fields]
 #[derive(Clone)]
 pub struct SlimRecord {
@@ -191,11 +191,11 @@ impl SlimRecord {
         })
     }
 
-    /// Read this record's decoded sequence bases from the store's bases slab.
+    /// Read this record's sequence codes from the store's bases slab.
     pub fn seq<'store, U>(
         &self,
         store: &'store RecordStore<U>,
-    ) -> Result<&'store [Base], RecordAccessError> {
+    ) -> Result<&'store [IupacBase], RecordAccessError> {
         let start = self.bases_off as usize;
         let end =
             start.checked_add(self.seq_len as usize).ok_or(RecordAccessError::OffsetOverflow {
@@ -338,20 +338,20 @@ pub enum Slab {
     Extras,
 }
 
-// r[impl record_store.push_raw+2]
+// r[impl record_store.push_raw+3]
 // r[impl record_store.field_access]
 // r[impl record_store.clear+2]
 // r[impl record_store.region_scoped]
 // r[impl record_store.capacity]
 // r[impl record_store.no_rc]
-// r[impl base_decode.slab]
+// r[impl base_decode.slab+1]
 // r[related pileup.qpos]
 /// Slab-based storage for BAM records with optional per-record extras.
 ///
 /// Six contiguous buffers hold all data for a region, plus an extras slab:
 /// - `records`: compact fixed-size structs
 /// - `names`: packed qnames (for dedup)
-/// - `bases`: decoded `Base` values per record (for per-position base lookup)
+/// - `bases`: each record's SEQ as `IupacBase` codes (for per-position base lookup)
 /// - `cigar`: packed CIGAR ops (separated for append-only mutation during realignment)
 /// - `qual`: raw Phred bytes per record (dense, hot in pileup)
 /// - `aux`: auxiliary tag bytes per record (rarely read in pileup; isolated so it
@@ -366,7 +366,7 @@ pub enum Slab {
 pub struct RecordStore<U = ()> {
     records: Vec<SlimRecord>,
     names: Vec<u8>,
-    bases: Vec<Base>,
+    bases: Vec<IupacBase>,
     cigar: Vec<CigarOp>,
     qual: Vec<u8>,
     aux: Vec<u8>,
@@ -702,27 +702,19 @@ impl<U> RecordStore<U> {
         #[allow(clippy::indexing_slicing, reason = "qname_actual_len ≤ qname_raw.len()")]
         self.names.extend_from_slice(&qname_raw[..qname_actual_len]);
 
-        // --- Write into bases slab (4-bit → Base via SIMD, direct-to-slab) ---
+        // --- Write into bases slab (4-bit codes via SIMD, direct-to-slab) ---
         // r[impl record_store.checked_offsets]
         let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let packed_seq = &raw[h.cigar_end..h.seq_end];
         let seq_len = h.seq_len as usize;
 
-        // Reserve space and decode directly into the slab's spare capacity.
-        self.bases.reserve(seq_len);
-        let bases_spare = self.bases.spare_capacity_mut();
-        // Safety: spare_capacity_mut returns at least seq_len bytes after reserve().
-        // decode_bases_into writes only valid Base discriminants (A=65,C=67,G=71,T=84,Unknown=78)
-        // as guaranteed by the DECODE_BASE_TYPED table invariant. Base is repr(u8).
-        // r[impl bam.record.seq_at_simd+2]
-        // r[depends base_decode.table_invariant]
-        unsafe {
-            let out = std::slice::from_raw_parts_mut(bases_spare.as_mut_ptr() as *mut u8, seq_len);
-            seq::decode_bases_into(packed_seq, seq_len, out);
-            self.bases.set_len(
-                self.bases.len().checked_add(seq_len).expect("bases slab length overflow"),
-            );
+        // r[impl bam.record.seq_at_simd+3]
+        // r[impl record_store.seq_lossless]
+        let start = self.bases.len();
+        self.bases.resize(start.saturating_add(seq_len), IupacBase::N);
+        if let Some(out) = self.bases.get_mut(start..) {
+            seq::decode_iupac_bases_into(packed_seq, out);
         }
 
         // --- Write into qual slab ---
@@ -884,7 +876,7 @@ impl<U> RecordStore<U> {
         // Bases slab
         // r[impl record_store.checked_offsets]
         let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        self.bases.extend(bases.iter().map(|b| b.to_base()));
+        self.bases.extend_from_slice(bases);
 
         // Cigar slab
         // r[impl record_store.checked_offsets]
@@ -1553,7 +1545,7 @@ impl<U> RecordStore<U> {
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub(crate) fn seq_of(&self, rec: &SlimRecord) -> &[Base] {
+    pub(crate) fn seq_of(&self, rec: &SlimRecord) -> &[IupacBase] {
         let start = rec.bases_off as usize;
         let end = start.checked_add(rec.seq_len as usize).expect("seq end overflow");
         debug_assert!(end <= self.bases.len(), "bases slab overrun: {end} > {}", self.bases.len());
@@ -1571,25 +1563,27 @@ impl<U> RecordStore<U> {
     /// Base and quality at `i` of the bases and qual slabs; `i` comes from
     /// [`Self::seq_qual_offsets`] plus a `qpos` the caller checked against
     /// the read's `seq_len`.
+    // r[impl pileup.base_from_iupac]
+    // r[impl base_decode.alignment+1]
     #[inline]
     pub(crate) fn base_qual_at_offsets(&self, base_i: usize, qual_i: usize) -> (Base, BaseQuality) {
-        let base = self.bases.get(base_i).copied().unwrap_or(Base::Unknown);
+        let base = self.bases.get(base_i).map_or(Base::Unknown, |b| b.to_base());
         let qual =
             self.qual.get(qual_i).map_or(BaseQuality::UNAVAILABLE, |&q| BaseQuality::from_byte(q));
         (base, qual)
     }
 
-    pub(crate) fn base_at_of(&self, rec: &SlimRecord, qpos: QPos) -> Base {
-        // Past the record's own bases is `Unknown`, not another record's base:
-        // the slab is shared, so the length has to be checked, not just the
+    pub(crate) fn base_at_of(&self, rec: &SlimRecord, qpos: QPos) -> IupacBase {
+        // Past the record's own bases is `N`, not another record's base: the
+        // slab is shared, so the length has to be checked, not just the
         // offset.
         if qpos.as_usize() >= rec.seq_len as usize {
-            return Base::Unknown;
+            return IupacBase::N;
         }
         self.bases
             .get((rec.bases_off as usize).saturating_add(qpos.as_usize()))
             .copied()
-            .unwrap_or(Base::Unknown)
+            .unwrap_or(IupacBase::N)
     }
 
     // r[impl types.base_quality.field_type]
@@ -2139,7 +2133,7 @@ pub(crate) mod tests {
         assert!(result.is_ok());
     }
 
-    // r[verify record_store.push_fields+2]
+    // r[verify record_store.push_fields+3]
     #[test]
     fn push_fields_rejects_qnames_longer_than_bam_allows() {
         use seqair_types::IupacBase;
@@ -3038,7 +3032,7 @@ pub(crate) mod tests {
         use super::super::*;
         use super::{AcceptFlag, AcceptFlagEarly, ObserveRaw, SeenFields};
         use hegel::prelude::*;
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
 
         /// A synthetic push input covering every slab. Fields are bounded to
         /// small sizes so the generator can produce long sequences without
@@ -3046,7 +3040,7 @@ pub(crate) mod tests {
         #[derive(Debug, Clone)]
         struct PushInput {
             qname: Vec<u8>,
-            bases: Vec<Base>,
+            bases: Vec<IupacBase>,
             quals: Vec<u8>,
             aux: Vec<u8>,
             pos: u32,
@@ -3082,8 +3076,6 @@ pub(crate) mod tests {
             }
         }
 
-        const ALL_BASES: [Base; 5] = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
-
         #[hegel::composite]
         fn arb_push_input(tc: &TestCase) -> PushInput {
             // qname: 1..16 ASCII bytes without NUL
@@ -3091,8 +3083,9 @@ pub(crate) mod tests {
                 gs::vecs(gs::integers::<u8>().min_value(1).max_value(126)).min_size(1).max_size(16),
             );
             // bases: 1..16 bases (non-empty so qual len matches)
-            let bases =
-                tc.draw_silent(gs::vecs(gs::sampled_from(&ALL_BASES)).min_size(1).max_size(16));
+            let bases = tc.draw_silent(
+                gs::vecs(gs::sampled_from(&IupacBase::ALL[..])).min_size(1).max_size(16),
+            );
             // aux: 0..32 bytes (NOT parsed, so any bytes OK)
             let aux = tc.draw_silent(gs::binary().max_size(32));
             let pos = tc.draw_silent(gs::integers::<u32>().max_value(999_999));
@@ -3135,7 +3128,7 @@ pub(crate) mod tests {
                     0,
                     &input.qname,
                     &cigar,
-                    &crate::bam::test_util::iupac(&input.bases),
+                    &input.bases,
                     &input.quals,
                     &input.aux,
                     Some(crate::bam::test_util::tid(0)),
@@ -3155,7 +3148,7 @@ pub(crate) mod tests {
 
         /// Snapshot of all slab contents + record/extras counts — used by the
         /// rollback property as the equivalence model.
-        type SlabSnapshot = (usize, Vec<u8>, Vec<Base>, Vec<CigarOp>, Vec<u8>, Vec<u8>, usize);
+        type SlabSnapshot = (usize, Vec<u8>, Vec<IupacBase>, Vec<CigarOp>, Vec<u8>, Vec<u8>, usize);
 
         fn dump_slabs(store: &RecordStore<()>) -> SlabSnapshot {
             (

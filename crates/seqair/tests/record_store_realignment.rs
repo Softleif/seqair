@@ -24,7 +24,7 @@ use helpers::tid;
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{DecodeError, MateFields, Pos0};
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -327,7 +327,7 @@ fn set_alignment_preserves_other_fields() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
-    let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
+    let orig_seq: Vec<IupacBase> = store.record(idx).unwrap().seq().to_vec();
     let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
     let orig_aux: Vec<u8> = store.record(idx).unwrap().aux().to_vec();
     let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
@@ -570,7 +570,7 @@ fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
-    let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
+    let orig_seq: Vec<IupacBase> = store.record(idx).unwrap().seq().to_vec();
     let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
     let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
 
@@ -693,7 +693,7 @@ fn realignment_workflow_with_real_bam() {
 
     // "Realign" the first record by shifting it 10bp left with same cigar
     let orig_cigar = store.record(ri(0)).unwrap().cigar().to_vec();
-    let orig_seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
+    let orig_seq: Vec<IupacBase> = store.record(ri(0)).unwrap().seq().to_vec();
     let orig_qual: Vec<BaseQuality> = store.record(ri(0)).unwrap().qual().to_vec();
     let orig_pos = store.record(ri(0)).unwrap().pos;
 

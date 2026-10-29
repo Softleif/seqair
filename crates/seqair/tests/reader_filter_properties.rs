@@ -46,7 +46,7 @@ use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0};
 use seqair::reader::{FetchCounts, Readers};
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -167,7 +167,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
     for (i, read) in reads.iter().enumerate() {
         // Distinct bases per record, so a slab that is truncated to the wrong
         // length shows up as the wrong sequence rather than the same one.
-        let base = [Base::A, Base::C, Base::G, Base::T][i % 4];
+        let base = [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T][i % 4];
         let mut aux = seqair::bam::aux_data::AuxData::new();
         if let Some(nm) = read.nm {
             aux.set_int(*b"NM", i64::from(nm)).expect("a small non-negative int");
@@ -429,7 +429,7 @@ struct Snapshot {
     next_pos: Option<Pos0>,
     template_len: Option<std::num::NonZeroI32>,
     qname: Vec<u8>,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<u8>,
     cigar: Vec<CigarOp>,
     aux: Vec<u8>,

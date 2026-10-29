@@ -10,7 +10,7 @@
 
 use fearless_simd::{Level, dispatch, prelude::*};
 use fearless_simd_macros::simd;
-use seqair_types::{Base, ModProbability, QPos};
+use seqair_types::{Base, IupacBase, ModProbability, QPos};
 use thiserror::Error;
 
 use super::aux::{AuxValue, GetAuxError, find_tag};
@@ -136,7 +136,7 @@ impl BaseModState {
     pub fn parse(
         mm: &[u8],
         ml: &[u8],
-        seq: &[Base],
+        seq: &[IupacBase],
         is_reverse: bool,
     ) -> Result<Self, BaseModError> {
         let mut state = BaseModState::default();
@@ -307,7 +307,7 @@ fn split_entry(mm: &[u8]) -> Result<(&[u8], &[u8]), BaseModError> {
 #[allow(clippy::too_many_arguments, reason = "parser scratch state")]
 fn parse_entry(
     entry: &[u8],
-    seq: &[Base],
+    seq: &[IupacBase],
     is_reverse: bool,
     ml: &[u8],
     ml_cursor: &mut usize,
@@ -441,7 +441,7 @@ fn resolve_and_emit(
     mode: ModMode,
     deltas: &[u32],
     ml_slice: &[u8],
-    seq: &[Base],
+    seq: &[IupacBase],
     is_reverse: bool,
     pending: &mut Vec<(u32, Modification)>,
     state: &mut BaseModState,
@@ -507,9 +507,10 @@ struct TargetBits {
 }
 
 impl TargetBits {
-    fn of(&mut self, seq: &[Base], target: Base) -> &[u64] {
+    fn of(&mut self, seq: &[IupacBase], target: Base) -> &[u64] {
         if self.target != Some(target) {
-            target_bits(Level::new(), bytemuck::cast_slice(seq), target as u8, &mut self.words);
+            let code = IupacBase::from(target).code();
+            target_bits(Level::new(), bytemuck::cast_slice(seq), code, &mut self.words);
             self.target = Some(target);
         }
         &self.words
@@ -650,8 +651,8 @@ mod tests {
     use crate::bam::test_util::tid;
     use seqair_types::Base::{A, C, G, T};
 
-    fn seq(bases: &[Base]) -> Vec<Base> {
-        bases.to_vec()
+    fn seq(bases: &[Base]) -> Vec<IupacBase> {
+        crate::bam::test_util::iupac(bases)
     }
 
     // r[verify base_mod.parse_mm]
@@ -997,7 +998,7 @@ mod tests {
 
         let from_rec =
             BaseModState::from_record(rec, &store).unwrap().expect("MM tag present, expected Some");
-        let expected = BaseModState::parse(b"C+m,0,2;", &[200, 180], &bases, false).unwrap();
+        let expected = BaseModState::parse(b"C+m,0,2;", &[200, 180], &seq(&bases), false).unwrap();
 
         assert_eq!(from_rec.len(), expected.len());
         let m_from = from_rec.mod_at_qpos(QPos::new(1)).unwrap();
@@ -1298,10 +1299,12 @@ mod tests {
     #[hegel::test]
     fn resolved_positions_match_occurrence_oracle(tc: TestCase) {
         use std::fmt::Write as _;
-        let seq: Vec<Base> = tc
-            .draw(gs::vecs(gs::integers::<u8>().max_value(4)).max_size(300))
+        // Every code, so ambiguity codes and `=` are drawn too: none of them
+        // is an occurrence of A, C, G or T.
+        let seq: Vec<IupacBase> = tc
+            .draw(gs::vecs(gs::integers::<u8>().max_value(15)).max_size(300))
             .into_iter()
-            .map(|i| [A, C, G, T, Base::Unknown][usize::from(i)])
+            .map(IupacBase::from_nibble)
             .collect();
         let is_reverse = tc.draw(gs::booleans());
         let overflow = tc.draw(gs::booleans());
@@ -1309,6 +1312,7 @@ mod tests {
         // Occurrences of `canonical` in original-read order, as stored indices.
         let occurrences = |canonical: Base| -> Vec<usize> {
             let target = if is_reverse { canonical.inverse() } else { canonical };
+            let target = IupacBase::from(target);
             let hits = seq.iter().enumerate().filter(|(_, b)| **b == target).map(|(i, _)| i);
             if is_reverse { hits.rev().collect() } else { hits.collect() }
         };

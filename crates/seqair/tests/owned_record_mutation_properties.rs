@@ -49,7 +49,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
 use seqair::bam::writer::BamWriterBuilder;
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -170,7 +170,7 @@ fn arb_aux(tc: &TestCase) -> Aux {
 #[derive(Debug, Clone)]
 enum Op {
     Resize {
-        seq: Vec<Base>,
+        seq: Vec<IupacBase>,
         qual: Vec<u8>,
     },
     /// New quality values at the current length, whatever that has become.
@@ -194,7 +194,7 @@ enum Op {
 /// What the record must look like after the ops applied so far.
 #[derive(Debug, Clone, Default)]
 struct Model {
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     /// Empty means "no quality array", which BAM writes as 0xFF fill and
     /// samtools prints as `*`.
     qual: Vec<u8>,
@@ -202,8 +202,8 @@ struct Model {
     aux: BTreeMap<[u8; 2], Aux>,
 }
 
-fn base_of(tc: &TestCase) -> Base {
-    tc.draw_silent(gs::sampled_from(&[Base::A, Base::C, Base::G, Base::T, Base::Unknown]))
+fn base_of(tc: &TestCase) -> IupacBase {
+    tc.draw_silent(gs::sampled_from(&IupacBase::ALL[..]))
 }
 
 #[hegel::composite]
@@ -344,7 +344,7 @@ fn expected_line(step: usize, model: &Model) -> Line {
         seq: if model.seq.is_empty() {
             "*".to_string()
         } else {
-            model.seq.iter().map(|b| **b as char).collect()
+            model.seq.iter().map(|b| char::from(b.to_ascii())).collect()
         },
         // An absent quality array is written as 0xFF fill, which samtools
         // prints as `*` — the same spelling an absent sequence gets.
@@ -526,7 +526,7 @@ fn a_rejected_set_int_leaves_the_aux_block_byte_identical(tc: TestCase) {
 #[hegel::test]
 fn a_rejected_set_qual_leaves_the_old_scores_in_place(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(12));
-    let seq: Vec<Base> = (0..n).map(|_| base_of(&tc)).collect();
+    let seq: Vec<IupacBase> = (0..n).map(|_| base_of(&tc)).collect();
     let qual: Vec<u8> =
         (0..n).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(40))).collect();
 
@@ -614,7 +614,7 @@ fn draw_alignment(tc: &TestCase, qlen: u32) -> Alignment {
 /// A record and the realignment it is about to be given.
 #[derive(Debug, Clone)]
 struct Realignment {
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     before: Alignment,
     after: Alignment,
 }
@@ -758,7 +758,8 @@ fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
 #[test]
 fn a_resize_without_its_qual_refuses_to_serialize() {
     let mut rec = seed_record();
-    rec.set_seq(vec![Base::A, Base::C, Base::G, Base::T]).expect("no CIGAR to disagree with");
+    rec.set_seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T])
+        .expect("no CIGAR to disagree with");
     rec.set_qual(vec![BaseQuality::from_byte(30); 4]).expect("matches the sequence");
 
     let mut buf = Vec::new();
@@ -768,7 +769,8 @@ fn a_resize_without_its_qual_refuses_to_serialize() {
     };
 
     // Grow the sequence and stop there, which is the state `set_seq` leaves.
-    rec.set_seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A]).expect("still no CIGAR");
+    rec.set_seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
+        .expect("still no CIGAR");
 
     buf.clear();
     let err = rec.to_bam_bytes(&mut buf).expect_err("seq and qual no longer agree");

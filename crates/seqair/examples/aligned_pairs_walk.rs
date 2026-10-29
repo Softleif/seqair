@@ -47,7 +47,7 @@ use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::{AlignedPair, AlignedPairWithRef, MatchKind, RecordStore, RefSeq};
 use seqair::reader::{Readers, ResolveTid};
-use seqair_types::{Base, RegionString};
+use seqair_types::{Base, IupacBase, RegionString};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -162,6 +162,7 @@ fn main() -> anyhow::Result<()> {
             else {
                 continue;
             };
+            let query = query.to_base();
 
             if rb == Base::C && query == Base::T && qual.get().unwrap_or(0) >= args.min_qual {
                 counts.methylation_calls += 1;
@@ -214,7 +215,7 @@ fn count_indels_per_record(
 fn collect_insertions(
     rec: &seqair::bam::record_store::SlimRecord,
     store: &RecordStore<()>,
-) -> anyhow::Result<Vec<(u32, Vec<Base>)>> {
+) -> anyhow::Result<Vec<(u32, Vec<IupacBase>)>> {
     use seqair::bam::AlignedPairWithRead;
     let mut out = Vec::new();
     for ev in rec.aligned_pairs_with_read(store)? {

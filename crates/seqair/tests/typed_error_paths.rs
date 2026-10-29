@@ -43,7 +43,7 @@ use seqair::vcf::{
 };
 use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
-use seqair_types::{Base, BaseQuality, Pos1};
+use seqair_types::{Base, BaseQuality, IupacBase, Pos1};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -125,12 +125,12 @@ fn corpus() -> &'static Corpus {
             state
         };
         for i in 0..1500u32 {
-            let seq: Vec<Base> = (0..100)
+            let seq: Vec<IupacBase> = (0..100)
                 .map(|_| match (next() >> 28) & 3 {
-                    0 => Base::A,
-                    1 => Base::C,
-                    2 => Base::G,
-                    _ => Base::T,
+                    0 => IupacBase::A,
+                    1 => IupacBase::C,
+                    2 => IupacBase::G,
+                    _ => IupacBase::T,
                 })
                 .collect();
             let qual: Vec<BaseQuality> =
@@ -465,7 +465,7 @@ fn mapped_record(on_chr1: bool, pos: u32, name: &str, len: usize) -> OwnedBamRec
     .flags(BamFlags::empty())
     .mapq(MappingQuality::from_byte(60))
     .cigar(vec![CigarOp::new(CigarOpType::Match, len as u32)])
-    .seq(vec![Base::A; len])
+    .seq(vec![IupacBase::A; len])
     .qual(vec![BaseQuality::from_byte(30); len])
     .build()
     .unwrap()
@@ -563,11 +563,11 @@ fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() 
     let mut record =
         OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
             .flags(BamFlags::from(4))
-            .seq(vec![Base::A; 10])
+            .seq(vec![IupacBase::A; 10])
             .qual(vec![BaseQuality::from_byte(30); 10])
             .build()
             .unwrap();
-    record.set_seq(vec![Base::C; 4]).expect("no CIGAR to contradict the new length");
+    record.set_seq(vec![IupacBase::C; 4]).expect("no CIGAR to contradict the new length");
 
     let (err, actual) = rejected_write(dir.path(), |writer| {
         writer.write(&record).expect_err("seq/qual must agree at serialization time")
@@ -710,11 +710,11 @@ impl WriteFailure {
                     b"shrunk".to_vec(),
                 )
                 .flags(BamFlags::from(4))
-                .seq(vec![Base::A; 10])
+                .seq(vec![IupacBase::A; 10])
                 .qual(vec![BaseQuality::from_byte(30); 10])
                 .build()
                 .unwrap();
-                record.set_seq(vec![Base::C; 4]).unwrap();
+                record.set_seq(vec![IupacBase::C; 4]).unwrap();
                 record
             }
             // Position 1 is behind whatever the property already wrote.

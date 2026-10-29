@@ -15,7 +15,7 @@
 )]
 
 mod helpers;
-use helpers::{iupac, ri};
+use helpers::ri;
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::aux_data::AuxData;
@@ -27,7 +27,7 @@ use seqair::bam::{IndexedBamReader, MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{BaseQuality, IupacBase};
 use std::path::Path;
 use std::process::Command;
 
@@ -95,16 +95,16 @@ fn roundtrip_simple_records() {
             .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
             ])
             .qual([30, 31, 32, 33, 34, 35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
             .build()
@@ -113,7 +113,16 @@ fn roundtrip_simple_records() {
             .flags(BamFlags::from(16)) // reverse
             .mapq(MappingQuality::from_byte(50))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 8)])
-            .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G, Base::C, Base::A])
+            .seq(vec![
+                IupacBase::T,
+                IupacBase::G,
+                IupacBase::C,
+                IupacBase::A,
+                IupacBase::T,
+                IupacBase::G,
+                IupacBase::C,
+                IupacBase::A,
+            ])
             .qual([40, 41, 42, 43, 44, 45, 46, 47].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap(),
@@ -160,21 +169,21 @@ fn roundtrip_complex_cigars() {
 
     // 2S3M1I4M1D3M2S — query length = 2+3+1+4+3+2 = 15
     let seq = vec![
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
     ];
 
     let records = vec![
@@ -204,7 +213,16 @@ fn roundtrip_complex_cigars() {
                 CigarOp::new(CigarOpType::Match, 5),
                 CigarOp::new(CigarOpType::HardClip, 3),
             ])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A, Base::C, Base::G, Base::T])
+            .seq(vec![
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+            ])
             .qual(vec![BaseQuality::from_byte(35); 8])
             .build()
             .unwrap(),
@@ -217,18 +235,18 @@ fn roundtrip_complex_cigars() {
                 CigarOp::new(CigarOpType::SeqMatch, 4),
             ])
             .seq(vec![
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
+                IupacBase::A,
+                IupacBase::C,
+                IupacBase::G,
+                IupacBase::T,
             ])
             .qual(vec![BaseQuality::from_byte(40); 12])
             .build()
@@ -320,7 +338,7 @@ fn roundtrip_aux_tags() {
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"aux_read".to_vec())
             .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .aux(aux)
             .build()
@@ -351,14 +369,21 @@ fn roundtrip_multiple_contigs() {
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"chr1_read".to_vec())
             .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
             .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(1)), Some(Pos0::new(200).unwrap()), b"chr2_read".to_vec())
             .mapq(MappingQuality::from_byte(50))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 6)])
-            .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G])
+            .seq(vec![
+                IupacBase::T,
+                IupacBase::G,
+                IupacBase::C,
+                IupacBase::A,
+                IupacBase::T,
+                IupacBase::G,
+            ])
             .qual(vec![BaseQuality::from_byte(35); 6])
             .build()
             .unwrap(),
@@ -408,13 +433,13 @@ fn index_coproduction_matches_samtools() {
                 (0..100)
                     .map(|j| {
                         if j % 4 == 0 {
-                            Base::A
+                            IupacBase::A
                         } else if j % 4 == 1 {
-                            Base::C
+                            IupacBase::C
                         } else if j % 4 == 2 {
-                            Base::G
+                            IupacBase::G
                         } else {
-                            Base::T
+                            IupacBase::T
                         }
                     })
                     .collect(),
@@ -459,7 +484,7 @@ fn index_coproduction_matches_samtools() {
 fn roundtrip_paired_end() {
     let dir = tempfile::tempdir().unwrap();
 
-    let seq5 = vec![Base::A, Base::C, Base::G, Base::T, Base::A];
+    let seq5 = vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A];
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"pair1".to_vec())
             .flags(BamFlags::from(99)) // paired, proper, mate reverse, read1
@@ -509,13 +534,15 @@ fn roundtrip_paired_end() {
 
 /// `write_store_record`: write via `RecordStore`, validate with samtools + noodles.
 // r[verify bam_writer.test_store_roundtrip]
+// r[verify bam_writer.write_store_record+1]
 #[test]
 fn roundtrip_write_store_record() {
     let dir = tempfile::tempdir().unwrap();
     let header = make_header();
 
-    // Build OwnedBamRecords, serialize to raw BAM, push into RecordStore
-    let seq5 = vec![Base::A, Base::C, Base::G, Base::T, Base::A];
+    // Build OwnedBamRecords, serialize to raw BAM, push into RecordStore.
+    // `=` and ambiguity codes, which the writer keeps.
+    let seq5 = IupacBase::from_ascii_slice(b"A=RYN");
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"sr1".to_vec())
             .flags(BamFlags::from(99))
@@ -593,6 +620,14 @@ fn roundtrip_write_store_record() {
     assert_eq!(r2.name().map(|n| n.to_vec()).unwrap(), b"sr1");
     assert_eq!(r2.alignment_start().unwrap().unwrap().get(), 301); // 1-based
     assert!(r2.flags().is_last_segment());
+    for r in &noodles_recs {
+        assert_eq!(r.sequence().iter().collect::<Vec<u8>>(), b"A=RYN");
+    }
+    let view = Command::new("samtools").arg("view").arg(&bam_path).output().unwrap();
+    assert!(view.status.success());
+    for line in String::from_utf8(view.stdout).unwrap().lines() {
+        assert_eq!(line.split('\t').nth(9), Some("A=RYN"), "samtools view: {line}");
+    }
 
     // Read back via seqair and compare field-by-field with original store
     let mut store2 = RecordStore::new();
@@ -643,6 +678,72 @@ fn roundtrip_write_store_record() {
     }
 }
 
+/// Every BAM record of `bytes`, as read off the wire.
+fn raw_records(bytes: &[u8]) -> Vec<seqair::bam::RawBamRecord> {
+    let mut reader = seqair::bam::stream::BamStreamReader::new(bytes).unwrap();
+    let mut out = Vec::new();
+    let mut record = seqair::bam::RawBamRecord::default();
+    while reader.read_record(&mut record).unwrap() {
+        out.push(record.clone());
+    }
+    out
+}
+
+// r[verify bam_writer.write_store_record+1]
+// r[verify record_store.seq_lossless]
+/// Records holding every code, of odd and even lengths around the SIMD
+/// widths and with `SEQ=*`, written by `write`, loaded by `fetch_into` and
+/// written again by `write_store_record`, carry the packed SEQ bytes they
+/// started with.
+#[hegel::test]
+fn write_store_record_keeps_seq_bytes(tc: hegel::TestCase) {
+    use hegel::generators as gs;
+    let n = tc.draw(gs::integers::<u32>().min_value(1).max_value(8));
+    let records: Vec<OwnedBamRecord> = (0..n)
+        .map(|i| {
+            // The length drawn as an integer: hegel keeps a vector's own size short.
+            let len = tc.draw(gs::integers::<u32>().max_value(300));
+            let seq: Vec<IupacBase> =
+                (0..len).map(|_| tc.draw(gs::sampled_from(&IupacBase::ALL[..]))).collect();
+            let qual = vec![BaseQuality::from_byte(30); seq.len()];
+            OwnedBamRecord::builder(
+                Some(tid(0)),
+                Some(Pos0::new(i * 500).unwrap()),
+                format!("r{i}").into_bytes(),
+            )
+            .mapq(MappingQuality::from_byte(60))
+            // `SEQ=*` keeps its alignment.
+            .cigar(vec![CigarOp::new(CigarOpType::Match, if len == 0 { 10 } else { len })])
+            .seq(seq)
+            .qual(qual)
+            .build()
+            .unwrap()
+        })
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_bam(dir.path(), &records);
+
+    let mut store = RecordStore::new();
+    let mut reader = IndexedBamReader::open(&path).unwrap();
+    let chr1 = reader.header().tid("chr1").unwrap();
+    reader
+        .fetch_into(chr1, (Pos0::new(0).unwrap()..=Pos0::new(99_999).unwrap()).into(), &mut store)
+        .unwrap();
+    let mut writer = BamWriterBuilder::to_writer(Vec::new(), &make_header()).build().unwrap();
+    for i in store.indices() {
+        writer.write_store_record(&store, i).unwrap();
+    }
+    let (rewritten, _) = writer.finish().unwrap();
+
+    let read = raw_records(&std::fs::read(&path).unwrap());
+    let rewritten = raw_records(&rewritten);
+    assert_eq!(rewritten.len(), read.len());
+    for (a, b) in read.iter().zip(&rewritten) {
+        assert_eq!(b.seq_len(), a.seq_len(), "{:?}", a.qname());
+        assert_eq!(b.packed_seq(), a.packed_seq(), "{:?}", a.qname());
+    }
+}
+
 // ---- Independent oracle (C): end-to-end push_fields → BamWriter → IndexedBamReader ----
 //
 // Push synthetic inputs into a RecordStore via push_fields, write to a temp
@@ -658,20 +759,20 @@ mod e2e_oracle {
     #[derive(Debug, Clone)]
     struct E2eInput {
         qname: Vec<u8>,
-        bases: Vec<Base>,
+        bases: Vec<IupacBase>,
         quals: Vec<u8>,
         pos: u32,
         mapq: u8,
     }
-
-    const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
 
     #[hegel::composite]
     fn arb_e2e_input(tc: &TestCase) -> E2eInput {
         let qname = tc.draw_silent(
             gs::vecs(gs::integers::<u8>().min_value(b'a').max_value(b'z')).min_size(1).max_size(12),
         );
-        let bases = tc.draw_silent(gs::vecs(gs::sampled_from(&ACGT)).min_size(1).max_size(12));
+        // Every code: the store and the writer keep them all.
+        let bases = tc
+            .draw_silent(gs::vecs(gs::sampled_from(&IupacBase::ALL[..])).min_size(1).max_size(12));
         let pos = tc.draw_silent(gs::integers::<u32>().max_value(49_999));
         let mapq = tc.draw_silent(gs::integers::<u8>().max_value(60));
         let quals = bases.iter().map(|_| 30u8).collect();
@@ -701,7 +802,7 @@ mod e2e_oracle {
                     0,
                     &inp.qname,
                     &cigar,
-                    &iupac(&inp.bases),
+                    &inp.bases,
                     &inp.quals,
                     &[],          // no aux
                     Some(tid(0)), // tid

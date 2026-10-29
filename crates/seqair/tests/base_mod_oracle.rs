@@ -29,7 +29,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{BaseModState, ModType};
-use seqair_types::{BamFlags, Base, BaseQuality, QPos};
+use seqair_types::{BamFlags, BaseQuality, IupacBase, QPos};
 const FLAG_REVERSE: u16 = 0x10;
 use std::path::Path;
 
@@ -63,14 +63,14 @@ fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     bam_path
 }
 
-fn reverse_complement(seq: &[Base]) -> Vec<Base> {
-    seq.iter().rev().map(|b| b.inverse()).collect()
+fn reverse_complement(seq: &[IupacBase]) -> Vec<IupacBase> {
+    seq.iter().rev().map(|b| b.complement()).collect()
 }
 
 fn build_record(
     pos: u32,
     qname: &[u8],
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     cigar: Vec<CigarOp>,
     mm: &[u8],
     ml: &[u8],
@@ -175,22 +175,22 @@ fn forward_strand_matches_htslib() {
     //   A C G T A C G C G A C G T C G T
     //   0 1 2 3 4 5 6 7 8 9 ...
     let seq = vec![
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::C,
-        Base::G,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::C,
-        Base::G,
-        Base::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
     ];
     let rec = build_record(
         100,
@@ -220,22 +220,22 @@ fn reverse_strand_matches_htslib() {
     let dir = tempfile::tempdir().unwrap();
     // Original (unreversed) 5'→3' sequence with C's at original pos 1, 5, 7, 13.
     let original = vec![
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::C,
-        Base::G,
-        Base::A,
-        Base::C,
-        Base::G,
-        Base::T,
-        Base::C,
-        Base::G,
-        Base::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
+        IupacBase::C,
+        IupacBase::G,
+        IupacBase::T,
     ];
     // BAM stores the sequence reverse-complemented for reverse-strand alignments.
     let stored = reverse_complement(&original);
@@ -266,16 +266,16 @@ fn combined_codes_match_htslib() {
     let dir = tempfile::tempdir().unwrap();
     // 5 C's at qpos 1, 3, 5, 7, 9.
     let seq = vec![
-        Base::A,
-        Base::C,
-        Base::A,
-        Base::C,
-        Base::A,
-        Base::C,
-        Base::A,
-        Base::C,
-        Base::A,
-        Base::C,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::A,
+        IupacBase::C,
+        IupacBase::A,
+        IupacBase::C,
     ];
     let rec = build_record(
         100,

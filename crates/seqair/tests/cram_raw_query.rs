@@ -23,7 +23,7 @@ use seqair::bam::{RawBamRecord, RecordStore};
 use seqair::cram::stream::{CramStreamError, CramStreamReader};
 use seqair::reader::{IndexPath, IndexedReader, ReaderError, ResolveTid};
 use seqair::sam::encode::RecordEncodeError;
-use seqair_types::Pos0;
+use seqair_types::{IupacBase, Pos0};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -334,6 +334,47 @@ fn raw_regions_are_the_streamed_records(tc: TestCase) {
         }
         tc.event_value("records", got.len() as f64);
     }
+}
+
+// r[verify record_store.seq_lossless]
+// r[verify cram.stream.iupac+1]
+// r[verify cram.record.no_ref_fill+1]
+/// `fetch_into` keeps each record's SEQ as `query_raw` of the same region
+/// yields it, code for code: one decode rebuilds both. Every reference of
+/// every fixture, whole (IUPAC codes, `no_ref`'s `=`, embedded references,
+/// multi-reference slices, v3.0 and v3.1, the generated shapes).
+#[test]
+fn fetched_seq_is_the_raw_querys() {
+    let mut ambiguous = 0;
+    for f in fixtures() {
+        let mut reader = f.open();
+        let header = reader.header().clone();
+        for tid in 0..header.target_count() as u32 {
+            let resolved = tid.resolve_tid(&header).unwrap();
+            let s = span(0, header.target_len(resolved).unwrap() as u32 - 1);
+            let mut store = RecordStore::new();
+            reader.fetch_into(resolved, s, &mut store).unwrap();
+            let fetched: Vec<(Vec<u8>, Vec<IupacBase>)> = store
+                .indices()
+                .map(|i| {
+                    let r = store.record(i).unwrap();
+                    (r.qname().to_vec(), r.seq().to_vec())
+                })
+                .collect();
+            let queried: Vec<(Vec<u8>, Vec<IupacBase>)> = query(&mut reader, tid, s)
+                .iter()
+                .map(|r| (r.qname().to_vec(), r.iupac_bases().collect()))
+                .collect();
+            let name = header.target_name(resolved).unwrap();
+            assert!(fetched == queried, "{} {name}", f.name());
+            ambiguous += fetched
+                .iter()
+                .flat_map(|(_, seq)| seq)
+                .filter(|b| b.to_base() == seqair_types::Base::Unknown && **b != IupacBase::N)
+                .count();
+        }
+    }
+    assert!(ambiguous > 0, "the fixtures hold `=` or ambiguity codes");
 }
 
 // r[verify cram.query_raw.htslib]

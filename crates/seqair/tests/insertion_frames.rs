@@ -15,7 +15,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{PileupEngine, PileupOp};
 use seqair::bam::record_store::RecordStore;
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, Pos0};
+use seqair_types::{BamFlags, Base, IupacBase, Pos0};
 
 /// `<lead>M <ins>I <trail>M` at `pos`, sequence all `A` except the inserted run.
 fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStore {
@@ -114,7 +114,7 @@ fn inserted_bases_start_at_the_aligned_pairs_frame(tc: TestCase) {
     let trail = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
     let store = store_with_insertion(10, lead, ins, trail);
     let first_inserted = first_inserted_from_pairs(&store) as usize;
-    let seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
+    let seq: Vec<IupacBase> = store.record(ri(0)).unwrap().seq().to_vec();
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,

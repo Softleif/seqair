@@ -1,4 +1,4 @@
-//! Tests for Base-typed sequence decoding.
+//! Tests for how SEQ is stored (as `IupacBase`) and read by the pileup (as `Base`).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -15,12 +15,12 @@
 mod helpers;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::Base;
 use seqair_types::QPos;
+use seqair_types::{Base, IupacBase};
 use std::num::NonZeroU32;
 
-// r[verify base_decode.table]
-// r[verify base_decode.decode+2]
+// r[verify base_decode.slab+1]
+// r[verify record_store.seq_lossless]
 #[test]
 fn decode_standard_bases() {
     // packed_seq: 0x12 = A(1)|C(2), 0x48 = G(4)|T(8) → ACGT
@@ -28,57 +28,34 @@ fn decode_standard_bases() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::A);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::C);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), Base::G);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), Base::T);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), IupacBase::A);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), IupacBase::C);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), IupacBase::G);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), IupacBase::T);
 }
 
-// r[verify base_decode.table]
+// r[verify base_decode.slab+1]
+// r[verify record_store.seq_lossless]
 #[test]
-fn decode_unknown_and_n() {
-    // nibble 0 (=) and nibble 15 (N) both map to Base::Unknown
-    // 0x0F = =(0)|N(15)
-    let raw = make_record(&[0x0F], 2);
+fn decode_keeps_eq_n_and_ambiguity_codes() {
+    // 0x0F = =(0)|N(15), 0x35 = M(3)|R(5)
+    let raw = make_record(&[0x0F, 0x35], 4);
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
+    let rec = store.record(idx).unwrap();
+    assert_eq!(rec.seq(), &[IupacBase::Eq, IupacBase::N, IupacBase::M, IupacBase::R]);
+    assert_eq!(rec.base_at(QPos::new(4)), IupacBase::N, "past the read");
 }
 
-// r[verify base_decode.table]
+// r[verify base_decode.alignment+1]
+// r[verify pileup.base_from_iupac]
 #[test]
-fn decode_iupac_ambiguity_maps_to_unknown() {
-    // nibble 3 = M (IUPAC A|C), nibble 5 = R (IUPAC A|G) → both Unknown
-    // 0x35 = M(3)|R(5)
-    let raw = make_record(&[0x35], 2);
-    let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
-
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
-}
-
-// r[verify base_decode.slab]
-#[test]
-fn bases_stored_in_separate_slab() {
-    let raw = make_record(&[0x12, 0x48], 4);
-    let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
-
-    // Access the full base slice — should be 4 Base values
-    let bases = store.record(idx).unwrap().seq();
-    assert_eq!(bases.len(), 4);
-    assert_eq!(bases, &[Base::A, Base::C, Base::G, Base::T]);
-}
-
-// r[verify base_decode.alignment]
-#[test]
-fn pileup_alignment_has_base_type() {
+fn pileup_converts_codes_to_base() {
     use seqair::bam::{pileup::PileupEngine, record_store::RecordStore};
 
-    let raw = make_record(&[0x12, 0x48], 4);
+    // A, =, M, T
+    let raw = make_record(&[0x10, 0x38], 4);
     let mut store = RecordStore::new();
     store.push_raw(&raw, helpers::header(), &mut ()).unwrap();
 
@@ -88,12 +65,13 @@ fn pileup_alignment_has_base_type() {
     );
     engine.set_max_depth(NonZeroU32::new(1000).unwrap());
 
-    let col = engine.pileups().expect("should have a column");
-    let aln = col.alignments().next().expect("should have an alignment");
-
-    // aln.base() returns Option<Base> — this verifies the type via the convenience method
-    let base: Base = aln.base().unwrap();
-    assert!(matches!(base, Base::A | Base::C | Base::G | Base::T | Base::Unknown));
+    let mut bases = Vec::new();
+    while let Some(col) = engine.pileups() {
+        let aln = col.alignments().next().expect("should have an alignment");
+        let base: Base = aln.base().unwrap();
+        bases.push(base);
+    }
+    assert_eq!(bases, [Base::A, Base::Unknown, Base::Unknown, Base::T]);
 }
 
 /// Build a minimal raw BAM record for testing sequence decoding.

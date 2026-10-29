@@ -232,16 +232,16 @@ fn rans_nx16_order0(c: &mut Criterion) {
 /// A random read with an ONT-style `C+h?;C+m?;` pair over the Cs a caller
 /// picked with probability `1 / every`: `every = 4` is about what a CpG-only
 /// caller does on random sequence, `every = 20` on CpG-depleted human DNA.
-fn modbam_record(len: usize, every: u8, seed: u64) -> (Vec<Base>, Vec<u8>, Vec<u8>) {
-    let seq: Vec<Base> = bytes(len, seed)
+fn modbam_record(len: usize, every: u8, seed: u64) -> (Vec<IupacBase>, Vec<u8>, Vec<u8>) {
+    let seq: Vec<IupacBase> = bytes(len, seed)
         .iter()
-        .map(|b| [Base::A, Base::C, Base::G, Base::T][*b as usize % 4])
+        .map(|b| [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T][*b as usize % 4])
         .collect();
     let pick = bytes(len, seed ^ 0x55);
     let mut deltas = Vec::new();
     let mut skipped = 0u32;
     for (b, p) in seq.iter().zip(&pick) {
-        if *b != Base::C {
+        if *b != IupacBase::C {
             continue;
         }
         if p % every == 0 {
@@ -276,7 +276,7 @@ fn base_mod_parse(c: &mut Criterion) {
             });
             // The same deltas resolved against the reverse complement: the
             // walk runs from the end of the stored read towards its start.
-            let rc: Vec<Base> = seq.iter().rev().map(Base::inverse).collect();
+            let rc: Vec<IupacBase> = seq.iter().rev().map(|b| b.complement()).collect();
             group.bench_with_input(BenchmarkId::new("reverse", &id), &(), |b, _| {
                 b.iter(|| {
                     BaseModState::parse(black_box(&mm), black_box(&ml), black_box(&rc), true)

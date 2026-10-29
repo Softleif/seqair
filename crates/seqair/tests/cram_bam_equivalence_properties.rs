@@ -148,7 +148,7 @@ fn read_all(path: &Path, fasta: &Path) -> Vec<Decoded> {
         .map(|idx| {
             let rec = store.record(idx).unwrap();
             let cigar = rec.cigar().iter().map(ToString::to_string).collect::<String>();
-            let seq: Vec<u8> = rec.seq().iter().map(|b| **b).collect();
+            let seq: Vec<u8> = rec.seq().iter().map(|b| b.to_ascii()).collect();
             let qual = seqair_types::BaseQuality::slice_to_bytes(rec.qual()).to_vec();
             Decoded {
                 qname: rec.qname().to_vec(),

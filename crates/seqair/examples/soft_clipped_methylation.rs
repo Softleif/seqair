@@ -13,7 +13,7 @@ use seqair::{
     bam::{AlignedPairWithRead, RecordStore},
     reader::{Segment, SegmentOptions},
 };
-use seqair_types::{Base, Pos0};
+use seqair_types::{IupacBase, Pos0};
 use std::num::NonZeroU32;
 
 /// Find CpG positions where one half is soft-clipped and the other is aligned.
@@ -127,8 +127,8 @@ fn count_segment(store: &RecordStore<()>) -> Output {
         // State machine: track the last Match and the last SoftClip event.
         // Only Match → Match and soft-clip ↔ Match adjacencies matter;
         // any other event breaks the chain.
-        let mut last_match: Option<(Base, Pos0)> = None;
-        let mut last_softclip_end: Option<Base> = None;
+        let mut last_match: Option<(IupacBase, Pos0)> = None;
+        let mut last_softclip_end: Option<IupacBase> = None;
 
         let walk = match rec.aligned_pairs_with_read(store) {
             Ok(w) => w.with_soft_clips(),
@@ -142,17 +142,17 @@ fn count_segment(store: &RecordStore<()>) -> Output {
                     // SoftClip(last=C|T) → Match(first-base=G|A)
                     if let Some(sc_base) = last_softclip_end.take() {
                         match (sc_base, query) {
-                            (Base::C, Base::G) => out.leading_cs.clipped += 1,
-                            (Base::T, Base::G) => out.leading_ts.clipped += 1,
-                            (Base::C, Base::A) => out.leading_ca.clipped += 1,
+                            (IupacBase::C, IupacBase::G) => out.leading_cs.clipped += 1,
+                            (IupacBase::T, IupacBase::G) => out.leading_ts.clipped += 1,
+                            (IupacBase::C, IupacBase::A) => out.leading_ca.clipped += 1,
                             _ => {}
                         }
                     }
 
                     // ── Consecutive Match: aligned CpG (control) ──
                     if let Some((prev_base, prev_rpos)) = last_match {
-                        if prev_base == Base::C
-                            && query == Base::G
+                        if prev_base == IupacBase::C
+                            && query == IupacBase::G
                             && rpos.as_u64() == prev_rpos.as_u64() + 1
                         {
                             out.leading_cs.not_clipped += 1;
@@ -172,9 +172,9 @@ fn count_segment(store: &RecordStore<()>) -> Output {
                     // Match(last-base=C|T) → SoftClip(first=G|A)
                     if let Some((prev_base, _prev_rpos)) = last_match.take() {
                         match (prev_base, query.first().copied()) {
-                            (Base::C, Some(Base::G)) => out.trailing_cs.clipped += 1,
-                            (Base::C, Some(Base::A)) => out.trailing_ts.clipped += 1,
-                            (Base::T, Some(Base::G)) => out.trailing_tg.clipped += 1,
+                            (IupacBase::C, Some(IupacBase::G)) => out.trailing_cs.clipped += 1,
+                            (IupacBase::C, Some(IupacBase::A)) => out.trailing_ts.clipped += 1,
+                            (IupacBase::T, Some(IupacBase::G)) => out.trailing_tg.clipped += 1,
                             _ => {}
                         }
                     }

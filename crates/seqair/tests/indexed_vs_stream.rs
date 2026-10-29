@@ -25,7 +25,7 @@ use seqair::bam::stream::BamStreamReader;
 use seqair::bam::{BgzfStream, MateFields, RawBamRecord, RecordStore};
 use seqair::reader::{AlignmentStream, IndexedReader, StreamFormat};
 use seqair::sam::SamStreamReader;
-use seqair_types::{Base, BaseQuality, Pos0};
+use seqair_types::{BaseQuality, IupacBase, Pos0};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
@@ -319,7 +319,7 @@ struct View {
     end_pos: Pos0,
     mapq: u8,
     cigar: Vec<u32>,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<u8>,
     aux: Vec<u8>,
     mate: MateFields,
@@ -342,18 +342,7 @@ fn placed_view(record: &RawBamRecord, tid: u32, pos: Pos0) -> View {
     } else {
         Pos0::new(pos.as_u32() + rlen - 1).unwrap()
     };
-    let mut ascii = Vec::new();
-    record.decode_seq_into(&mut ascii);
-    let seq = ascii
-        .iter()
-        .map(|b| match b {
-            b'A' => Base::A,
-            b'C' => Base::C,
-            b'G' => Base::G,
-            b'T' => Base::T,
-            _ => Base::Unknown,
-        })
-        .collect();
+    let seq = record.iupac_bases().collect();
     // A missing QUAL is 0xFF throughout (`r[sam.edge.missing_qual]`).
     let qual = record
         .qual()
@@ -580,6 +569,7 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 }
 
 // r[verify bam.reader.fetch_into+2]
+// r[verify record_store.seq_lossless]
 // r[verify bam.reader.overlap_filter]
 // r[verify bam.reader.unmapped_skipped]
 // r[verify sam.reader.overlap_filter+4]

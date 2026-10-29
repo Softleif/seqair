@@ -23,7 +23,7 @@ use noodles::sam::alignment::record::Sequence as _;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
 use seqair_types::MappingQuality;
-use seqair_types::QPos;
+use seqair_types::{IupacBase, QPos};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -202,17 +202,13 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
 
                 for pos in 0..n.seq_len {
                     let seqair_base =
-                        store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
-                            as u8;
+                        store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
                     let noodles_base = n.seq[pos];
-                    match noodles_base {
-                        b'A' | b'C' | b'G' | b'T' => {
-                            assert_eq!(seqair_base, noodles_base, "{ctx} seq[{pos}]");
-                        }
-                        _ => {
-                            assert_eq!(seqair_base, b'N', "{ctx} seq[{pos}]: expected N");
-                        }
-                    }
+                    assert_eq!(
+                        seqair_base,
+                        IupacBase::from_ascii(noodles_base),
+                        "{ctx} seq[{pos}]"
+                    );
                 }
             }
         }

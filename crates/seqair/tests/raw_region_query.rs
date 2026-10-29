@@ -268,7 +268,7 @@ fn write_generated(records: &[Generated]) -> GeneratedFiles {
     use seqair::bam::header::BamHeader;
     use seqair::bam::owned_record::OwnedBamRecord;
     use seqair::bam::writer::BamWriterBuilder;
-    use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality};
+    use seqair_types::{BamFlags, BaseQuality, IupacBase, MappingQuality};
 
     let dir = tempfile::tempdir().unwrap();
     let header_text = format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:{GENERATED_LEN}\n");
@@ -288,7 +288,7 @@ fn write_generated(records: &[Generated]) -> GeneratedFiles {
         .flags(BamFlags::empty())
         .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, r.len)])
-        .seq(vec![Base::A; n])
+        .seq(vec![IupacBase::A; n])
         .qual(vec![BaseQuality::from_byte(30); n])
         .mate_fields(MateFields {
             tid: None,

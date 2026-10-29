@@ -34,7 +34,7 @@ use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::ResolveTid;
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,7 +186,11 @@ fn write_bam(dir: &Path, reads: &[Read]) -> std::path::PathBuf {
         .flags(flags)
         .mapq(MappingQuality::from_byte(60))
         .cigar(read.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect())
-        .seq((0..n).map(|j| [Base::A, Base::C, Base::G, Base::T][(i + j) % 4]).collect())
+        .seq(
+            (0..n)
+                .map(|j| [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T][(i + j) % 4])
+                .collect(),
+        )
         .qual((0..n).map(|j| BaseQuality::from_byte(((i * 7 + j) % 40) as u8)).collect())
         .build()
         .unwrap();

@@ -88,7 +88,7 @@ fn read_seqair(cram: &Path) -> Vec<Decoded> {
                 flags: rec.flags.raw(),
                 mapq: rec.mapq.as_byte(),
                 cigar: rec.cigar().iter().map(ToString::to_string).collect(),
-                seq: rec.seq().iter().map(|b| **b).collect(),
+                seq: rec.seq().iter().map(|b| b.to_ascii()).collect(),
                 qual: seqair_types::BaseQuality::slice_to_bytes(rec.qual()).to_vec(),
                 aux: rec.aux().to_vec(),
             }

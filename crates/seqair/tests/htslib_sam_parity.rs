@@ -25,7 +25,7 @@ use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use seqair_types::BaseQuality;
 use seqair_types::MappingQuality;
-use seqair_types::QPos;
+use seqair_types::{IupacBase, QPos};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -203,29 +203,18 @@ fn assert_bam_parity(sam_name: &str) {
             let seqair_cigar = decode_cigar(store.record(idx).unwrap().cigar());
             assert_eq!(seqair_cigar, n.cigar_ops, "{ctx}: cigar");
 
-            // Sequence (seqair normalises non-ACGT to Unknown/'N')
+            // Sequence: both keep every IUPAC code
             assert_eq!(r.seq_len as usize, n.seq_len, "{ctx}: seq_len");
             for pos in 0..n.seq_len {
                 let seqair_base =
-                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
-                        as u8;
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
                 let noodles_base = n.seq[pos];
-                match noodles_base {
-                    b'A' | b'C' | b'G' | b'T' => {
-                        assert_eq!(
-                            seqair_base, noodles_base,
-                            "{ctx} seq[{pos}]: seqair='{}' noodles='{}'",
-                            seqair_base as char, noodles_base as char
-                        );
-                    }
-                    _ => {
-                        assert_eq!(
-                            seqair_base, b'N',
-                            "{ctx} seq[{pos}]: expected 'N' for IUPAC '{}', got '{}'",
-                            noodles_base as char, seqair_base as char
-                        );
-                    }
-                }
+                assert_eq!(
+                    seqair_base,
+                    IupacBase::from_ascii(noodles_base),
+                    "{ctx} seq[{pos}]: noodles='{}'",
+                    char::from(noodles_base)
+                );
             }
 
             // Quality scores — noodles returns empty when all bytes are 0xFF
