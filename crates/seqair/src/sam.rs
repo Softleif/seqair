@@ -12,5 +12,5 @@ pub mod reader;
 pub mod stream;
 
 pub use encode::{SamRecordEncoder, SamRecordError, parse_cigar};
-pub use reader::SamError;
+pub use reader::{SamError, SamRawQuery};
 pub use stream::{SamStreamError, SamStreamReader};

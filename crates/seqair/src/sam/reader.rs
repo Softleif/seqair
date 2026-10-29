@@ -1,11 +1,13 @@
 //! Open and query bgzf-compressed SAM files. [`IndexedSamReader`] uses a tabix index to fetch
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
 
-use super::encode::{self, SamRecordError};
+use super::encode::{self, SamRecordEncoder, SamRecordError};
 use crate::bam::{
-    BaiError, BamHeader, BamHeaderError, BamIndex, MateFields,
+    BaiError, BamHeader, BamHeaderError, BamIndex, MateFields, RawBamRecord,
+    bgzf::VirtualOffset,
     cigar::{self, CigarOp},
     flags::BamFlags,
+    index::Chunk,
     record::DecodeError,
     record_store::RecordStore,
     region_buf::{BlockCache, RegionBuf},
@@ -16,6 +18,7 @@ use core::range::RangeInclusive;
 use seqair_types::{Base, MappingQuality, Pos0, Pos1};
 use std::num::NonZeroI32;
 use std::{
+    convert::Infallible,
     fs::File,
     io::{Read, Seek},
     path::{Path, PathBuf},
@@ -79,6 +82,10 @@ pub enum SamError {
         #[from]
         source: DecodeError,
     },
+
+    /// An earlier error ended this raw query (`r[sam.reader.query_raw]`).
+    #[error("SAM query already failed; an earlier read returned the error")]
+    Poisoned,
 }
 
 pub struct SamShared {
@@ -325,16 +332,13 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             return Ok(crate::reader::FetchCounts::default());
         }
 
-        let mut region =
-            RegionBuf::with_cache(&mut self.bulk_reader, &chunks, &mut self.block_cache)?;
+        let region = RegionBuf::with_cache(&mut self.bulk_reader, &chunks, &mut self.block_cache)?;
+        let mut lines = ChunkLines::new(region, chunks);
 
         let start_i64 = span.start.as_i64();
         let end_i64 = span.last.as_i64();
         let header = &self.shared.header;
 
-        // Lines that span BGZF block boundaries are assembled here; a line
-        // inside one block is parsed straight out of the block.
-        let mut line_buf = Vec::with_capacity(1024);
         // Scratch buffers reused across records
         let mut cigar_buf = Vec::with_capacity(256);
         let mut seq_buf = Vec::with_capacity(256);
@@ -342,13 +346,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         let mut aux_buf = Vec::with_capacity(256);
         let mut counts = crate::reader::FetchCounts::default();
 
-        // r[impl sam.edge.empty_lines]
-        let mut on_line = |line: &[u8]| -> Result<(), SamError> {
-            // Strip \r for Windows line endings
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() || line.first() == Some(&b'@') {
-                return Ok(());
-            }
+        let None::<Infallible> = lines.next_line(|line| {
             if let Some(record) = parse_sam_line(
                 line,
                 header,
@@ -364,61 +362,235 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             )? {
                 counts.add(record);
             }
-            Ok(())
-        };
-
-        for chunk in &chunks {
-            region.seek_virtual(chunk.begin)?;
-            line_buf.clear();
-
-            // r[impl sam.perf.text_parsing]
-            // r[impl sam.edge.line_spanning_blocks]
-            loop {
-                if region.virtual_offset() >= chunk.end {
-                    break;
-                }
-                // `fill_buf` may load the next block, so the chunk end is
-                // checked again against where the returned bytes start: the
-                // end of one block and the start of the next are one place.
-                let (voff, block) = region.fill_buf()?;
-                if block.is_empty() || voff >= chunk.end {
-                    break;
-                }
-                let limit = if voff.block_offset() == chunk.end.block_offset() {
-                    usize::from(chunk.end.within_block().saturating_sub(voff.within_block()))
-                } else {
-                    block.len()
-                };
-                let window = block.get(..limit).unwrap_or(block);
-                let consumed = match text_scan::find_byte(window, b'\n') {
-                    Some(nl) => {
-                        let rest = window.get(..nl).unwrap_or_default();
-                        if line_buf.is_empty() {
-                            on_line(rest)?;
-                        } else {
-                            line_buf.extend_from_slice(rest);
-                            on_line(&line_buf)?;
-                            line_buf.clear();
-                        }
-                        nl.saturating_add(1)
-                    }
-                    None => {
-                        line_buf.extend_from_slice(window);
-                        window.len()
-                    }
-                };
-                region.consume(consumed);
-            }
-
-            // Handle partial line at end of chunk (line without trailing newline)
-            if !line_buf.is_empty() {
-                on_line(&line_buf)?;
-                line_buf.clear();
-            }
-        }
+            Ok(None)
+        })?;
 
         Ok(counts)
     }
+
+    // r[impl sam.reader.query_raw]
+    /// The lines overlapping `span` on `tid`, encoded as `SamStreamReader`
+    /// encodes them: the selection and order of [`Self::fetch_into`].
+    pub fn query_raw(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+    ) -> Result<SamRawQuery<'_, R>, SamError> {
+        // r[impl interval.empty_span]
+        let chunks = if span.is_empty() {
+            Vec::new()
+        } else {
+            self.shared.index.query(tid.as_u32(), span.start, span.last)
+        };
+        let region = RegionBuf::with_cache(&mut self.bulk_reader, &chunks, &mut self.block_cache)?;
+        Ok(SamRawQuery {
+            lines: ChunkLines::new(region, chunks),
+            shared: Arc::clone(&self.shared),
+            encoder: SamRecordEncoder::new(),
+            scratch: RawBamRecord::default(),
+            tid,
+            span,
+            failed: false,
+        })
+    }
+}
+
+/// The records of one region of a SAM as [`RawBamRecord`]s; see
+/// [`IndexedSamReader::query_raw`]. Borrows the reader until dropped.
+pub struct SamRawQuery<'r, R: Read + Seek> {
+    lines: ChunkLines<'r, R>,
+    shared: Arc<SamShared>,
+    encoder: SamRecordEncoder,
+    /// Each line is encoded here, and swapped out once it is kept, so a
+    /// query that ends leaves the caller's record as it was.
+    scratch: RawBamRecord,
+    tid: Tid,
+    span: RangeInclusive<Pos0>,
+    failed: bool,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for SamRawQuery<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamRawQuery")
+            .field("sam_path", &self.shared.sam_path)
+            .field("tid", &self.tid)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read + Seek> SamRawQuery<'_, R> {
+    pub fn header(&self) -> &BamHeader {
+        &self.shared.header
+    }
+
+    /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
+    /// the end of the region, which leaves `record` unchanged.
+    ///
+    /// # Errors
+    /// [`SamError::MalformedRecord`] for a kept line that does not encode —
+    /// the query stays usable. Anything else ends the query: later calls
+    /// return [`SamError::Poisoned`].
+    pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, SamError> {
+        if self.failed {
+            return Err(SamError::Poisoned);
+        }
+        let Self { lines, shared, encoder, scratch, tid, span, .. } = self;
+        let header = &shared.header;
+        let result = lines.next_line(|line| {
+            if line_reference(line, header)? != Some(*tid) {
+                return Ok(None);
+            }
+            encoder.encode(line, header, scratch)?;
+            Ok(overlaps(scratch, *span).then_some(()))
+        });
+        match result {
+            Ok(Some(())) => {
+                std::mem::swap(record, &mut self.scratch);
+                Ok(true)
+            }
+            Ok(None) => Ok(false),
+            Err(e) => {
+                if !matches!(e, SamError::MalformedRecord { .. }) {
+                    self.failed = true;
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+impl<R: Read + Seek> Iterator for SamRawQuery<'_, R> {
+    type Item = Result<RawBamRecord, SamError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        let mut record = RawBamRecord::default();
+        match self.read_record(&mut record) {
+            Ok(true) => Some(Ok(record)),
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// The reference a line's RNAME names, checked as [`parse_sam_line`] checks
+/// it: `None` for `*` or a name the header lacks, which the query skips.
+fn line_reference(line: &[u8], header: &BamHeader) -> Result<Option<Tid>, SamError> {
+    let (fields, n_fields) = text_scan::split_tabs(line);
+    if n_fields < 11 {
+        return Err(SamRecordError::TooFewFields { found: n_fields }.into());
+    }
+    let [_, _, rname, ..] = fields;
+    if rname == b"*" {
+        return Ok(None);
+    }
+    let rname = std::str::from_utf8(rname)
+        .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
+    Ok(rname.resolve_tid(header).ok())
+}
+
+/// `r[sam.reader.overlap_filter+4]` on an encoded record: an unmapped one
+/// sits at its POS whatever its CIGAR.
+fn overlaps(record: &RawBamRecord, span: RangeInclusive<Pos0>) -> bool {
+    let Some(pos) = record.pos() else { return false };
+    let last = if record.flags().is_unmapped() { pos } else { record.end_pos().unwrap_or(pos) };
+    pos <= span.last && last >= span.start
+}
+
+/// The alignment lines of a query's index chunks, handed out one at a time
+/// and resumable between them.
+struct ChunkLines<'r, R: Read + Seek> {
+    region: RegionBuf<'r, R>,
+    chunks: Vec<Chunk>,
+    next_chunk: usize,
+    /// End of the chunk being read; `None` between chunks.
+    chunk_end: Option<VirtualOffset>,
+    /// A line spanning BGZF blocks, assembled; a line inside one block is
+    /// handed out straight from the block.
+    line: Vec<u8>,
+}
+
+impl<'r, R: Read + Seek> ChunkLines<'r, R> {
+    fn new(region: RegionBuf<'r, R>, chunks: Vec<Chunk>) -> Self {
+        Self { region, chunks, next_chunk: 0, chunk_end: None, line: Vec::with_capacity(1024) }
+    }
+
+    // r[impl sam.perf.text_parsing]
+    // r[impl sam.edge.line_spanning_blocks]
+    /// Hand each alignment line to `on_line` until it returns `Some`, and
+    /// return that; `None` once every chunk is read.
+    fn next_line<T>(
+        &mut self,
+        mut on_line: impl FnMut(&[u8]) -> Result<Option<T>, SamError>,
+    ) -> Result<Option<T>, SamError> {
+        loop {
+            let Some(end) = self.chunk_end else {
+                let Some(chunk) = self.chunks.get(self.next_chunk) else { return Ok(None) };
+                self.next_chunk = self.next_chunk.saturating_add(1);
+                self.region.seek_virtual(chunk.begin)?;
+                self.line.clear();
+                self.chunk_end = Some(chunk.end);
+                continue;
+            };
+            // `fill_buf` may load the next block, so the chunk end is checked
+            // again against where the returned bytes start: the end of one
+            // block and the start of the next are one place.
+            let block = if self.region.virtual_offset() >= end {
+                None
+            } else {
+                let (voff, block) = self.region.fill_buf()?;
+                (!block.is_empty() && voff < end).then_some((voff, block))
+            };
+            let Some((voff, block)) = block else {
+                // The chunk is read; a last line may lack its newline.
+                self.chunk_end = None;
+                let found = alignment_line(&self.line).map(&mut on_line).transpose();
+                self.line.clear();
+                match found?.flatten() {
+                    Some(t) => return Ok(Some(t)),
+                    None => continue,
+                }
+            };
+            let limit = if voff.block_offset() == end.block_offset() {
+                usize::from(end.within_block().saturating_sub(voff.within_block()))
+            } else {
+                block.len()
+            };
+            let window = block.get(..limit).unwrap_or(block);
+            let (consumed, found) = match text_scan::find_byte(window, b'\n') {
+                Some(nl) => {
+                    let rest = window.get(..nl).unwrap_or_default();
+                    let found = if self.line.is_empty() {
+                        alignment_line(rest).map(&mut on_line).transpose()
+                    } else {
+                        self.line.extend_from_slice(rest);
+                        let found = alignment_line(&self.line).map(&mut on_line).transpose();
+                        self.line.clear();
+                        found
+                    };
+                    (nl.saturating_add(1), found)
+                }
+                None => {
+                    self.line.extend_from_slice(window);
+                    (window.len(), Ok(None))
+                }
+            };
+            self.region.consume(consumed);
+            if let Some(t) = found?.flatten() {
+                return Ok(Some(t));
+            }
+        }
+    }
+}
+
+// r[impl sam.edge.empty_lines]
+/// `line` without a Windows `\r`, unless it is empty or a header line.
+fn alignment_line(line: &[u8]) -> Option<&[u8]> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    (!line.is_empty() && line.first() != Some(&b'@')).then_some(line)
 }
 
 // r[impl sam.record.parse]
