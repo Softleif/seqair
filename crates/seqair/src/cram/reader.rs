@@ -139,6 +139,10 @@ pub enum CramError {
     #[error("no core data block in slice")]
     MissingCoreDataBlock,
 
+    /// A record's `RG` names no `@RG` line of the header.
+    #[error("CRAM record read group {read_group} is not one of the header's {count}")]
+    ReadGroupOutOfRange { read_group: i32, count: usize },
+
     /// A record whose features rebuild a different number of bases than
     /// its qualities.
     #[error("CRAM record has {bases} bases but {qualities} qualities")]

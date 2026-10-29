@@ -1070,13 +1070,27 @@ fn decode_record<B: SeqBase>(
         }
     }
 
-    // r[impl cram.record.rg_tag]
+    // r[impl cram.record.rg_tag+2]
     // Add RG tag if read group >= 0. RG IDs are pre-parsed from the header
     // once at open time (cached on `CramShared::read_group_ids`); used to
     // be a per-record header text scan + String allocation, which dominated
     // `decode_record` profiles.
     // Appended last, after any generated MD/NM, as `cram_to_bam` does.
-    let rg_id = usize::try_from(read_group).ok().and_then(|i| read_group_ids.get(i));
+    let rg_id = match usize::try_from(read_group) {
+        Ok(i) => {
+            let id = read_group_ids
+                .get(i)
+                .ok_or(CramError::ReadGroupOutOfRange { read_group, count: read_group_ids.len() })?;
+            // htslib's workaround for Java CRAM, which adds an `UNKNOWN` read
+            // group last for records that have none.
+            let unknown = i.saturating_add(1) == read_group_ids.len() && id == "UNKNOWN";
+            (!unknown).then_some(id)
+        }
+        Err(_) if read_group == -1 => None,
+        Err(_) => {
+            return Err(CramError::ReadGroupOutOfRange { read_group, count: read_group_ids.len() });
+        }
+    };
     let append_rg = |aux_buf: &mut Vec<u8>| {
         if let Some(rg_id) = rg_id {
             aux_buf.extend_from_slice(b"RGZ");
@@ -1121,6 +1135,9 @@ fn decode_record<B: SeqBase>(
             (span, 0, 0)
         } else {
             let (reference_seq, ref_start_0based) = reference.for_tid(record_ref_id);
+            if !quality_as_array {
+                qual_buf.resize(read_length, 0xFF);
+            }
             let result = decode_features_and_reconstruct(
                 ch,
                 ctx,
@@ -1137,6 +1154,7 @@ fn decode_record<B: SeqBase>(
                     md_buf.start();
                     &mut *md_buf
                 }),
+                (!quality_as_array).then_some(qual_buf.as_mut_slice()),
             )?;
             if generate.any() {
                 md_buf.finish_into(generate, aux_buf);
@@ -1166,8 +1184,6 @@ fn decode_record<B: SeqBase>(
             } else {
                 ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
             }
-        } else if !foreign_tid {
-            qual_buf.resize(read_length, 0xFF);
         }
 
         // `end_pos_raw` is the half-open exclusive reference end
@@ -1733,6 +1749,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
     md: Option<&mut MdNm>,
+    mut feature_quals: Option<&mut [u8]>,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
     let mut md = md.filter(|_| B::MD_NM);
@@ -1918,11 +1935,12 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 push_cigar_op(cigar_ops_buf, len, 6); // P
             }
             // B — base + quality (BA + QS): treated as a 1-base match.
-            // The qual byte is decoded but currently ignored (matches previous
-            // behaviour; see r[unimpl cram.feature.quality_score]).
             b'B' => {
                 let base = ds.base.decode(ctx)?;
-                let _qual = ds.quality_score.decode(ctx)?;
+                let qual = ds.quality_score.decode(ctx)?;
+                if let Some(quals) = feature_quals.as_deref_mut() {
+                    apply_feature_quals(quals, feat_target, &[qual]);
+                }
                 bases_buf.push(B::from_ascii(base));
                 if let Some(md) = md.as_deref_mut() {
                     md.read_base::<B>(reference_seq.get(ref_index).copied());
@@ -1955,18 +1973,21 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 ref_pos = ref_pos.wrapping_add(len);
             }
             // r[impl cram.feature.quality_only]
-            // q — quality block: consumed so the codec stream stays aligned,
-            // value discarded. It carries no base and moves nothing.
-            // r[unimpl cram.feature.quality_block]
+            // q — quality block: no base, moves nothing.
             b'q' => {
                 feature_byte_buf.clear();
                 ds.quality_block.decode_into(ctx, feature_byte_buf)?;
+                if let Some(quals) = feature_quals.as_deref_mut() {
+                    apply_feature_quals(quals, feat_target, feature_byte_buf);
+                }
             }
             // r[impl cram.feature.quality_only]
-            // Q — single quality score: same shape as q but no payload.
-            // r[unimpl cram.feature.quality_score]
+            // Q — single quality score: same shape as q.
             b'Q' => {
-                let _qual = ds.quality_score.decode(ctx)?;
+                let qual = ds.quality_score.decode(ctx)?;
+                if let Some(quals) = feature_quals.as_deref_mut() {
+                    apply_feature_quals(quals, feat_target, &[qual]);
+                }
             }
             _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
         }
@@ -2000,6 +2021,22 @@ fn decode_features_and_reconstruct<B: SeqBase>(
         reason = "ref_pos is bounded by reference sequence length which fits in u32; BAM positions are capped at 2^29"
     )]
     Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
+}
+
+// r[impl cram.feature.quality_score+2]
+// r[impl cram.feature.quality_block+2]
+/// A `B`, `Q` or `q` feature's qualities, for a read that stores no quality
+/// array: htslib fills the read with 30 when its first quality is still the
+/// 0xFF it started as, then writes the values from `at`, within the read.
+fn apply_feature_quals(quals: &mut [u8], at: usize, values: &[u8]) {
+    if quals.first() == Some(&0xFF) {
+        quals.fill(30);
+    }
+    if let Some(dst) = quals.get_mut(at..) {
+        for (d, &v) in dst.iter_mut().zip(values) {
+            *d = v;
+        }
+    }
 }
 
 /// Scan the feature streams for a record without reconstructing its
@@ -2522,5 +2559,20 @@ mod tests {
         assert_eq!(a.mate_fields.template_len, None);
         assert_eq!(b.mate_fields.pos, Pos0::new(10));
         assert_eq!(b.mate_fields.template_len, None);
+    }
+
+    // r[verify cram.feature.quality_score+2]
+    // r[verify cram.feature.quality_block+2]
+    /// The first quality feature of a read without a quality array fills it
+    /// with 30; later ones only write their values, clipped to the read.
+    #[test]
+    fn quality_features_fill_30_first() {
+        let mut quals = vec![0xFF; 5];
+        apply_feature_quals(&mut quals, 1, &[7]);
+        assert_eq!(quals, [30, 7, 30, 30, 30]);
+        apply_feature_quals(&mut quals, 3, &[9, 9, 9]);
+        assert_eq!(quals, [30, 7, 30, 9, 9]);
+        apply_feature_quals(&mut quals, 9, &[1]);
+        assert_eq!(quals, [30, 7, 30, 9, 9]);
     }
 }
