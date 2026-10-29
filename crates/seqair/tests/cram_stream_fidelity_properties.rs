@@ -29,7 +29,7 @@ const QUAL_CHARS: &str = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHI";
 #[derive(Debug, Clone)]
 struct Sample {
     contigs: Vec<String>,
-    /// SAM lines without the name, which `sam_text` adds.
+    /// SAM alignment lines.
     lines: Vec<String>,
 }
 
@@ -137,15 +137,110 @@ fn arb_sample(tc: &TestCase) -> Sample {
     let mut lines = Vec::new();
     for (i, reference) in contigs.iter().enumerate() {
         for _ in 0..tc.draw_silent(int(0, 5)) {
-            lines.push(arb_mapped(tc, i, reference));
+            lines.push(format!("r{}\t{}", lines.len(), arb_mapped(tc, i, reference)));
         }
+    }
+    for _ in 0..tc.draw_silent(int(0, 3)) {
+        let pair = arb_pair(tc, &contigs, &format!("p{}", lines.len()));
+        lines.extend(pair);
     }
     for _ in 0..tc.draw_silent(int(0, 2)) {
         let len = tc.draw_silent(int(5, 20));
         let seq = tc.draw_silent(text("ACGTN", len));
-        lines.push(format!("4\t*\t0\t0\t*\t*\t0\t0\t{seq}\t*{}", arb_tags(tc)));
+        let tags = arb_tags(tc);
+        lines.push(format!("u{}\t4\t*\t0\t0\t*\t*\t0\t0\t{seq}\t*{tags}", lines.len()));
     }
     Sample { contigs, lines }
+}
+
+/// The reference span of a SAM CIGAR.
+fn ref_span(cigar: &str) -> usize {
+    let mut span = 0;
+    let mut len = 0;
+    for c in cigar.chars() {
+        match c.to_digit(10) {
+            Some(d) => len = len * 10 + d as usize,
+            None => {
+                if matches!(c, 'M' | 'D' | 'N') {
+                    span += len;
+                }
+                len = 0;
+            }
+        }
+    }
+    span
+}
+
+/// A read pair: both mapped on one reference, on two, or one mate unmapped
+/// at the other's position; TLEN as samtools computes it, which lets the
+/// writer attach the mates, or 0. In a `lossy_names` file attached mates
+/// lose their names (`r[cram.record.read_name+2]`).
+fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
+    let c1 = tc.draw_silent(int(0, contigs.len() - 1));
+    let first = arb_mapped(tc, c1, &contigs[c1]);
+    let f1: Vec<&str> = first.split('\t').collect();
+    let (pos1, span1) = (f1[2].parse::<usize>().unwrap(), ref_span(f1[4]).max(1));
+    let rev1 = tc.draw_silent(gs::booleans());
+    let rev2 = tc.draw_silent(gs::booleans());
+    let proper = tc.draw_silent(gs::booleans());
+    let (r1, r2) = if tc.draw_silent(gs::booleans()) { (0x40, 0x80) } else { (0x80, 0x40) };
+    let flags = |own_rev: bool, mate_rev: bool, read: u32| {
+        0x1 | read
+            | if proper { 0x2 } else { 0 }
+            | if own_rev { 0x10 } else { 0 }
+            | if mate_rev { 0x20 } else { 0 }
+    };
+    let rest1 = f1[3..5].join("\t");
+    let tail1 = f1[8..].join("\t");
+    match tc.draw_silent(int(0, 2)) {
+        // the mate unmapped, placed at the first's position
+        0 => {
+            let len = tc.draw_silent(int(5, 20));
+            let seq = tc.draw_silent(text("ACGT", len));
+            [
+                format!(
+                    "{name}\t{}\tc{c1}\t{pos1}\t{rest1}\t=\t{pos1}\t0\t{tail1}",
+                    flags(rev1, rev2, r1) | 0x8
+                ),
+                format!(
+                    "{name}\t{}\tc{c1}\t{pos1}\t0\t*\t=\t{pos1}\t0\t{seq}\t*",
+                    flags(rev2, rev1, r2) | 0x4
+                ),
+            ]
+        }
+        other => {
+            let c2 = if other == 1 { c1 } else { tc.draw_silent(int(0, contigs.len() - 1)) };
+            let second = arb_mapped(tc, c2, &contigs[c2]);
+            let f2: Vec<&str> = second.split('\t').collect();
+            let (pos2, span2) = (f2[2].parse::<usize>().unwrap(), ref_span(f2[4]).max(1));
+            let (rnext1, rnext2) = if c1 == c2 {
+                ("=".to_owned(), "=".to_owned())
+            } else {
+                (format!("c{c2}"), format!("c{c1}"))
+            };
+            let tlen = if c1 == c2 && tc.draw_silent(gs::booleans()) {
+                let left = pos1.min(pos2);
+                let right = (pos1 + span1).max(pos2 + span2);
+                let t = i64::try_from(right - left).unwrap();
+                if pos1 <= pos2 { t } else { -t }
+            } else {
+                0
+            };
+            [
+                format!(
+                    "{name}\t{}\tc{c1}\t{pos1}\t{rest1}\t{rnext1}\t{pos2}\t{tlen}\t{tail1}",
+                    flags(rev1, rev2, r1)
+                ),
+                format!(
+                    "{name}\t{}\tc{c2}\t{pos2}\t{}\t{rnext2}\t{pos1}\t{}\t{}",
+                    flags(rev2, rev1, r2),
+                    f2[3..5].join("\t"),
+                    -tlen,
+                    f2[8..].join("\t")
+                ),
+            ]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +269,7 @@ struct Opts {
     seqs_per_slice: u32,
     slices_per_container: u32,
     multi_seq: Option<bool>,
+    lossy_names: bool,
 }
 
 impl Opts {
@@ -189,6 +285,9 @@ impl Opts {
             Reference::Consensus => args.push("embed_ref=2".into()),
             Reference::None => args.push("no_ref=1".into()),
         }
+        if self.lossy_names {
+            args.push("lossy_names=1".into());
+        }
         if let Some(m) = self.multi_seq {
             args.push(format!("multi_seq_per_slice={}", u8::from(m)));
         }
@@ -198,22 +297,26 @@ impl Opts {
 
 #[hegel::composite]
 fn arb_opts(tc: &TestCase) -> Opts {
+    let reference = tc.draw_silent(gs::sampled_from(&[
+        Reference::External,
+        Reference::Embedded,
+        Reference::Consensus,
+        Reference::None,
+    ]));
+    // samtools builds a consensus from sorted data only.
+    let orders: &[Order] = if matches!(reference, Reference::Consensus) {
+        &[Order::Coordinate]
+    } else {
+        &[Order::Coordinate, Order::Queryname, Order::Unsorted]
+    };
     Opts {
-        order: tc.draw_silent(gs::sampled_from(&[
-            Order::Coordinate,
-            Order::Queryname,
-            Order::Unsorted,
-        ])),
+        order: tc.draw_silent(gs::sampled_from(orders)),
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
-        reference: tc.draw_silent(gs::sampled_from(&[
-            Reference::External,
-            Reference::Embedded,
-            Reference::Consensus,
-            Reference::None,
-        ])),
+        reference,
         seqs_per_slice: tc.draw_silent(gs::sampled_from(&[1u32, 2, 5, 10_000])),
         slices_per_container: tc.draw_silent(gs::sampled_from(&[1u32, 2])),
         multi_seq: tc.draw_silent(gs::sampled_from(&[None, Some(false), Some(true)])),
+        lossy_names: tc.draw_silent(gs::booleans()),
     }
 }
 
@@ -234,15 +337,15 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf, u
     }
     sam.push_str("@RG\tID:grpA\tSM:x\n@RG\tID:grpB\tSM:x\n");
     let mut written = 0;
-    for (i, line) in sample.lines.iter().enumerate() {
+    for line in &sample.lines {
         // samtools 1.25 fails to build a consensus for a slice of mapped
         // SEQ `*` reads ("Failed to build reference") and writes a broken file.
         let fields: Vec<&str> = line.split('\t').collect();
-        let mapped_seq_star = fields[0] != "4" && fields[8] == "*";
+        let mapped_seq_star = fields[1].parse::<u32>().unwrap() & 4 == 0 && fields[9] == "*";
         if matches!(opts.reference, Reference::Consensus) && mapped_seq_star {
             continue;
         }
-        writeln!(sam, "r{i}\t{line}").unwrap();
+        writeln!(sam, "{line}").unwrap();
         written += 1;
     }
     std::fs::write(&fasta, fa).unwrap();
@@ -269,7 +372,8 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf, u
 
 fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
     let mut reader = CramStreamReader::new(std::fs::File::open(cram).unwrap()).unwrap();
-    let mut decoder = reader.decoder(fasta).unwrap().decode_md(decode_md);
+    let prefix = cram.file_name().unwrap().to_str().unwrap();
+    let mut decoder = reader.decoder(fasta).unwrap().decode_md(decode_md).name_prefix(prefix);
     let mut records = Vec::new();
     while let Some(container) = reader.next_container().unwrap() {
         decoder.decode(&container, &mut records).unwrap();
@@ -282,6 +386,8 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream.md_nm.option]
 // r[verify cram.stream.iupac]
 // r[verify cram.stream+2]
+// r[verify cram.record.read_name+2]
+// r[verify cram.record.mate_tlen_reconstruction+2]
 /// For any generated sample and CRAM writer options, the streamed records
 /// equal `samtools view -b`'s, byte for byte, and format as `samtools view`
 /// prints them, with MD/NM generation on (samtools' default) or off.
@@ -300,9 +406,12 @@ const UNPLACED_NO_SEQ: &str = "4\t*\t0\t0\t*\t*\t0\t0\t*\t*";
 #[hegel::composite]
 fn arb_unplaced_no_seq_sample(tc: &TestCase) -> Sample {
     let reference = tc.draw_silent(text("ACGT", CONTIG_LEN));
-    let mut lines: Vec<String> =
-        (0..tc.draw_silent(int(0, 4))).map(|_| arb_mapped(tc, 0, &reference)).collect();
-    lines.extend((0..tc.draw_silent(int(1, 8))).map(|_| UNPLACED_NO_SEQ.to_owned()));
+    let mut lines: Vec<String> = (0..tc.draw_silent(int(0, 4)))
+        .map(|i| format!("r{i}\t{}", arb_mapped(tc, 0, &reference)))
+        .collect();
+    for _ in 0..tc.draw_silent(int(1, 8)) {
+        lines.push(format!("u{}\t{UNPLACED_NO_SEQ}", lines.len()));
+    }
     Sample { contigs: vec![reference], lines }
 }
 

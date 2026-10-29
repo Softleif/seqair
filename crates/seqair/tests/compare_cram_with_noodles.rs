@@ -213,7 +213,7 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             );
             // r[verify cram.record.mate_detached]
             // r[verify cram.record.mate_attached]
-            // r[verify cram.record.mate_tlen_reconstruction]
+            // r[verify cram.record.mate_tlen_reconstruction+2]
             // r[verify cram.fetch_into_customized.filtered_mate_fields]
             //
             // The query keeps only a prefix of the region, so this also covers
