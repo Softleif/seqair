@@ -342,7 +342,8 @@ fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
         }
         _ => return None,
     }
-    Some(pos)
+    // A value may not run past the data, or the range is not removable.
+    (pos <= data.len()).then_some(pos)
 }
 
 #[cfg(test)]
@@ -351,6 +352,19 @@ fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
 mod tests {
     use super::*;
     use hegel::prelude::*;
+
+    // r[verify bam.owned_record.aux_data]
+    #[test]
+    fn remove_on_a_truncated_value_does_not_panic() {
+        let truncated_b: Vec<u8> = [b"MLBC".as_slice(), &100u32.to_le_bytes(), &[7]].concat();
+        for bytes in [b"XMZabc".to_vec(), truncated_b, b"NMi\x01".to_vec()] {
+            let mut aux = AuxData::from_bytes(bytes.clone());
+            aux.remove(*b"XM");
+            aux.remove(*b"ML");
+            aux.remove(*b"NM");
+            assert_eq!(aux.as_bytes(), bytes);
+        }
+    }
 
     // r[verify bam.owned_record.aux_data]
     #[test]
