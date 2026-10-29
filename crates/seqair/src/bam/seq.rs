@@ -34,12 +34,6 @@ static DECODE_PAIR: [[u8; 2]; 256] = {
 /// encodes exactly as htslib encodes it. Unknown characters map to 15 (N).
 static ENCODE_BASE: [u8; 256] = IupacBase::CODE_OF_ASCII;
 
-/// The 4-bit code of one ASCII base, as [`encode_seq`] maps it.
-#[allow(clippy::indexing_slicing, reason = "a `u8` index is < 256 = ENCODE_BASE.len()")]
-pub(crate) fn encode_base(base: u8) -> u8 {
-    ENCODE_BASE[usize::from(base)]
-}
-
 /// Decode a 4-bit packed BAM sequence to ASCII bases (scalar fallback).
 pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let required = len.div_ceil(2);

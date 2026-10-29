@@ -21,24 +21,21 @@ use hegel::generators as gs;
 use raw_record_gen::{GenRecord, GenTag, HTSLIB, arb_record, array_tag, header};
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{AuxDataError, RawBamRecord, RawRecordEditError};
-use seqair_types::QPos;
+use seqair_types::{IupacBase, QPos};
 use std::process::Command;
 
-const CODES: &[u8; 16] = b"=ACMGRSVTWYHKDBN";
 const EDITED_KEYS: [[u8; 2]; 6] = [*b"MM", *b"ML", *b"XR", *b"XG", *b"XM", *b"CG"];
 
 fn record_of(g: &GenRecord) -> RawBamRecord {
     RawBamRecord::from_payload(g.payload(), &header()).expect("generated records are valid")
 }
 
-fn iupac(tc: &TestCase, len: usize) -> Vec<u8> {
-    (0..len).map(|_| tc.draw_silent(gs::sampled_from(CODES.to_vec()))).collect()
+fn iupac(tc: &TestCase, len: usize) -> Vec<IupacBase> {
+    (0..len).map(|_| tc.draw_silent(gs::sampled_from(IupacBase::ALL.to_vec()))).collect()
 }
 
-fn decoded(record: &RawBamRecord) -> Vec<u8> {
-    let mut out = Vec::new();
-    record.decode_seq_into(&mut out);
-    out
+fn decoded(record: &RawBamRecord) -> Vec<IupacBase> {
+    record.iupac_bases().collect()
 }
 
 // r[verify bam.raw_record.edit_seq]
@@ -69,14 +66,14 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
     // A different length is refused and changes nothing.
     let snapshot = record.as_payload().to_vec();
     let mut wrong = new.clone();
-    wrong.push(b'A');
+    wrong.push(IupacBase::A);
     assert!(matches!(record.set_seq(&wrong), Err(RawRecordEditError::SeqLenMismatch { .. })));
     assert_eq!(record.as_payload(), snapshot);
 
     // One base: only it moves.
     if len > 0 {
         let i = tc.draw(gs::integers::<usize>().max_value(len - 1));
-        let base = tc.draw(gs::sampled_from(CODES.to_vec()));
+        let base = tc.draw(gs::sampled_from(IupacBase::ALL.to_vec()));
         record.set_base(QPos::new(i as u32), base).unwrap();
         let mut expected = new;
         expected[i] = base;
@@ -84,7 +81,7 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
         assert_eq!(record.as_payload().len(), snapshot.len());
     }
     assert!(matches!(
-        record.set_base(QPos::new(len as u32), b'A'),
+        record.set_base(QPos::new(len as u32), IupacBase::A),
         Err(RawRecordEditError::BaseOutOfRange { .. })
     ));
 }
@@ -298,7 +295,8 @@ fn samtools_reads_the_edited_record(tc: TestCase) {
 
     assert_eq!(after[..9], before[..9]);
     assert_eq!(after[10], before[10], "QUAL");
-    let want_seq: &[u8] = if new_seq.is_empty() { b"*" } else { &new_seq };
+    let new_ascii = IupacBase::to_ascii_slice(&new_seq);
+    let want_seq: &[u8] = if new_ascii.is_empty() { b"*" } else { &new_ascii };
     assert_eq!(after[9], want_seq);
 
     // Each removed or set key loses its first occurrence in samtools' own
@@ -315,4 +313,32 @@ fn samtools_reads_the_edited_record(tc: TestCase) {
     }
     tags.extend([b"MM:Z:C+m,0;".to_vec(), ml_text, b"XG:Z:CT".to_vec()]);
     assert_eq!(after[11..], tags);
+}
+
+// r[verify types.iupac_base.from_ascii]
+// r[verify bam.raw_record.iupac_bases]
+/// samtools encodes every printable SEQ character (all IUPAC letters in both
+/// cases, `U`, `.`, digits, and the rest) to the base `IupacBase::from_ascii`
+/// names.
+#[test]
+fn from_ascii_agrees_with_htslib_on_every_sam_seq_character() {
+    // SAM's SEQ grammar is `\*|[A-Za-z=.]+`; the other printable bytes are
+    // outside it, but htslib encodes them too, as N.
+    let chars: Vec<u8> = (33u8..127).filter(|&b| b != b'*').collect();
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("a.sam");
+    let line = format!(
+        "r\t4\t*\t0\t0\t*\t*\t0\t0\t{}\t{}\n",
+        String::from_utf8(chars.clone()).unwrap(),
+        "I".repeat(chars.len())
+    );
+    std::fs::write(&sam, line).unwrap();
+    let bam = dir.path().join("a.bam");
+    let out =
+        Command::new("samtools").args(["view", "-b", "-o"]).arg(&bam).arg(&sam).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut reader =
+        seqair::bam::stream::BamStreamReader::new(std::fs::File::open(&bam).unwrap()).unwrap();
+    let record = reader.records().next().expect("one record").unwrap();
+    assert_eq!(record.iupac_bases().collect::<Vec<_>>(), IupacBase::from_ascii_slice(&chars));
 }

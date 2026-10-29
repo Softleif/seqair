@@ -14,7 +14,7 @@ use super::{
     seq,
 };
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0, QPos};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::fmt;
 use thiserror::Error;
 
@@ -384,26 +384,36 @@ impl RawBamRecord {
         }
     }
 
+    // r[impl bam.raw_record.iupac_bases]
+    /// The sequence, one [`IupacBase`] per base, every 4-bit code kept.
+    pub fn iupac_bases(&self) -> impl ExactSizeIterator<Item = IupacBase> + '_ {
+        let packed = self.packed_seq();
+        (0..self.seq_len()).map(move |i| {
+            let byte = packed.get(i / 2).copied().unwrap_or_default();
+            IupacBase::from_nibble(if i.is_multiple_of(2) { byte >> 4 } else { byte })
+        })
+    }
+
     // r[impl bam.raw_record.edit_seq]
-    /// Replace the sequence with `seq`, ASCII or IUPAC, in place. Bytes that
-    /// are no base code become `N`, as in SAM.
+    /// Replace the sequence with `seq`, in place.
     ///
     /// # Errors
     /// [`RawRecordEditError::SeqLenMismatch`] if `seq` is not as long as the
     /// current sequence.
-    pub fn set_seq(&mut self, seq: &[u8]) -> Result<(), RawRecordEditError> {
+    pub fn set_seq(&mut self, seq: &[IupacBase]) -> Result<(), RawRecordEditError> {
         let expected = self.seq_len();
         if seq.len() != expected {
             return Err(RawRecordEditError::SeqLenMismatch { expected, got: seq.len() });
         }
-        let encoded = seq::encode_seq(seq);
         let Some(dst) = self.payload.get_mut(self.cigar_end..self.seq_end) else {
             return Ok(());
         };
         // The unused low nibble of an odd-length sequence is not ours to touch.
         let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
-        for (d, e) in dst.iter_mut().zip(&encoded) {
-            *d = *e;
+        for (d, pair) in dst.iter_mut().zip(seq.chunks(2)) {
+            let hi = pair.first().map_or(0, |b| b.code());
+            let lo = pair.get(1).map_or(0, |b| b.code());
+            *d = hi << 4 | lo;
         }
         if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
             *last = *last & 0xF0 | pad;
@@ -412,11 +422,11 @@ impl RawBamRecord {
     }
 
     // r[impl bam.raw_record.edit_seq]
-    /// Replace the base at `qpos` with an ASCII or IUPAC `base`, in place.
+    /// Replace the base at `qpos` with `base`, in place.
     ///
     /// # Errors
     /// [`RawRecordEditError::BaseOutOfRange`] past the end of the sequence.
-    pub fn set_base(&mut self, qpos: QPos, base: u8) -> Result<(), RawRecordEditError> {
+    pub fn set_base(&mut self, qpos: QPos, base: IupacBase) -> Result<(), RawRecordEditError> {
         let len = self.seq_len();
         let i = qpos.as_usize();
         let out_of_range = RawRecordEditError::BaseOutOfRange { qpos: qpos.get(), len };
@@ -425,7 +435,7 @@ impl RawBamRecord {
         }
         let start = self.cigar_end;
         let byte = self.payload.get_mut(start.saturating_add(i / 2)).ok_or(out_of_range)?;
-        let code = seq::encode_base(base);
+        let code = base.code();
         *byte = if i.is_multiple_of(2) { code << 4 | *byte & 0x0F } else { *byte & 0xF0 | code };
         Ok(())
     }
@@ -579,6 +589,20 @@ mod tests {
         let mut out = b">".to_vec();
         record.decode_seq_into(&mut out);
         assert_eq!(out, b">=ACMGRSVTWYHKDBNM");
+    }
+
+    // r[verify bam.raw_record.iupac_bases]
+    #[test]
+    fn iupac_bases_agree_with_the_ascii_decode() {
+        let codes: Vec<u8> = (0..16).chain([3]).collect();
+        let record =
+            RawBamRecord::from_payload(payload(false, 4, &[], &codes, &[]), &header()).unwrap();
+        let bases: Vec<IupacBase> = record.iupac_bases().collect();
+        assert_eq!(bases.len(), codes.len());
+        assert_eq!(bases.iter().map(|b| b.code()).collect::<Vec<_>>(), codes);
+        let mut ascii = Vec::new();
+        record.decode_seq_into(&mut ascii);
+        assert_eq!(IupacBase::to_ascii_slice(&bases), ascii);
     }
 
     fn op(len: u32, code: u32) -> u32 {
