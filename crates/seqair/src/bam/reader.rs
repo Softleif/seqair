@@ -399,7 +399,10 @@ pub struct RawQuery<'r, R: Read + Seek> {
 
 impl<R: Read + Seek> std::fmt::Debug for RawQuery<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawQuery").field("query", &self.query).field("failed", &self.failed).finish()
+        f.debug_struct("RawQuery")
+            .field("query", &self.query)
+            .field("failed", &self.failed)
+            .finish()
     }
 }
 

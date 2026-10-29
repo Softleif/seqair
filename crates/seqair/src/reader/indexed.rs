@@ -216,7 +216,9 @@ impl<R: Read + Seek> IndexedReader<R> {
             Self::Bam(r) => Ok(RawRegionQuery::Bam(r.query_raw(tid, span)?)),
             Self::Sam(r) => Ok(RawRegionQuery::Sam(r.query_raw(tid, span)?)),
             // CRAM records only exist decoded into a `RecordStore`, which is
-            // lossy; this arm waits for a decoder that rebuilds them whole.
+            // lossy. The seam: a `RawRegionQuery::Cram` variant that decodes
+            // the CRAI-selected containers whole into `RawBamRecord`s and
+            // filters them by the same overlap test.
             Self::Cram(_) => Err(ReaderError::RawQueryUnsupported),
         }
     }
