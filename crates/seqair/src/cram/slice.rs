@@ -14,6 +14,7 @@ use std::ops::Neg;
 
 use super::{
     block::{self, Block, ContentType},
+    codec_scratch::CodecScratch,
     compression_header::CompressionHeader,
     container::RefSeqId,
     encoding::{ByteArrayEncoding, ByteEncoding, DecodeContext, ExternalCursor, IntEncoding},
@@ -27,6 +28,7 @@ use crate::bam::{
     record_store::{CustomizeRecordStore, RecordStore},
 };
 use crate::reader::{FetchedRecord, Tid};
+use crate::sam::encode::{AlignmentFields, Qualities};
 use seqair_types::{BamFlags, Base, MappingQuality, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
 use tracing::warn;
@@ -70,6 +72,9 @@ pub(crate) struct DecodedSlice {
 struct SliceRecord {
     pos: Pos0,
     end_pos: Pos0,
+    /// An unmapped read whose `AP` is below 1: BAM position `-1`. Its `pos`
+    /// is 0 so region filters see a position.
+    unplaced: bool,
     flags: BamFlags,
     mapq: MappingQuality,
     matching_bases: u32,
@@ -104,6 +109,7 @@ impl DecodedSlice {
         &mut self,
         pos: Pos0,
         end_pos: Pos0,
+        unplaced: bool,
         flags: BamFlags,
         mapq: MappingQuality,
         matching_bases: u32,
@@ -133,6 +139,7 @@ impl DecodedSlice {
         self.records.push(SliceRecord {
             pos,
             end_pos,
+            unplaced,
             flags,
             mapq,
             matching_bases,
@@ -210,6 +217,25 @@ impl DecodedSlice {
     }
 }
 
+impl DecodedSlice {
+    /// Every record, in slice order, as the fields of its BAM record
+    /// (`r[cram.stream.raw_records]`).
+    pub(crate) fn alignments(&self) -> impl ExactSizeIterator<Item = AlignmentFields<'_>> {
+        self.records.iter().map(|r| AlignmentFields {
+            tid: r.tid,
+            pos: (!r.unplaced).then_some(r.pos),
+            flags: r.flags.raw(),
+            mapq: r.mapq,
+            mate_fields: r.mate_fields,
+            qname: field(&self.names, r.name),
+            cigar: field(&self.cigar, r.cigar),
+            seq: bytemuck::cast_slice(field(&self.bases, r.seq)),
+            qual: Qualities::Raw(field(&self.qual, r.qual)),
+            aux: field(&self.aux, r.aux),
+        })
+    }
+}
+
 /// A record's field in a [`DecodedSlice`] slab; its ranges were cut from
 /// the slab as it grew, so they always fit.
 fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
@@ -276,8 +302,89 @@ impl SliceHeader {
     }
 }
 
-/// Decode all of a slice's records for reference `tid` into a
-/// [`DecodedSlice`].
+/// Which of a slice's records a decode keeps; the others are read past
+/// without reconstructing their sequence (`r[cram.slice.multi_ref_skip]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Keep {
+    /// The records on one reference: a query's.
+    Tid(Tid),
+    /// Every record: a stream's (`r[cram.stream.all_records]`).
+    All,
+    /// None, for collecting where the records lie.
+    Nothing,
+}
+
+impl Keep {
+    fn keeps(self, tid: Option<Tid>) -> bool {
+        match self {
+            Self::Tid(t) => tid == Some(t),
+            Self::All => true,
+            Self::Nothing => false,
+        }
+    }
+}
+
+/// A stretch of one reference, its bases converted, for the records of a
+/// multi-reference slice on it.
+#[derive(Debug)]
+pub(crate) struct TidWindow {
+    pub(crate) tid: Tid,
+    /// 0-based position of the first base.
+    pub(crate) start: i64,
+    pub(crate) bases: Vec<Base>,
+}
+
+/// The reference bases a slice's records are reconstructed against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SliceReference<'a> {
+    /// One window of the slice's reference starting at 0-based `start`;
+    /// `None` when the FASTA lacks the contig, which only a slice that does
+    /// not embed its reference minds.
+    Window { bases: Option<&'a [u8]>, start: i64 },
+    /// A window per reference, sorted by tid, for every reference a
+    /// multi-reference slice keeps records of (`r[cram.stream.reference_window]`).
+    PerTid(&'a [TidWindow]),
+}
+
+/// The reference a record is reconstructed against.
+enum RecordReference<'a> {
+    One { bases: &'a [Base], start: i64 },
+    PerTid(&'a [TidWindow]),
+}
+
+impl RecordReference<'_> {
+    fn for_tid(&self, tid: Option<Tid>) -> (&[Base], i64) {
+        match self {
+            Self::One { bases, start } => (bases, *start),
+            Self::PerTid(windows) => tid
+                .and_then(|tid| windows.binary_search_by_key(&tid, |w| w.tid).ok())
+                .and_then(|i| windows.get(i))
+                .map_or((&[][..], 0), |w| (w.bases.as_slice(), w.start)),
+        }
+    }
+}
+
+/// Buffers a reader reuses across slices and records, so decoding does not
+/// allocate per record once they have grown.
+#[derive(Default)]
+pub(crate) struct SliceScratch {
+    pub(crate) cigar: Vec<CigarOp>,
+    pub(crate) bases: Vec<Base>,
+    pub(crate) qual: Vec<u8>,
+    pub(crate) aux: Vec<u8>,
+    /// Read name (qname) bytes.
+    pub(crate) name: Vec<u8>,
+    /// Per-feature byte payloads (insertion bases, soft-clip bases,
+    /// bases-block, quality-block).
+    pub(crate) feature_bytes: Vec<u8>,
+    /// `(length, op_code)` CIGAR ops before they are packed into
+    /// BAM-layout `CigarOp`s.
+    pub(crate) cigar_ops: Vec<(u32, u8)>,
+    /// rANS order-1 tables and the bzip2 decoder, each allocated on first use.
+    pub(crate) codec: CodecScratch,
+}
+
+/// Decode a slice's records — those `keep` names — into a [`DecodedSlice`].
 ///
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
@@ -289,20 +396,77 @@ pub(crate) fn decode_slice(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
-    reference_seq: Option<&[u8]>,
-    ref_start_0based: i64,
+    reference: SliceReference<'_>,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
-    tid: Tid,
-    cigar_buf: &mut Vec<CigarOp>,
-    bases_buf: &mut Vec<Base>,
-    qual_buf: &mut Vec<u8>,
-    aux_buf: &mut Vec<u8>,
-    name_buf: &mut Vec<u8>,
-    feature_byte_buf: &mut Vec<u8>,
-    cigar_ops_buf: &mut Vec<(u32, u8)>,
-    scratch: &mut super::codec_scratch::CodecScratch,
+    keep: Keep,
+    scratch: &mut SliceScratch,
 ) -> Result<DecodedSlice, CramError> {
+    decode_slice_records(
+        ch,
+        container_data,
+        slice_offset,
+        reference,
+        header,
+        read_group_ids,
+        keep,
+        scratch,
+    )
+    .map(|(slice, _)| slice)
+}
+
+// r[impl cram.stream.reference_window]
+/// Where the mapped records of a multi-reference slice lie: per reference,
+/// sorted by tid, the 0-based half-open span from the lowest start to the
+/// highest end. Reconstructs nothing, so it needs no reference.
+pub(crate) fn multi_ref_spans(
+    ch: &CompressionHeader,
+    container_data: &[u8],
+    slice_offset: usize,
+    header: &BamHeader,
+    read_group_ids: &[SmolStr],
+    scratch: &mut SliceScratch,
+) -> Result<Vec<(Tid, Range<i64>)>, CramError> {
+    let (_, infos) = decode_slice_records(
+        ch,
+        container_data,
+        slice_offset,
+        SliceReference::PerTid(&[]),
+        header,
+        read_group_ids,
+        Keep::Nothing,
+        scratch,
+    )?;
+    let mut spans: Vec<(Tid, Range<i64>)> = Vec::new();
+    for info in infos.iter().filter(|i| !BamFlags::from(i.bam_flags).is_unmapped()) {
+        let Some(tid) = info.tid else { continue };
+        match spans.binary_search_by_key(&tid, |(t, _)| *t) {
+            Ok(i) => {
+                if let Some((_, span)) = spans.get_mut(i) {
+                    span.start = span.start.min(info.pos);
+                    span.end = span.end.max(info.end_pos);
+                }
+            }
+            Err(i) => spans.insert(i, (tid, Range { start: info.pos, end: info.end_pos })),
+        }
+    }
+    Ok(spans)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
+)]
+fn decode_slice_records(
+    ch: &CompressionHeader,
+    container_data: &[u8],
+    slice_offset: usize,
+    reference: SliceReference<'_>,
+    header: &BamHeader,
+    read_group_ids: &[SmolStr],
+    keep: Keep,
+    scratch: &mut SliceScratch,
+) -> Result<(DecodedSlice, Vec<SliceMateInfo>), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or_else(|| CramError::Truncated { context: "slice offset" })?;
@@ -310,24 +474,28 @@ pub(crate) fn decode_slice(
     // Parse slice header block
     // The scratch lives on the reader so every block of every slice reuses
     // one set of codec tables instead of allocating its own.
-    let (slice_header_block, mut pos) = block::parse_block_with(slice_data, scratch)?;
+    let (slice_header_block, mut pos) = block::parse_block_with(slice_data, &mut scratch.codec)?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
     let sh = SliceHeader::parse(&slice_header_block.data)?;
+    let slice_ref = sh.ref_seq_id.resolve(header)?;
 
     // r[impl cram.edge.missing_reference+2]
-    let reference_seq: &[u8] = match reference_seq {
-        Some(seq) => seq,
-        None if sh.embedded_reference >= 0 => &[],
-        None => {
+    let (reference_seq, ref_start_0based): (&[u8], i64) = match reference {
+        SliceReference::Window { bases: Some(seq), start } => (seq, start),
+        SliceReference::Window { bases: None, start } if sh.embedded_reference >= 0 => (&[], start),
+        SliceReference::Window { bases: None, .. } => {
+            let tid = match (slice_ref, keep) {
+                (RefSeqId::Ref(t), _) | (_, Keep::Tid(t)) => Some(t),
+                _ => None,
+            };
             return Err(CramError::MissingReference {
-                contig: header.target_name(tid).unwrap_or("?").into(),
+                contig: tid.and_then(|t| header.target_name(t)).unwrap_or("?").into(),
             });
         }
+        SliceReference::PerTid(_) => (&[], 0),
     };
-
-    let slice_ref = sh.ref_seq_id.resolve(header)?;
 
     // r[impl cram.edge.unknown_read_names]
     if !ch.preservation.read_names_included {
@@ -338,7 +506,7 @@ pub(crate) fn decode_slice(
 
     // r[impl cram.edge.empty_slice]
     if sh.num_records == 0 {
-        return Ok(DecodedSlice::default());
+        return Ok((DecodedSlice::default(), Vec::new()));
     }
 
     // r[impl cram.edge.reference_mismatch]
@@ -365,11 +533,15 @@ pub(crate) fn decode_slice(
         let span = usize::try_from(sh.alignment_span)
             .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
         let slice_ref_end = slice_ref_start.wrapping_add(span);
-        if let Some(slice_ref) = reference_seq.get(slice_ref_start..slice_ref_end) {
-            let computed = md5_uppercase_streaming(slice_ref);
+        if let Some(slice_bases) = reference_seq.get(slice_ref_start..slice_ref_end) {
+            let computed = md5_uppercase_streaming(slice_bases);
             if computed != sh.reference_md5 {
+                let contig = match slice_ref {
+                    RefSeqId::Ref(t) => header.target_name(t),
+                    _ => None,
+                };
                 return Err(CramError::ReferenceMd5Mismatch {
-                    contig: header.target_name(tid).unwrap_or("?").into(),
+                    contig: contig.unwrap_or("?").into(),
                     start: sh.alignment_start as u64,
                     end: sh.alignment_start.wrapping_add(sh.alignment_span) as u64,
                 });
@@ -384,7 +556,7 @@ pub(crate) fn decode_slice(
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or_else(|| CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block_with(remaining, scratch)?;
+        let (blk, consumed) = block::parse_block_with(remaining, &mut scratch.codec)?;
         pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
@@ -415,7 +587,21 @@ pub(crate) fn decode_slice(
     // Converted once, so reconstruction copies runs of reference bases
     // instead of converting base by base.
     let effective_ref = Base::from_ascii_vec(effective_ref.to_vec());
-    let effective_ref: &[Base] = &effective_ref;
+    // For embedded reference, ref_start is the slice's alignment_start
+    let effective_ref_start = if sh.embedded_reference >= 0 {
+        Pos1::try_from(sh.alignment_start.max(1))
+            .map_err(|_| CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
+            .to_zero_based()
+            .as_i64()
+    } else {
+        ref_start_0based
+    };
+    let record_reference = match reference {
+        SliceReference::PerTid(windows) => RecordReference::PerTid(windows),
+        SliceReference::Window { .. } => {
+            RecordReference::One { bases: &effective_ref, start: effective_ref_start }
+        }
+    };
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
 
@@ -431,35 +617,18 @@ pub(crate) fn decode_slice(
     let mut out = DecodedSlice::default();
 
     for record_index in 0..num_records {
-        // For embedded reference, ref_start is the slice's alignment_start
-        let effective_ref_start = if sh.embedded_reference >= 0 {
-            Pos1::try_from(sh.alignment_start.max(1))
-                .map_err(|_| CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
-                .to_zero_based()
-                .as_i64()
-        } else {
-            ref_start_0based
-        };
-
         let mate_info = decode_record(
             ch,
             &tag_lines,
             &mut ctx,
             &mut alignment_pos,
-            effective_ref,
-            effective_ref_start,
+            &record_reference,
             header,
             slice_ref,
             read_group_ids,
-            tid,
+            keep,
             &mut out,
-            cigar_buf,
-            bases_buf,
-            qual_buf,
-            aux_buf,
-            name_buf,
-            feature_byte_buf,
-            cigar_ops_buf,
+            scratch,
             record_index,
         )?;
         mate_infos.push(mate_info);
@@ -469,7 +638,7 @@ pub(crate) fn decode_slice(
     // Follow mate_line chains to compute alignment span, then assign signed TLEN.
     resolve_mate_tlen(&mate_infos, &mut out);
     out.shrink_to_fit();
-    Ok(out)
+    Ok((out, mate_infos))
 }
 
 // r[impl cram.perf.external_order]
@@ -589,23 +758,26 @@ fn decode_record(
     tag_lines: &[ResolvedTagLine<'_>],
     ctx: &mut DecodeContext<'_>,
     prev_alignment_pos: &mut i64,
-    reference_seq: &[Base],
-    ref_start_0based: i64,
+    reference: &RecordReference<'_>,
     header: &BamHeader,
     slice_ref: RefSeqId<Tid>,
     read_group_ids: &[SmolStr],
-    tid: Tid,
+    keep: Keep,
     out: &mut DecodedSlice,
-    cigar_buf: &mut Vec<CigarOp>,
-    bases_buf: &mut Vec<Base>,
-    qual_buf: &mut Vec<u8>,
-    aux_buf: &mut Vec<u8>,
-    name_buf: &mut Vec<u8>,
-    feature_byte_buf: &mut Vec<u8>,
-    cigar_ops_buf: &mut Vec<(u32, u8)>,
+    scratch: &mut SliceScratch,
     record_index: usize,
 ) -> Result<SliceMateInfo, CramError> {
     let ds = &ch.data_series;
+    let SliceScratch {
+        cigar: cigar_buf,
+        bases: bases_buf,
+        qual: qual_buf,
+        aux: aux_buf,
+        name: name_buf,
+        feature_bytes: feature_byte_buf,
+        cigar_ops: cigar_ops_buf,
+        codec: _,
+    } = scratch;
 
     // r[impl cram.record.flags]
     // 1. BF (BAM flags)
@@ -634,10 +806,10 @@ fn decode_record(
         RefSeqId::Ref(t) => Some(t),
         RefSeqId::Unmapped => None,
     };
-    // A record the query does not want: in a multi-reference slice, one of
-    // another reference or none. A query decodes only slices that list its
-    // reference, so in any other slice every record is on it.
-    let foreign_tid = record_ref_id != Some(tid);
+    // A record the decode does not want: for a query, in a multi-reference
+    // slice, one of another reference or none. A query decodes only slices
+    // that list its reference, so in any other slice every record is on it.
+    let foreign_tid = !keep.keeps(record_ref_id);
 
     // r[impl cram.record.read_length]
     // 4. RL (read length)
@@ -661,7 +833,8 @@ fn decode_record(
     // them to 0-based 0 rather than erroring — the unmapped path below still
     // pushes them to the store and lets the region filter decide. A *mapped*
     // read must always have a valid (>= 1) AP, so it still errors.
-    let pos_0based = if bam_flags.is_unmapped() && alignment_pos < 1 {
+    let unplaced = bam_flags.is_unmapped() && alignment_pos < 1;
+    let pos_0based = if unplaced {
         Pos0::ZERO
     } else {
         Pos1::try_from(alignment_pos)
@@ -798,6 +971,7 @@ fn decode_record(
                 scan_features_for_refspan(ch, ctx, feature_count, read_length, feature_byte_buf)?;
             (span, 0, 0)
         } else {
+            let (reference_seq, ref_start_0based) = reference.for_tid(record_ref_id);
             let result = decode_features_and_reconstruct(
                 ch,
                 ctx,
@@ -870,6 +1044,7 @@ fn decode_record(
         let slot = out.push(
             pos_0based,
             end_pos,
+            false,
             bam_flags,
             mapq,
             matching_bases,
@@ -923,6 +1098,7 @@ fn decode_record(
         Some(out.push(
             pos_0based,
             pos_0based,
+            unplaced,
             bam_flags,
             MappingQuality::from_byte(0), // unmapped reads have MAPQ=0 per spec
             0,                            // matching_bases
@@ -1637,19 +1813,11 @@ mod tests {
             &ch,
             container_data,
             first_landmark as usize,
-            Some(&fake_ref),
-            ref_start,
+            SliceReference::Window { bases: Some(&fake_ref), start: ref_start },
             &bam_header,
             &[],
-            tid(0),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut crate::cram::codec_scratch::CodecScratch::default(),
+            Keep::Tid(tid(0)),
+            &mut SliceScratch::default(),
         );
 
         assert!(

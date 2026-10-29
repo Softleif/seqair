@@ -406,6 +406,8 @@ pub(crate) enum Qualities<'a> {
     Missing,
     /// SAM's QUAL text, Phred+33.
     Phred33(&'a [u8]),
+    /// BAM's bytes, copied as they are.
+    Raw(&'a [u8]),
 }
 
 /// One alignment's fields, as htslib's `bam_set1` takes them.
@@ -502,6 +504,7 @@ pub(crate) fn encode_alignment(
     match f.qual {
         Qualities::Missing => payload.resize(payload.len().saturating_add(f.seq.len()), 0xFF),
         Qualities::Phred33(qual) => payload.extend(qual.iter().map(|q| q.wrapping_sub(33))),
+        Qualities::Raw(qual) => payload.extend_from_slice(qual),
     }
     payload.extend_from_slice(f.aux);
     if long {
