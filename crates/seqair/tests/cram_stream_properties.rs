@@ -21,6 +21,7 @@ mod pinned;
 
 use hegel::TestCase;
 use hegel::generators as gs;
+use seqair::bam::stream::BamStreamReader;
 use seqair::bam::{RawBamRecord, RecordStore};
 use seqair::cram::reader::IndexedCramReader;
 use seqair::cram::stream::CramStreamReader;
@@ -32,6 +33,8 @@ use std::process::Command;
 
 const CONTIG_LEN: usize = 300;
 const QUAL_CHARS: &str = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHI";
+/// `reg2bin(-1, 0)`: the bin the SAM spec (§4.2.1) gives a record with no position.
+const UNPLACED_BIN: u16 = 4680;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -262,6 +265,18 @@ fn samtools_view(cram: &Path, fasta: &Path, args: &[&str]) -> Vec<u8> {
         .arg(cram))
 }
 
+/// samtools' records as BAM payloads, through `samtools view -b`.
+fn samtools_payloads(cram: &Path, fasta: &Path) -> Vec<Vec<u8>> {
+    let bam = samtools_view(cram, fasta, &["-b"]);
+    let mut reader = BamStreamReader::new(&bam[..]).unwrap();
+    let mut out = Vec::new();
+    let mut payload = Vec::new();
+    while reader.read_payload_into(&mut payload).unwrap() {
+        out.push(std::mem::take(&mut payload));
+    }
+    out
+}
+
 fn sam_line(record: &RawBamRecord, header: &seqair::bam::BamHeader) -> String {
     let mut out = Vec::new();
     format_sam_record(record, header, &mut out).unwrap();
@@ -316,4 +331,47 @@ fn mapped_reads_without_seq_come_back_without_seq(tc: TestCase) {
         }
     }
     assert_eq!(fetched, seen, "{opts:?}: the indexed reader returns every secondary");
+}
+
+// r[verify cram.stream.all_records]
+// r[verify cram.stream.raw_records]
+// r[verify cram.stream.fidelity]
+// r[verify cram.edge.unmapped_reads+2]
+/// Streaming keeps every record — unplaced and placed-unmapped ones
+/// included, in whatever slices the writer put them — as many as
+/// `samtools view -c` counts; an unplaced one has no reference, no position
+/// and bin 4680; and every record is byte for byte what `samtools view -b`
+/// writes and formats as `samtools view` prints it.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn streamed_unplaced_reads_are_kept_as_samtools_reads_them(tc: TestCase) {
+    let sample = tc.draw(arb_unplaced_sample());
+    let opts = tc.draw(arb_opts());
+    let dir = tempfile::tempdir().unwrap();
+    let (cram, fasta) = write_cram(dir.path(), &sample, &opts);
+
+    let (header, records) = stream(&cram, &fasta);
+    let count = String::from_utf8(samtools_view(&cram, &fasta, &["-c"])).unwrap();
+    assert_eq!(records.len(), count.trim().parse::<usize>().unwrap(), "{opts:?}: samtools -c");
+    assert_eq!(records.len(), sample.lines.len(), "{opts:?}: generated");
+
+    let mut unplaced = 0;
+    for record in &records {
+        if kind_of(&sample, record.qname()) == Kind::Unplaced {
+            unplaced += 1;
+            let what = format!("{opts:?}: {:?}", record.qname().escape_ascii().to_string());
+            assert_eq!(record.tid(), None, "{what}");
+            assert_eq!(record.pos(), None, "{what}");
+            assert_eq!(record.bin(), UNPLACED_BIN, "{what}");
+        }
+    }
+    assert!(unplaced > 0, "the sample holds an unplaced read");
+
+    let payloads = samtools_payloads(&cram, &fasta);
+    let theirs = String::from_utf8(samtools_view(&cram, &fasta, &[])).unwrap();
+    let theirs: Vec<&str> = theirs.lines().collect();
+    assert_eq!(payloads.len(), records.len(), "{opts:?}");
+    for ((record, payload), line) in records.iter().zip(&payloads).zip(&theirs) {
+        assert_eq!(&sam_line(record, &header), line, "{opts:?}");
+        assert!(record.as_payload() == payload.as_slice(), "{opts:?}: payload of {line}");
+    }
 }
