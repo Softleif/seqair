@@ -651,8 +651,8 @@ If the FASTA reader cannot provide the reference sequence for a slice's region (
 r[cram.edge.unknown_read_names]
 When `RN=false` in the preservation map, read names are not available. The reader MUST log a warning (once per slice). Records without read names are stored with empty qnames. The pileup engine's overlapping-pair dedup MUST skip records with empty or `*` qnames, since mate matching requires real qnames.
 
-r[cram.edge.seq_unknown]
-When CRAM flags bit 0x8 is set, the read's sequence is unknown (`*` in SAM). `seq_len` MUST be 0 and no bases are pushed to the bases slab.
+r[cram.edge.seq_unknown+2]
+When CRAM flags bit 0x8 is set, the read's sequence is unknown (`*` in SAM). `seq_len` MUST be 0 and neither bases nor qualities are kept, for mapped reads as for unmapped ones. A mapped read still has its features and `RL` qualities decoded, to keep the data series in step: htslib's encoder stores `RL` as the CIGAR's query length and `0xFF` qualities, and its decoder reads them and then sets the length to 0 (`cram_decode_seq`).
 
 r[cram.edge.empty_slice]
 Slices with 0 records MUST be silently skipped.
