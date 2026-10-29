@@ -28,105 +28,16 @@ use crate::bam::{
 };
 use crate::reader::{FetchedRecord, Tid};
 use crate::sam::encode::{AlignmentFields, Qualities, Seq};
-use seqair_types::{BamFlags, Base, IupacBase, MappingQuality, Pos0, Pos1, SmallVec, SmolStr};
+use seqair_types::{BamFlags, IupacBase, MappingQuality, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
 use tracing::warn;
 
-// r[impl cram.stream.iupac]
-/// A base as a decode rebuilds SEQ: [`Base`] for the indexed reader, whose
-/// records feed the pileup, [`IupacBase`] for the stream, which keeps every
-/// code htslib keeps.
-pub(crate) trait SeqBase: Copy + Default + PartialEq + std::fmt::Debug + 'static {
-    /// A reference base as the decode keeps the slice's reference.
-    type Ref: Copy + std::fmt::Debug + 'static;
-    /// `N`, for a read base past the reference's end.
-    const N: Self;
-    /// `N`, for a reference base past its end.
-    const REF_N: Self::Ref;
-    /// What an implicit match reads as in a slice without a reference
-    /// (`r[cram.record.no_ref_fill]`).
-    const NO_REF: Self;
-    /// Whether decodes of this kind may generate `MD`/`NM`; `false` lets
-    /// the indexed reader's decode compile without the bookkeeping.
-    const MD_NM: bool;
-    /// A read base the CRAM stores as a byte.
-    fn from_ascii(byte: u8) -> Self;
-    /// A stretch of the reference, converted once per slice.
-    fn reference(ascii: &[u8]) -> Vec<Self::Ref>;
-    /// Implicit matches: the reference bases, as read bases.
-    fn extend_from_ref(reference: &[Self::Ref], bases: &mut Vec<Self>);
-    /// The upper-case letter, for substitutions and `MD`.
-    fn ref_ascii(base: Self::Ref) -> u8;
-    /// Whether a reference base is `N`, a mismatch in a generated `MD`.
-    fn ref_is_n(base: Self::Ref) -> bool;
-}
-
-impl SeqBase for Base {
-    type Ref = Base;
-    const N: Self = Base::Unknown;
-    const REF_N: Base = Base::Unknown;
-    const NO_REF: Self = Base::Unknown;
-    const MD_NM: bool = false;
-
-    #[inline]
-    fn from_ascii(byte: u8) -> Self {
-        Base::from(byte)
-    }
-
-    fn reference(ascii: &[u8]) -> Vec<Base> {
-        Base::from_ascii_vec(ascii.to_vec())
-    }
-
-    #[inline]
-    fn extend_from_ref(reference: &[Base], bases: &mut Vec<Self>) {
-        bases.extend_from_slice(reference);
-    }
-
-    #[inline]
-    fn ref_ascii(base: Base) -> u8 {
-        base as u8
-    }
-
-    #[inline]
-    fn ref_is_n(base: Base) -> bool {
-        base == Base::Unknown
-    }
-}
-
-/// The stream keeps the reference as upper-case ASCII, as htslib does: its
-/// `MD` counts a literal `N` only, not the bytes `bam_set1` reads as `N` (an
-/// `embed_ref=2` consensus can hold a NUL).
-impl SeqBase for IupacBase {
-    type Ref = u8;
-    const N: Self = IupacBase::N;
-    const REF_N: u8 = b'N';
-    const NO_REF: Self = IupacBase::Eq;
-    const MD_NM: bool = true;
-
-    #[inline]
-    fn from_ascii(byte: u8) -> Self {
-        IupacBase::from_ascii(byte)
-    }
-
-    fn reference(ascii: &[u8]) -> Vec<u8> {
-        ascii.to_ascii_uppercase()
-    }
-
-    fn extend_from_ref(reference: &[u8], bases: &mut Vec<Self>) {
-        IupacBase::from_ascii_into(reference, bases);
-    }
-
-    /// A byte that is no IUPAC letter is written as `N`, where htslib would
-    /// copy it into `MD` as it is.
-    #[inline]
-    fn ref_ascii(base: u8) -> u8 {
-        IupacBase::from_ascii(base).to_ascii()
-    }
-
-    #[inline]
-    fn ref_is_n(base: u8) -> bool {
-        base == b'N'
-    }
+// r[impl cram.stream.iupac+1]
+/// A byte that is no IUPAC letter is written as `N`, where htslib would
+/// copy it into `MD` as it is.
+#[inline]
+fn ref_ascii(base: u8) -> u8 {
+    IupacBase::from_ascii(base).to_ascii()
 }
 
 /// Mate cross-reference info collected during CRAM record decoding.
@@ -155,11 +66,11 @@ struct SliceMateInfo {
 /// attached-mate fields resolved over the whole slice. A fetch copies the
 /// records it wants out of it with [`copy_into`](Self::copy_into).
 #[derive(Debug, Default)]
-pub(crate) struct DecodedSlice<B: SeqBase = Base> {
+pub(crate) struct DecodedSlice {
     records: Vec<SliceRecord>,
     names: Vec<u8>,
     cigar: Vec<CigarOp>,
-    bases: Vec<B>,
+    bases: Vec<IupacBase>,
     qual: Vec<u8>,
     aux: Vec<u8>,
 }
@@ -186,14 +97,14 @@ struct SliceRecord {
     aux: Range<usize>,
 }
 
-impl<B: SeqBase> DecodedSlice<B> {
+impl DecodedSlice {
     /// Heap bytes the slice holds, for the cache's budget.
     pub(crate) fn heap_bytes(&self) -> usize {
         [
             self.records.capacity().saturating_mul(size_of::<SliceRecord>()),
             self.names.capacity(),
             self.cigar.capacity().saturating_mul(size_of::<CigarOp>()),
-            self.bases.capacity().saturating_mul(size_of::<B>()),
+            self.bases.capacity().saturating_mul(size_of::<IupacBase>()),
             self.qual.capacity(),
             self.aux.capacity(),
         ]
@@ -214,7 +125,7 @@ impl<B: SeqBase> DecodedSlice<B> {
         indel_bases: u32,
         name: &[u8],
         cigar: &[CigarOp],
-        bases: &[B],
+        bases: &[IupacBase],
         qual: &[u8],
         aux: &[u8],
         tid: Option<Tid>,
@@ -289,10 +200,13 @@ impl DecodedSlice {
         customize: &mut E,
         counts: &mut crate::reader::FetchCounts,
     ) -> Result<(), CramError> {
+        let mut bases = Vec::new();
         for r in &self.records {
             if !r.overlaps(query_start, query_end) {
                 continue;
             }
+            bases.clear();
+            bases.extend(field(&self.bases, r.seq).iter().map(|b| b.to_base()));
             let idx = store.push_fields(
                 r.pos,
                 r.end_pos,
@@ -302,7 +216,7 @@ impl DecodedSlice {
                 r.indel_bases,
                 field(&self.names, r.name),
                 field(&self.cigar, r.cigar),
-                field(&self.bases, r.seq),
+                &bases,
                 field(&self.qual, r.qual),
                 field(&self.aux, r.aux),
                 r.tid,
@@ -328,7 +242,7 @@ impl SliceRecord {
     }
 }
 
-impl DecodedSlice<IupacBase> {
+impl DecodedSlice {
     /// Every record, in slice order, as the fields of its BAM record
     /// (`r[cram.stream.raw_records]`).
     pub(crate) fn alignments(&self) -> impl ExactSizeIterator<Item = AlignmentFields<'_>> {
@@ -464,42 +378,71 @@ impl Keep {
     }
 }
 
+/// A stretch of reference as reconstruction reads it: upper-case ASCII for
+/// substitutions and `MD`, and its codes, which implicit matches copy as they
+/// are instead of converting each run of every read.
+#[derive(Debug, Default)]
+pub(crate) struct RefBases {
+    ascii: Vec<u8>,
+    codes: Vec<IupacBase>,
+}
+
+impl RefBases {
+    // r[impl cram.stream.iupac+1]
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        let ascii = bytes.to_ascii_uppercase();
+        let codes = IupacBase::from_ascii_slice(&ascii);
+        Self { ascii, codes }
+    }
+
+    fn view(&self) -> RefView<'_> {
+        RefView { ascii: &self.ascii, codes: &self.codes }
+    }
+}
+
+/// A borrowed [`RefBases`]; the two slices are the same length.
+#[derive(Debug, Clone, Copy, Default)]
+struct RefView<'a> {
+    ascii: &'a [u8],
+    codes: &'a [IupacBase],
+}
+
 /// A stretch of one reference, its bases converted, for the records of a
 /// multi-reference slice on it.
 #[derive(Debug)]
-pub(crate) struct TidWindow<B> {
+pub(crate) struct TidWindow {
     pub(crate) tid: Tid,
     /// 0-based position of the first base.
     pub(crate) start: i64,
-    pub(crate) bases: Vec<B>,
+    pub(crate) bases: RefBases,
 }
 
 /// The reference bases a slice's records are reconstructed against.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum SliceReference<'a, B> {
+pub(crate) enum SliceReference<'a> {
     /// One window of the slice's reference starting at 0-based `start`;
     /// `None` when the FASTA lacks the contig, which only a slice that does
     /// not embed its reference minds.
     Window { bases: Option<&'a [u8]>, start: i64 },
     /// A window per reference, sorted by tid, for every reference a
     /// multi-reference slice keeps records of (`r[cram.stream.reference_window+2]`).
-    PerTid(&'a [TidWindow<B>]),
+    PerTid(&'a [TidWindow]),
 }
 
 /// The reference a record is reconstructed against.
-enum RecordReference<'a, B> {
-    One { bases: &'a [B], start: i64 },
-    PerTid(&'a [TidWindow<B>]),
+enum RecordReference<'a> {
+    One { bases: RefView<'a>, start: i64 },
+    PerTid(&'a [TidWindow]),
 }
 
-impl<B> RecordReference<'_, B> {
-    fn for_tid(&self, tid: Option<Tid>) -> (&[B], i64) {
+impl RecordReference<'_> {
+    fn for_tid(&self, tid: Option<Tid>) -> (RefView<'_>, i64) {
         match self {
-            Self::One { bases, start } => (bases, *start),
+            Self::One { bases, start } => (*bases, *start),
             Self::PerTid(windows) => tid
                 .and_then(|tid| windows.binary_search_by_key(&tid, |w| w.tid).ok())
                 .and_then(|i| windows.get(i))
-                .map_or((&[][..], 0), |w| (w.bases.as_slice(), w.start)),
+                .map_or((RefView::default(), 0), |w| (w.bases.view(), w.start)),
         }
     }
 }
@@ -507,9 +450,9 @@ impl<B> RecordReference<'_, B> {
 /// Buffers a reader reuses across slices and records, so decoding does not
 /// allocate per record once they have grown.
 #[derive(Default)]
-pub(crate) struct SliceScratch<B = Base> {
+pub(crate) struct SliceScratch {
     pub(crate) cigar: Vec<CigarOp>,
-    pub(crate) bases: Vec<B>,
+    pub(crate) bases: Vec<IupacBase>,
     pub(crate) qual: Vec<u8>,
     pub(crate) aux: Vec<u8>,
     /// Read name (qname) bytes.
@@ -533,17 +476,17 @@ pub(crate) struct SliceScratch<B = Base> {
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub(crate) fn decode_slice<B: SeqBase>(
+pub(crate) fn decode_slice(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
-    reference: SliceReference<'_, B::Ref>,
+    reference: SliceReference<'_>,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
     synthesis: Synthesis<'_>,
-    scratch: &mut SliceScratch<B>,
-) -> Result<DecodedSlice<B>, CramError> {
+    scratch: &mut SliceScratch,
+) -> Result<DecodedSlice, CramError> {
     decode_slice_records(
         ch,
         container_data,
@@ -565,17 +508,17 @@ pub(crate) fn decode_slice<B: SeqBase>(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub(crate) fn decode_slice_indexed<B: SeqBase>(
+pub(crate) fn decode_slice_indexed(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
-    reference: SliceReference<'_, B::Ref>,
+    reference: SliceReference<'_>,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
     synthesis: Synthesis<'_>,
-    scratch: &mut SliceScratch<B>,
-) -> Result<(DecodedSlice<B>, Vec<u32>), CramError> {
+    scratch: &mut SliceScratch,
+) -> Result<(DecodedSlice, Vec<u32>), CramError> {
     let (slice, infos) = decode_slice_records(
         ch,
         container_data,
@@ -596,13 +539,13 @@ pub(crate) fn decode_slice_indexed<B: SeqBase>(
 /// Where the mapped records of a multi-reference slice lie: per reference,
 /// sorted by tid, the 0-based half-open span from the lowest start to the
 /// highest end. Reconstructs nothing, so it needs no reference.
-pub(crate) fn multi_ref_spans<B: SeqBase>(
+pub(crate) fn multi_ref_spans(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
-    scratch: &mut SliceScratch<B>,
+    scratch: &mut SliceScratch,
 ) -> Result<Vec<(Tid, Range<i64>)>, CramError> {
     let (_, infos) = decode_slice_records(
         ch,
@@ -635,17 +578,17 @@ pub(crate) fn multi_ref_spans<B: SeqBase>(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-fn decode_slice_records<B: SeqBase>(
+fn decode_slice_records(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
-    reference: SliceReference<'_, B::Ref>,
+    reference: SliceReference<'_>,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
     synthesis: Synthesis<'_>,
-    scratch: &mut SliceScratch<B>,
-) -> Result<(DecodedSlice<B>, Vec<SliceMateInfo>), CramError> {
+    scratch: &mut SliceScratch,
+) -> Result<(DecodedSlice, Vec<SliceMateInfo>), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or_else(|| CramError::Truncated { context: "slice offset" })?;
@@ -754,7 +697,7 @@ fn decode_slice_records<B: SeqBase>(
     } else {
         Vec::new()
     };
-    // r[impl cram.record.no_ref_fill]
+    // r[impl cram.record.no_ref_fill+1]
     // htslib has no reference for a slice of a file written without one
     // (`RR` false) unless the slice embeds it: no MD/NM, and no bases
     // copied, even from a FASTA at hand.
@@ -766,9 +709,7 @@ fn decode_slice_records<B: SeqBase>(
     } else {
         reference_seq
     };
-    // Converted once, so reconstruction copies runs of reference bases
-    // instead of converting base by base.
-    let effective_ref = B::reference(effective_ref);
+    let effective_ref = RefBases::new(effective_ref);
     // For embedded reference, ref_start is the slice's alignment_start
     let effective_ref_start = if sh.embedded_reference >= 0 {
         Pos1::try_from(sh.alignment_start.max(1))
@@ -780,15 +721,15 @@ fn decode_slice_records<B: SeqBase>(
     };
     let record_reference = match reference {
         SliceReference::PerTid(windows) if !no_ref => RecordReference::PerTid(windows),
-        SliceReference::PerTid(_) => RecordReference::One { bases: &effective_ref, start: 0 },
+        SliceReference::PerTid(_) => RecordReference::One { bases: effective_ref.view(), start: 0 },
         SliceReference::Window { .. } => {
-            RecordReference::One { bases: &effective_ref, start: effective_ref_start }
+            RecordReference::One { bases: effective_ref.view(), start: effective_ref_start }
         }
     };
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
     // r[impl cram.stream.md_nm]
-    let decode_md = B::MD_NM && synthesis.md_nm && !no_ref;
+    let decode_md = synthesis.md_nm && !no_ref;
     let names = synthesis.name_prefix.map(|prefix| NameRecords {
         prefix,
         first_record: u64::try_from(sh.record_counter).unwrap_or(0),
@@ -944,20 +885,20 @@ fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
     clippy::too_many_arguments,
     reason = "CRAM record decoding requires compression header, slice header, context, and scratch parameters"
 )]
-fn decode_record<B: SeqBase>(
+fn decode_record(
     ch: &CompressionHeader,
     tag_lines: &[ResolvedTagLine<'_>],
     ctx: &mut DecodeContext<'_>,
     prev_alignment_pos: &mut i64,
-    reference: &RecordReference<'_, B::Ref>,
+    reference: &RecordReference<'_>,
     header: &BamHeader,
     slice_ref: RefSeqId<Tid>,
     read_group_ids: &[SmolStr],
     keep: Keep,
     decode_md: bool,
     no_ref: bool,
-    out: &mut DecodedSlice<B>,
-    scratch: &mut SliceScratch<B>,
+    out: &mut DecodedSlice,
+    scratch: &mut SliceScratch,
     record_index: usize,
 ) -> Result<SliceMateInfo, CramError> {
     let ds = &ch.data_series;
@@ -1197,15 +1138,15 @@ fn decode_record<B: SeqBase>(
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
         let generate = GenerateMdNm {
-            md: B::MD_NM && decode_md && !seq_unknown && !stored_md,
-            nm: B::MD_NM && decode_md && !seq_unknown && !stored_nm,
+            md: decode_md && !seq_unknown && !stored_md,
+            nm: decode_md && !seq_unknown && !stored_nm,
         };
         let (ref_consumed, matching_bases, indel_bases) = if foreign_tid {
             let span =
                 scan_features_for_refspan(ch, ctx, feature_count, read_length, feature_byte_buf)?;
             (span, 0, 0)
         } else {
-            let (reference_seq, ref_start_0based) = reference.for_tid(record_ref_id);
+            let (record_ref, ref_start_0based) = reference.for_tid(record_ref_id);
             if !quality_as_array {
                 qual_buf.resize(read_length, 0xFF);
             }
@@ -1216,7 +1157,7 @@ fn decode_record<B: SeqBase>(
                 read_length,
                 pos_0based.as_i64(),
                 ref_start_0based,
-                reference_seq,
+                record_ref,
                 cigar_buf,
                 bases_buf,
                 feature_byte_buf,
@@ -1330,7 +1271,7 @@ fn decode_record<B: SeqBase>(
     // Unmapped read
     for _ in 0..read_length {
         let base_byte = ds.base.decode(ctx)?;
-        bases_buf.push(B::from_ascii(base_byte));
+        bases_buf.push(IupacBase::from_ascii(base_byte));
     }
 
     // Quality. See the mapped-read branch above for the bulk-decode
@@ -1409,9 +1350,9 @@ const MAX_NAME_PREFIX: usize = 254 - 21;
 /// gets TLEN 0. Then the explicit TLENs, and with `names` the names of
 /// records that have none.
 #[expect(clippy::indexing_slicing, reason = "indices are checked against infos.len() before use")]
-fn resolve_mates<B: SeqBase>(
+fn resolve_mates(
     infos: &mut [SliceMateInfo],
-    out: &mut DecodedSlice<B>,
+    out: &mut DecodedSlice,
     names: Option<NameRecords<'_>>,
 ) {
     let n = infos.len();
@@ -1534,14 +1475,10 @@ fn close_chain(infos: &mut [SliceMateInfo], tlen: &mut [Option<i64>], rec: usize
 /// Name every record that has none: its mate's name, or
 /// `<prefix>:<record number>`, the 1-based number in the file of the chain's
 /// first record when the mate comes earlier, else the record's own.
-fn name_records<B: SeqBase>(
-    infos: &[SliceMateInfo],
-    out: &mut DecodedSlice<B>,
-    names: NameRecords<'_>,
-) {
+fn name_records(infos: &[SliceMateInfo], out: &mut DecodedSlice, names: NameRecords<'_>) {
     let prefix = names.prefix.as_bytes();
     let prefix = prefix.get(..MAX_NAME_PREFIX).unwrap_or(prefix);
-    let name_of = |out: &DecodedSlice<B>, slot: Option<u32>| {
+    let name_of = |out: &DecodedSlice, slot: Option<u32>| {
         slot.and_then(|s| out.records.get(s as usize)).map(|r| r.name)
     };
     for (rec, info) in infos.iter().enumerate() {
@@ -1609,13 +1546,13 @@ impl MdNm {
 
     /// `n` implicit matches over `reference` (`None` past its end); a
     /// reference `N` is a mismatch.
-    fn matches<B: SeqBase>(&mut self, reference: Option<&[B::Ref]>, n: usize) {
+    fn matches(&mut self, reference: Option<&[u8]>, n: usize) {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
         match reference {
             Some(bases) => {
                 let mut run = 0i64;
                 for &b in bases {
-                    if B::ref_is_n(b) {
+                    if b == b'N' {
                         self.dist = self.dist.saturating_add(run);
                         run = 0;
                         self.mismatch(b'N');
@@ -1631,9 +1568,9 @@ impl MdNm {
     }
 
     /// `X`: a substitution of the reference base, `None` past its end.
-    fn substitution<B: SeqBase>(&mut self, ref_base: Option<B::Ref>) {
+    fn substitution(&mut self, ref_base: Option<u8>) {
         match ref_base {
-            Some(b) => self.mismatch(B::ref_ascii(b)),
+            Some(b) => self.mismatch(ref_ascii(b)),
             None => {
                 self.flush();
                 self.dist = -1;
@@ -1642,11 +1579,11 @@ impl MdNm {
     }
 
     /// `B`: a read base stored as it is, a mismatch wherever it lies.
-    fn read_base<B: SeqBase>(&mut self, ref_base: Option<B::Ref>) {
+    fn read_base(&mut self, ref_base: Option<u8>) {
         self.flush();
         match ref_base {
             Some(b) => {
-                self.md.push(B::ref_ascii(b));
+                self.md.push(ref_ascii(b));
                 self.nm = self.nm.saturating_add(1);
                 self.dist = 0;
             }
@@ -1655,7 +1592,7 @@ impl MdNm {
     }
 
     /// `b`: read bases stored as they are, each a mismatch.
-    fn read_bases<B: SeqBase>(&mut self, reference: &[B::Ref], start: usize, n: usize) {
+    fn read_bases(&mut self, reference: &[u8], start: usize, n: usize) {
         self.flush();
         for i in 0..n {
             if i > 0 {
@@ -1665,14 +1602,14 @@ impl MdNm {
                 self.dist = -1;
                 break;
             };
-            self.md.push(B::ref_ascii(b));
+            self.md.push(ref_ascii(b));
             self.nm = self.nm.saturating_add(1);
         }
         // htslib resets the run even when the bases ran off the reference.
         self.dist = 0;
     }
 
-    fn deletion<B: SeqBase>(&mut self, reference: &[B::Ref], start: usize, n: usize) {
+    fn deletion(&mut self, reference: &[u8], start: usize, n: usize) {
         self.flush();
         let Some(have) = reference.get(start..) else {
             self.dist = -1;
@@ -1680,7 +1617,7 @@ impl MdNm {
         };
         let deleted = have.get(..n).unwrap_or(have);
         self.md.push(b'^');
-        self.md.extend(deleted.iter().map(|&b| B::ref_ascii(b)));
+        self.md.extend(deleted.iter().map(|&b| ref_ascii(b)));
         self.nm = self.nm.saturating_add(u32::try_from(deleted.len()).unwrap_or(u32::MAX));
         if deleted.len() == n {
             self.dist = 0;
@@ -1743,21 +1680,21 @@ struct ReconstructResult {
 // r[impl cram.slice.ref_bounds_warning+2]
 /// Look up a reference base by index, logging a warning on the first out-of-bounds access
 /// per slice and falling back to `b'N'`.
-fn ref_base_at<B: SeqBase>(reference: &[B::Ref], index: usize, warned: &mut bool) -> B::Ref {
+fn ref_base_at(reference: &[u8], index: usize, warned: &mut bool) -> u8 {
     match reference.get(index) {
         Some(&b) => b,
         None => {
-            warn_ref_short(reference, index, warned);
-            B::REF_N
+            warn_ref_short(reference.len(), index, warned);
+            b'N'
         }
     }
 }
 
-fn warn_ref_short<B>(reference: &[B], index: usize, warned: &mut bool) {
+fn warn_ref_short(ref_len: usize, index: usize, warned: &mut bool) {
     if !*warned {
         warn!(
             index,
-            ref_len = reference.len(),
+            ref_len,
             "reference shorter than expected during CRAM sequence reconstruction; \
              substituting N (may indicate reference/CRAM mismatch)"
         );
@@ -1767,14 +1704,14 @@ fn warn_ref_short<B>(reference: &[B], index: usize, warned: &mut bool) {
 
 /// Append the `n` reference bases from `start` as read bases — one copy of
 /// the already-converted reference instead of a lookup and push per base —
-/// with `N` for any past the reference's end, as [`ref_base_at`] gives.
-fn extend_from_reference<B: SeqBase>(
-    reference: &[B::Ref],
+/// with `fill` for any past the reference's end.
+fn extend_from_reference(
+    reference: &[IupacBase],
     start: usize,
     n: usize,
     warned: &mut bool,
-    fill: B,
-    bases_buf: &mut Vec<B>,
+    fill: IupacBase,
+    bases_buf: &mut Vec<IupacBase>,
 ) {
     let have = reference.get(start..).unwrap_or_default();
     let (have, missing) = if have.len() >= n {
@@ -1782,9 +1719,9 @@ fn extend_from_reference<B: SeqBase>(
     } else {
         (have, n.wrapping_sub(have.len()))
     };
-    B::extend_from_ref(have, bases_buf);
+    bases_buf.extend_from_slice(have);
     if missing > 0 {
-        warn_ref_short(reference, start.wrapping_add(have.len()), warned);
+        warn_ref_short(reference.len(), start.wrapping_add(have.len()), warned);
         bases_buf.resize(bases_buf.len().wrapping_add(missing), fill);
     }
 }
@@ -1809,24 +1746,24 @@ fn extend_from_reference<B: SeqBase>(
     clippy::too_many_arguments,
     reason = "sequence reconstruction requires all CRAM encoding handles, reference slice, and output buffers"
 )]
-fn decode_features_and_reconstruct<B: SeqBase>(
+fn decode_features_and_reconstruct(
     ch: &CompressionHeader,
     ctx: &mut DecodeContext<'_>,
     feature_count: usize,
     read_length: usize,
     pos_0based: i64,
     slice_start_0based: i64,
-    reference_seq: &[B::Ref],
+    reference: RefView<'_>,
     cigar_buf: &mut Vec<CigarOp>,
-    bases_buf: &mut Vec<B>,
+    bases_buf: &mut Vec<IupacBase>,
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
-    md: Option<&mut MdNm>,
+    mut md: Option<&mut MdNm>,
     mut feature_quals: Option<&mut [u8]>,
     no_ref: bool,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
-    let mut md = md.filter(|_| B::MD_NM);
+    let reference_seq = reference.ascii;
 
     // pos_0based >= slice_start_0based is guaranteed by CRAM structure; a negative
     // difference would indicate a malformed file, so clamp to 0 and let ref_base_at
@@ -1834,9 +1771,9 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     let ref_offset = usize::try_from(pos_0based.wrapping_sub(slice_start_0based)).unwrap_or(0);
     let mut read_pos = 0usize; // 0-based position in the read
     let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
-    // r[impl cram.record.no_ref_fill]
+    // r[impl cram.record.no_ref_fill+1]
     // Without a reference htslib pre-fills SEQ with `=`, and nothing is short.
-    let fill = if no_ref { B::NO_REF } else { B::N };
+    let fill = if no_ref { IupacBase::Eq } else { IupacBase::N };
     let mut ref_warned = no_ref; // log at most one warning per reconstruction
     let mut matching_bases = 0u32;
     let mut indel_bases = 0u32;
@@ -1859,15 +1796,15 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     /// Emit `n` matching bases copied from the reference, advancing both
     /// `read_pos` and `ref_pos`: the fill up to the next feature and the tail.
     #[expect(clippy::too_many_arguments, reason = "shared helper for ref-match emit")]
-    fn emit_ref_run<B: SeqBase>(
-        reference: &[B::Ref],
+    fn emit_ref_run(
+        reference: RefView<'_>,
         ref_offset: usize,
         n: usize,
         ref_pos: &mut usize,
         read_pos: &mut usize,
         ref_warned: &mut bool,
-        fill: B,
-        bases_buf: &mut Vec<B>,
+        fill: IupacBase,
+        bases_buf: &mut Vec<IupacBase>,
         cigar_ops: &mut Vec<(u32, u8)>,
         matching_bases: &mut u32,
         md: Option<&mut MdNm>,
@@ -1877,9 +1814,9 @@ fn decode_features_and_reconstruct<B: SeqBase>(
         }
         let start = ref_offset.wrapping_add(*ref_pos);
         if let Some(md) = md {
-            md.matches::<B>(reference.get(start..start.saturating_add(n)), n);
+            md.matches(reference.ascii.get(start..start.saturating_add(n)), n);
         }
-        extend_from_reference::<B>(reference, start, n, ref_warned, fill, bases_buf);
+        extend_from_reference(reference.codes, start, n, ref_warned, fill, bases_buf);
         let n32 = u32::try_from(n).unwrap_or(u32::MAX);
         push_cigar_op(cigar_ops, n32, 0); // M
         *matching_bases = matching_bases.saturating_add(n32);
@@ -1900,7 +1837,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
         // Fill reference matches until read_pos reaches the feature's anchor.
         {
             emit_ref_run(
-                reference_seq,
+                reference,
                 ref_offset,
                 feat_target.min(read_length).saturating_sub(read_pos),
                 &mut ref_pos,
@@ -1922,16 +1859,13 @@ fn decode_features_and_reconstruct<B: SeqBase>(
             // X — substitution: 1 read base, 1 ref base, M cigar.
             b'X' => {
                 let bs = ds.base_sub.decode(ctx)?;
-                let ref_base = ref_base_at::<B>(
-                    reference_seq,
-                    ref_offset.wrapping_add(ref_pos),
-                    &mut ref_warned,
-                );
+                let ref_base =
+                    ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
                 let read_base =
-                    ch.preservation.substitution_matrix.substitute(B::ref_ascii(ref_base), bs);
-                bases_buf.push(B::from_ascii(read_base));
+                    ch.preservation.substitution_matrix.substitute(ref_ascii(ref_base), bs);
+                bases_buf.push(IupacBase::from_ascii(read_base));
                 if let Some(md) = md.as_deref_mut() {
-                    md.substitution::<B>(reference_seq.get(ref_index).copied());
+                    md.substitution(reference_seq.get(ref_index).copied());
                 }
                 push_cigar_op(cigar_ops_buf, 1, 0); // M
                 matching_bases = matching_bases.saturating_add(1);
@@ -1945,7 +1879,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 let len = feature_byte_buf.len();
                 bases_buf.reserve(len);
                 for &b in feature_byte_buf.iter() {
-                    bases_buf.push(B::from_ascii(b));
+                    bases_buf.push(IupacBase::from_ascii(b));
                 }
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -1962,7 +1896,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
             // i — single-base insertion.
             b'i' => {
                 let base = ds.base.decode(ctx)?;
-                bases_buf.push(B::from_ascii(base));
+                bases_buf.push(IupacBase::from_ascii(base));
                 if let Some(md) = md.as_deref_mut() {
                     md.insertion(1);
                 }
@@ -1974,7 +1908,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
             b'D' => {
                 let len = ds.deletion_length.decode(ctx)? as u32;
                 if let Some(md) = md.as_deref_mut() {
-                    md.deletion::<B>(reference_seq, ref_index, len as usize);
+                    md.deletion(reference_seq, ref_index, len as usize);
                 }
                 push_cigar_op(cigar_ops_buf, len, 2); // D
                 indel_bases = indel_bases.saturating_add(len);
@@ -1987,7 +1921,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 let len = feature_byte_buf.len();
                 bases_buf.reserve(len);
                 for &b in feature_byte_buf.iter() {
-                    bases_buf.push(B::from_ascii(b));
+                    bases_buf.push(IupacBase::from_ascii(b));
                 }
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -2020,9 +1954,9 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 if let Some(quals) = feature_quals.as_deref_mut() {
                     apply_feature_quals(quals, feat_target, &[qual]);
                 }
-                bases_buf.push(B::from_ascii(base));
+                bases_buf.push(IupacBase::from_ascii(base));
                 if let Some(md) = md.as_deref_mut() {
-                    md.read_base::<B>(reference_seq.get(ref_index).copied());
+                    md.read_base(reference_seq.get(ref_index).copied());
                 }
                 push_cigar_op(cigar_ops_buf, 1, 0); // M
                 matching_bases = matching_bases.saturating_add(1);
@@ -2036,7 +1970,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 let len = feature_byte_buf.len();
                 bases_buf.reserve(len);
                 for &b in feature_byte_buf.iter() {
-                    bases_buf.push(B::from_ascii(b));
+                    bases_buf.push(IupacBase::from_ascii(b));
                 }
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -2044,7 +1978,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 )]
                 let len_u32 = len as u32;
                 if let Some(md) = md.as_deref_mut() {
-                    md.read_bases::<B>(reference_seq, ref_index, len);
+                    md.read_bases(reference_seq, ref_index, len);
                 }
                 push_cigar_op(cigar_ops_buf, len_u32, 0); // M
                 matching_bases = matching_bases.saturating_add(len_u32);
@@ -2075,7 +2009,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     // Tail: fill reference matches until the read length is reached.
     {
         emit_ref_run(
-            reference_seq,
+            reference,
             ref_offset,
             read_length.saturating_sub(read_pos),
             &mut ref_pos,
@@ -2366,7 +2300,7 @@ mod tests {
             &[],
             Keep::Tid(tid(0)),
             Synthesis::default(),
-            &mut SliceScratch::<Base>::default(),
+            &mut SliceScratch::default(),
         );
 
         assert!(
@@ -2433,23 +2367,23 @@ mod tests {
     fn ref_base_at_warns_on_out_of_bounds() {
         // When requesting a base beyond the reference length, ref_base_at should
         // return b'N' and log a warning.
-        let reference = &[Base::A, Base::C, Base::G, Base::T];
+        let reference = b"ACGT";
         let mut warned = false;
 
         // In-bounds access should return the actual base
-        let base = ref_base_at::<Base>(reference, 0, &mut warned);
-        assert_eq!(base, Base::A);
+        let base = ref_base_at(reference, 0, &mut warned);
+        assert_eq!(base, b'A');
         assert!(!warned, "should not warn for in-bounds access");
 
         // Out-of-bounds access should return b'N' and set warned flag
-        let base = ref_base_at::<Base>(reference, 10, &mut warned);
-        assert_eq!(base, Base::Unknown);
+        let base = ref_base_at(reference, 10, &mut warned);
+        assert_eq!(base, b'N');
         assert!(warned, "should warn for out-of-bounds access");
 
         // Second out-of-bounds access should still return b'N' but not re-warn
         // (warned is already true, so the warn! is skipped)
-        let base = ref_base_at::<Base>(reference, 20, &mut warned);
-        assert_eq!(base, Base::Unknown);
+        let base = ref_base_at(reference, 20, &mut warned);
+        assert_eq!(base, b'N');
     }
 
     // r[verify cram.slice.validated_lengths]
@@ -2487,12 +2421,12 @@ mod tests {
     /// `5M100N5M` as one run); reference `N`s in a match are mismatches.
     #[test]
     fn md_runs_through_skips_and_counts_reference_n() {
-        let reference = Base::from_ascii_vec(b"ACGTANNCGT".to_vec());
+        let reference = b"ACGTANNCGT".to_vec();
         let mut md = MdNm::default();
         md.start();
-        md.matches::<Base>(reference.get(0..5), 5);
+        md.matches(reference.get(0..5), 5);
         // a skip: no call at all
-        md.matches::<Base>(reference.get(4..10), 6);
+        md.matches(reference.get(4..10), 6);
         let (text, aux) = md_of(&mut md);
         assert_eq!(text, "6N0N3");
         assert_eq!(aux.get(aux.len() - 4..), Some(&b"NMC\x02"[..]));
@@ -2503,14 +2437,14 @@ mod tests {
     /// where they equal the reference; `D` writes `^` and the deleted bases.
     #[test]
     fn md_of_bases_blocks_and_deletions() {
-        let reference = Base::from_ascii_vec(b"ACGTACGT".to_vec());
+        let reference = b"ACGTACGT".to_vec();
         let mut md = MdNm::default();
         md.start();
-        md.matches::<Base>(reference.get(0..2), 2);
-        md.read_bases::<Base>(&reference, 2, 2);
-        md.deletion::<Base>(&reference, 4, 2);
+        md.matches(reference.get(0..2), 2);
+        md.read_bases(&reference, 2, 2);
+        md.deletion(&reference, 4, 2);
         md.insertion(3);
-        md.matches::<Base>(reference.get(6..8), 2);
+        md.matches(reference.get(6..8), 2);
         let (text, _) = md_of(&mut md);
         assert_eq!(text, "2G0T0^AC2");
         assert_eq!(md.nm, 7);
@@ -2540,7 +2474,7 @@ mod tests {
     fn push_requires_a_quality_per_base(tc: TestCase) {
         let n_bases = tc.draw(gs::integers::<usize>().max_value(20));
         let n_qual = tc.draw(gs::integers::<usize>().max_value(20));
-        let mut slice = DecodedSlice::<IupacBase>::default();
+        let mut slice = DecodedSlice::default();
         let result = slice.push(
             Pos0::ZERO,
             Pos0::ZERO,
@@ -2572,8 +2506,8 @@ mod tests {
 
     /// A slice of two records and the mate infos htslib's decode leaves:
     /// `(pos, end, tid, flags, mate_line)` each.
-    fn mates(records: [(i64, i64, Option<Tid>, u16, i32); 2]) -> DecodedSlice<Base> {
-        let mut slice = DecodedSlice::<Base>::default();
+    fn mates(records: [(i64, i64, Option<Tid>, u16, i32); 2]) -> DecodedSlice {
+        let mut slice = DecodedSlice::default();
         let mut infos: Vec<SliceMateInfo> = records
             .iter()
             .map(|&(pos, end_pos, tid, bam_flags, mate_line)| {

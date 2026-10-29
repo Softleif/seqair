@@ -435,7 +435,7 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream.fidelity+2]
 // r[verify cram.stream.md_nm]
 // r[verify cram.stream.md_nm.option]
-// r[verify cram.stream.iupac]
+// r[verify cram.stream.iupac+1]
 // r[verify cram.stream+2]
 // r[verify cram.record.read_name+2]
 // r[verify cram.record.mate_tlen_reconstruction+2]
