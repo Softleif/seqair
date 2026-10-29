@@ -57,9 +57,13 @@ fn arb_tags(tc: &TestCase) -> String {
     if tc.draw_silent(gs::booleans()) {
         tags.push(format!("AS:i:{}", tc.draw_silent(int(0, 300))));
     }
-    if let Some(rg) =
-        tc.draw_silent(gs::sampled_from(&[None, Some("grpA"), Some("grpB"), Some("x"), Some("UNKNOWN")]))
-    {
+    if let Some(rg) = tc.draw_silent(gs::sampled_from(&[
+        None,
+        Some("grpA"),
+        Some("grpB"),
+        Some("x"),
+        Some("UNKNOWN"),
+    ])) {
         tags.push(format!("RG:Z:{rg}"));
     }
     if tc.draw_silent(gs::booleans()) {
