@@ -70,7 +70,8 @@ fn ascii_to_base(c: &mut Criterion) {
 const READ_LENGTHS: [usize; 3] = [150, 10_000, 100_000];
 
 /// Each `IupacBase` bulk conversion against the element-wise loop it
-/// replaces (`scalar`), in one run so the two see the same machine state.
+/// replaces (`scalar`) and the tightest table loop on plain bytes (`table`),
+/// in one run so all three see the same machine state.
 fn iupac(c: &mut Criterion) {
     let mut group = c.benchmark_group("iupac");
     for len in READ_LENGTHS {
@@ -80,6 +81,9 @@ fn iupac(c: &mut Criterion) {
         let packed = bytes(len.div_ceil(2), 6);
         let mut codes_out: Vec<IupacBase> = Vec::with_capacity(len);
         let mut bytes_out: Vec<u8> = Vec::with_capacity(len);
+        let mut codes: Vec<u8> = bases.iter().map(|b| b.code()).collect();
+        let complement: [u8; 16] = std::array::from_fn(|i| IupacBase::ALL[i].complement().code());
+        let pairs: [[u8; 2]; 256] = std::array::from_fn(|b| [(b >> 4) as u8, (b & 15) as u8]);
         let mut bench = |name: &str, f: &mut dyn FnMut()| {
             group.bench_function(BenchmarkId::new(name, len), |b| b.iter(&mut *f));
         };
@@ -88,6 +92,12 @@ fn iupac(c: &mut Criterion) {
             codes_out.clear();
             codes_out.extend(black_box(&ascii).iter().map(|&b| IupacBase::from_ascii(b)));
         });
+        bench("from_ascii/table", &mut || {
+            bytes_out.clear();
+            bytes_out.extend(
+                black_box(&ascii).iter().map(|&b| IupacBase::CODE_OF_ASCII[usize::from(b)]),
+            );
+        });
         bench("from_ascii/simd", &mut || {
             codes_out.clear();
             IupacBase::from_ascii_into(black_box(&ascii), &mut codes_out);
@@ -95,6 +105,10 @@ fn iupac(c: &mut Criterion) {
         bench("to_ascii/scalar", &mut || {
             bytes_out.clear();
             bytes_out.extend(black_box(&bases).iter().map(|b| b.to_ascii()));
+        });
+        bench("to_ascii/table", &mut || {
+            bytes_out.clear();
+            bytes_out.extend(black_box(&codes).iter().map(|&c| IupacBase::ASCII[usize::from(c)]));
         });
         bench("to_ascii/simd", &mut || {
             bytes_out.clear();
@@ -105,12 +119,24 @@ fn iupac(c: &mut Criterion) {
                 *b = b.complement();
             }
         });
+        bench("complement/table", &mut || {
+            for c in black_box(&mut codes).iter_mut() {
+                *c = complement[usize::from(*c)];
+            }
+        });
         bench("complement/simd", &mut || IupacBase::complement_in_place(black_box(&mut bases)));
         bench("reverse_complement/scalar", &mut || {
             let bases = black_box(&mut bases);
             bases.reverse();
             for b in bases.iter_mut() {
                 *b = b.complement();
+            }
+        });
+        bench("reverse_complement/table", &mut || {
+            let codes = black_box(&mut codes);
+            codes.reverse();
+            for c in codes.iter_mut() {
+                *c = complement[usize::from(*c)];
             }
         });
         bench("reverse_complement/simd", &mut || {
@@ -124,6 +150,12 @@ fn iupac(c: &mut Criterion) {
                 let byte = packed[i / 2];
                 IupacBase::from_nibble(if i % 2 == 0 { byte >> 4 } else { byte })
             }));
+        });
+        bench("unpack/table", &mut || {
+            bytes_out.clear();
+            bytes_out.extend(
+                black_box(&packed[..len / 2]).iter().flat_map(|&b| pairs[usize::from(b)]),
+            );
         });
         bench("unpack/simd", &mut || {
             codes_out.clear();
@@ -144,6 +176,11 @@ fn iupac(c: &mut Criterion) {
                 let lo = pair.get(1).map_or(0, |b| b.code());
                 (hi << 4) | lo
             }));
+        });
+        bench("pack/table", &mut || {
+            bytes_out.clear();
+            let (whole, _) = black_box(&codes).as_chunks::<2>();
+            bytes_out.extend(whole.iter().map(|&[hi, lo]| (hi << 4) | lo));
         });
         bench("pack/simd", &mut || {
             bytes_out.clear();
