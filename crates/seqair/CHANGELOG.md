@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError`; this is **breaking** for callers of the unreleased-in-0.9.0 API only in the error type they match on.
+- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
 
 ### Fixed
 
