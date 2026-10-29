@@ -104,6 +104,9 @@ pub enum RawRecordEditError {
     #[error("the record's field offsets are inconsistent with its payload (a seqair bug)")]
     InconsistentLayout,
 
+    #[error("FLAG would contradict the record's CIGAR and sequence")]
+    Flags(#[from] DecodeError),
+
     #[error("aux edit failed")]
     Aux(#[from] AuxDataError),
 
@@ -370,11 +373,11 @@ impl RawBamRecord {
     /// Set FLAG in place.
     ///
     /// # Errors
-    /// [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
+    /// [`RawRecordEditError::Flags`] wrapping [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
     /// new flags make the record one whose CIGAR must match its sequence and
     /// it does not (`r[bam.raw_record.cigar_seq]`) — clearing `0x4` on an
     /// unmapped record with a stale CIGAR, say. htslib rejects such a record.
-    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), DecodeError> {
+    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), RawRecordEditError> {
         let old = self.flags();
         self.write_flags(flags);
         let checked = record::parse_header(&self.payload).and_then(|h| {
@@ -383,7 +386,7 @@ impl RawBamRecord {
         if checked.is_err() {
             self.write_flags(old);
         }
-        checked
+        Ok(checked?)
     }
 
     fn write_flags(&mut self, flags: BamFlags) {
