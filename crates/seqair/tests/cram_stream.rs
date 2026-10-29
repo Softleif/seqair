@@ -68,9 +68,18 @@ impl<R: Read> Read for Trickle<R> {
 }
 
 fn stream_records(cram: &Path, fasta: &Path, chunk: usize) -> (Vec<RawBamRecord>, usize) {
+    stream_records_with(cram, fasta, chunk, true)
+}
+
+fn stream_records_with(
+    cram: &Path,
+    fasta: &Path,
+    chunk: usize,
+    decode_md: bool,
+) -> (Vec<RawBamRecord>, usize) {
     let file = std::fs::File::open(cram).unwrap();
     let mut reader = CramStreamReader::new(Trickle { inner: file, chunk }).unwrap();
-    let mut decoder = reader.decoder(fasta).unwrap();
+    let mut decoder = reader.decoder(fasta).unwrap().decode_md(decode_md);
     let mut records = Vec::new();
     let mut containers = 0;
     while let Some(container) = reader.next_container().unwrap() {
@@ -108,15 +117,6 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// `MD` and `NM` aux fields dropped, the known gap with htslib's default
-/// output (`r[cram.stream.fidelity]`).
-fn without_md_nm(line: &str) -> String {
-    line.split('\t')
-        .filter(|f| !f.starts_with("MD:Z:") && !f.starts_with("NM:i:"))
-        .collect::<Vec<_>>()
-        .join("\t")
-}
-
 // r[verify cram.stream]
 // r[verify cram.stream.container_header]
 // r[verify cram.stream.framing]
@@ -126,11 +126,12 @@ fn without_md_nm(line: &str) -> String {
 // r[verify cram.stream.raw_records]
 /// Records that differ from samtools, as (fixture, the read name samtools
 /// prints, why); an empty fixture is every fixture, an empty name every
-/// record (`r[cram.stream.fidelity]`).
+/// record (`r[cram.stream.fidelity+2]`).
 /// Each entry must differ somewhere, so fixing a gap means removing it.
 const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
     ("", "iupacRefMatch", "IUPAC reference base in a match decodes as N"),
     ("", "iupacRead", "IUPAC and = read bases (B features) decode as N"),
+    ("", "iupacRefSub", "a generated MD names an IUPAC reference base N"),
     (
         "fidelity_lossy_names",
         "",
@@ -167,13 +168,15 @@ fn samtools_payloads(cram: &Path, fasta: &Path, args: &[&str]) -> Vec<Vec<u8>> {
     payloads
 }
 
-// r[verify cram.stream.fidelity]
+// r[verify cram.stream.fidelity+2]
 // r[verify cram.stream.raw_records]
+// r[verify cram.stream.md_nm]
+// r[verify cram.stream.md_nm.option]
 /// Each fixture, streamed through a reader that returns 1–7 bytes per call,
-/// gives the records `samtools view -b --input-fmt-option decode_md=0`
-/// writes, byte for byte (`bin` included), and formats as `samtools view`
-/// prints them; against samtools' default output they differ only in the
-/// `MD`/`NM` it generates. The exceptions are [`KNOWN_MISMATCHES`].
+/// gives the records `samtools view -b` writes, byte for byte (`bin`
+/// included), and formats as `samtools view` prints them; with
+/// `decode_md(false)` the same holds against
+/// `--input-fmt-option decode_md=0`. The exceptions are [`KNOWN_MISMATCHES`].
 #[test]
 fn streamed_records_match_samtools() {
     let mut seen_known = std::collections::BTreeSet::new();
@@ -181,37 +184,33 @@ fn streamed_records_match_samtools() {
     for (cram, fasta) in fixtures() {
         let name = cram.file_stem().unwrap().display().to_string();
         let chunk = 1 + cram.as_os_str().len() % 7;
-        let (records, _) = stream_records(&cram, &fasta, chunk);
-        let ours = sam_lines(&records, &cram);
         let count = samtools(&["view", "-c"], &cram, &fasta);
-        assert_eq!(ours.len(), count.trim().parse::<usize>().unwrap(), "{name}");
+        for (decode_md, args) in
+            [(true, &[][..]), (false, &["--input-fmt-option", "decode_md=0"][..])]
+        {
+            let (records, _) = stream_records_with(&cram, &fasta, chunk, decode_md);
+            let ours = sam_lines(&records, &cram);
+            assert_eq!(ours.len(), count.trim().parse::<usize>().unwrap(), "{name}");
+            let theirs = samtools(&[&["view", "--no-PG"][..], args].concat(), &cram, &fasta);
+            let theirs: Vec<&str> = theirs.lines().collect();
+            let payloads = samtools_payloads(&cram, &fasta, args);
+            assert_eq!(theirs.len(), ours.len(), "{name}");
+            assert_eq!(payloads.len(), ours.len(), "{name}");
 
-        let no_md =
-            samtools(&["view", "--no-PG", "--input-fmt-option", "decode_md=0"], &cram, &fasta);
-        let default = samtools(&["view", "--no-PG"], &cram, &fasta);
-        let payloads = samtools_payloads(&cram, &fasta, &["--input-fmt-option", "decode_md=0"]);
-        let no_md: Vec<&str> = no_md.lines().collect();
-        let default: Vec<&str> = default.lines().collect();
-        assert_eq!(no_md.len(), ours.len(), "{name}");
-        assert_eq!(default.len(), ours.len(), "{name}");
-        assert_eq!(payloads.len(), ours.len(), "{name}");
-
-        for (i, record) in records.iter().enumerate() {
-            let same = ours[i] == no_md[i]
-                && without_md_nm(&ours[i]) == without_md_nm(default[i])
-                && record.as_payload() == payloads[i].as_slice();
-            if same {
-                continue;
-            }
-            let qname = no_md[i].split('\t').next().unwrap_or_default();
-            match known(&name, qname) {
-                Some(entry) => {
-                    seen_known.insert(entry);
+            for (i, record) in records.iter().enumerate() {
+                if ours[i] == theirs[i] && record.as_payload() == payloads[i].as_slice() {
+                    continue;
                 }
-                None => unknown.push(format!(
-                    "{name} record {i}:\n ours     {}\n samtools {}\n default  {}",
-                    ours[i], no_md[i], default[i]
-                )),
+                let qname = theirs[i].split('\t').next().unwrap_or_default();
+                match known(&name, qname) {
+                    Some(entry) => {
+                        seen_known.insert(entry);
+                    }
+                    None => unknown.push(format!(
+                        "{name} record {i} (decode_md {decode_md}):\n ours     {}\n samtools {}",
+                        ours[i], theirs[i]
+                    )),
+                }
             }
         }
     }
@@ -247,7 +246,8 @@ fn fixtures_have_the_layouts_they_are_named_for() {
 }
 
 /// The mapped records of every reference equal what the indexed reader
-/// returns for a whole-reference query, in the same order.
+/// returns for a whole-reference query, in the same order. The indexed
+/// reader generates no MD/NM (`r[cram.stream.md_nm.option]`).
 #[test]
 fn mapped_records_match_the_indexed_reader() {
     for (cram, fasta) in fixtures() {
@@ -256,7 +256,7 @@ fn mapped_records_match_the_indexed_reader() {
         {
             continue;
         }
-        let (records, _) = stream_records(&cram, &fasta, 4096);
+        let (records, _) = stream_records_with(&cram, &fasta, 4096, false);
         let mut indexed = IndexedCramReader::open(&cram, &fasta).unwrap();
         let header = indexed.header().clone();
         let mut store = RecordStore::new();
