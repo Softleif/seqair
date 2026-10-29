@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use super::super::bam::record_store::CustomizeRecordStore;
 use crate::reader::FetchedRecord;
@@ -388,6 +388,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             shared: Arc::clone(&self.shared),
             encoder: SamRecordEncoder::new(),
             scratch: RawBamRecord::default(),
+            cigar: Vec::new(),
             tid,
             span,
             failed: false,
@@ -401,9 +402,11 @@ pub struct SamRawQuery<'r, R: Read + Seek> {
     lines: ChunkLines<'r, R>,
     shared: Arc<SamShared>,
     encoder: SamRecordEncoder,
-    /// Each line is encoded here, and swapped out once it is kept, so a
-    /// query that ends leaves the caller's record as it was.
+    /// Each line is encoded here, and swapped out once it is kept, so an
+    /// error or the end leaves the caller's record as it was.
     scratch: RawBamRecord,
+    /// For [`select_line`] on a line the encoder rejects.
+    cigar: Vec<CigarOp>,
     tid: Tid,
     span: RangeInclusive<Pos0>,
     failed: bool,
@@ -425,7 +428,7 @@ impl<R: Read + Seek> SamRawQuery<'_, R> {
     }
 
     /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
-    /// the end of the region, which leaves `record` unchanged.
+    /// the end of the region and any error leave `record` unchanged.
     ///
     /// # Errors
     /// [`SamError::MalformedRecord`] for a kept line that does not encode —
@@ -435,14 +438,27 @@ impl<R: Read + Seek> SamRawQuery<'_, R> {
         if self.failed {
             return Err(SamError::Poisoned);
         }
-        let Self { lines, shared, encoder, scratch, tid, span, .. } = self;
+        let Self { lines, shared, encoder, scratch, cigar, tid, span, .. } = self;
         let header = &shared.header;
         let result = lines.next_line(|line| {
             if line_reference(line, header)? != Some(*tid) {
                 return Ok(None);
             }
-            encoder.encode(line, header, scratch)?;
-            Ok(overlaps(scratch, *span).then_some(()))
+            match encoder.encode(line, header, scratch) {
+                // r[impl sam.reader.overlap_filter+4]
+                Ok(()) => Ok(scratch.overlaps(*span).then_some(())),
+                // Without a record there is no overlap to test: the line is
+                // an error only where `fetch_into` selects it.
+                Err(e) => {
+                    let (fields, n_fields) = text_scan::split_tabs(line);
+                    let fields = fields.get(..n_fields).unwrap_or_default();
+                    let (start, end) = (span.start.as_i64(), span.last.as_i64());
+                    match select_line(fields, header, *tid, start, end, cigar)? {
+                        Some(_) => Err(e.into()),
+                        None => Ok(None),
+                    }
+                }
+            }
         });
         match result {
             Ok(Some(())) => {
@@ -490,14 +506,6 @@ fn line_reference(line: &[u8], header: &BamHeader) -> Result<Option<Tid>, SamErr
     let rname = std::str::from_utf8(rname)
         .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
     Ok(rname.resolve_tid(header).ok())
-}
-
-/// `r[sam.reader.overlap_filter+4]` on an encoded record: an unmapped one
-/// sits at its POS whatever its CIGAR.
-fn overlaps(record: &RawBamRecord, span: RangeInclusive<Pos0>) -> bool {
-    let Some(pos) = record.pos() else { return false };
-    let last = if record.flags().is_unmapped() { pos } else { record.end_pos().unwrap_or(pos) };
-    pos <= span.last && last >= span.start
 }
 
 /// The alignment lines of a query's index chunks, handed out one at a time
@@ -549,6 +557,8 @@ impl<'r, R: Read + Seek> ChunkLines<'r, R> {
                 self.chunk_end = None;
                 let found = alignment_line(&self.line).map(&mut on_line).transpose();
                 self.line.clear();
+                // Only now, with the chunk left and the line gone, may an
+                // error return: the next call must not read either again.
                 match found?.flatten() {
                     Some(t) => return Ok(Some(t)),
                     None => continue,
@@ -578,6 +588,8 @@ impl<'r, R: Read + Seek> ChunkLines<'r, R> {
                     (window.len(), Ok(None))
                 }
             };
+            // Consumed before an error returns, so the next call goes on past
+            // a malformed line instead of handing it out again.
             self.region.consume(consumed);
             if let Some(t) = found?.flatten() {
                 return Ok(Some(t));
@@ -593,26 +605,27 @@ fn alignment_line(line: &[u8]) -> Option<&[u8]> {
     (!line.is_empty() && line.first() != Some(&b'@')).then_some(line)
 }
 
-// r[impl sam.record.parse]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
-)]
-fn parse_sam_line<E: CustomizeRecordStore>(
-    line: &[u8],
+/// Where a line [`parse_sam_line`] keeps sits, and what it parsed to find out.
+struct SelectedLine {
+    tid: Tid,
+    pos: Pos0,
+    end_pos: Pos0,
+    flags: BamFlags,
+    mapq: MappingQuality,
+}
+
+/// The fields `fetch_into` parses to select a line, in its order and with
+/// its errors: `None` for a line it skips (RNAME `*`, unknown or another
+/// reference, POS 0, or outside `start..=end`). Leaves the CIGAR in
+/// `cigar_buf`.
+fn select_line(
+    fields: &[&[u8]],
     header: &BamHeader,
     tid_filter: Tid,
     start: i64,
     end: i64,
-    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
-    seq_buf: &mut Vec<u8>,
-    qual_buf: &mut Vec<u8>,
-    aux_buf: &mut Vec<u8>,
-    customize: &mut E,
-) -> Result<Option<FetchedRecord>, SamError> {
-    let (fields, n_fields) = text_scan::split_tabs(line);
-    let fields = fields.get(..n_fields).unwrap_or_default();
+) -> Result<Option<SelectedLine>, SamError> {
     if fields.len() < 11 {
         return Err(SamRecordError::TooFewFields { found: fields.len() }.into());
     }
@@ -680,6 +693,34 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     if pos.as_i64() > end || end_pos.as_i64() < start {
         return Ok(None);
     }
+    Ok(Some(SelectedLine { tid: rec_tid, pos, end_pos, flags, mapq }))
+}
+
+// r[impl sam.record.parse]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
+)]
+fn parse_sam_line<E: CustomizeRecordStore>(
+    line: &[u8],
+    header: &BamHeader,
+    tid_filter: Tid,
+    start: i64,
+    end: i64,
+    store: &mut RecordStore<E::Extra>,
+    cigar_buf: &mut Vec<CigarOp>,
+    seq_buf: &mut Vec<u8>,
+    qual_buf: &mut Vec<u8>,
+    aux_buf: &mut Vec<u8>,
+    customize: &mut E,
+) -> Result<Option<FetchedRecord>, SamError> {
+    let (fields, n_fields) = text_scan::split_tabs(line);
+    let fields = fields.get(..n_fields).unwrap_or_default();
+    let Some(SelectedLine { tid: rec_tid, pos, end_pos, flags, mapq }) =
+        select_line(fields, header, tid_filter, start, end, cigar_buf)?
+    else {
+        return Ok(None);
+    };
 
     // Field 1: QNAME
     let qname = fields.first().copied().unwrap_or(b"*");
@@ -725,14 +766,8 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         let rnext_str = std::str::from_utf8(rnext_field)
             .map_err(|_| SamRecordError::InvalidRname { value: rnext_field.into() })?;
         let next_ref_id = rnext_str.resolve_tid(header).ok();
-        // Once per process: a file written against another header has one on
-        // every paired record.
-        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if next_ref_id.is_none() && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            warn!(
-                rnext = rnext_str,
-                "unknown mate reference name; treated as unmapped (further ones not logged)"
-            );
+        if next_ref_id.is_none() {
+            encode::warn_unknown_mate_reference(rnext_field);
         }
         next_ref_id
     };

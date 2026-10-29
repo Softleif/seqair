@@ -18,6 +18,8 @@ use crate::reader::Tid;
 use seqair_types::{IupacBase, MappingQuality, Pos0};
 use std::fmt;
 use std::num::NonZeroI32;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::warn;
 
 /// Shows bytes for an error message: printable ASCII as is, anything else as
 /// `\xNN`, at most 32 input bytes.
@@ -68,10 +70,6 @@ pub enum SamRecordError {
     /// RNAME names no target of the header.
     #[error("RNAME {} is not a reference of the header", Escaped(name))]
     UnknownReference { name: Box<[u8]> },
-
-    /// RNEXT names no target of the header.
-    #[error("RNEXT {} is not a reference of the header", Escaped(name))]
-    UnknownMateReference { name: Box<[u8]> },
 
     /// Not `[0-9]+`, or above 2^31.
     #[error("invalid POS field: {}", Escaped(value))]
@@ -231,7 +229,7 @@ impl SamRecordEncoder {
         // r[impl sam.encode.flag]
         let mut flags = parse_flag(flag)?;
 
-        // r[impl sam.encode.references]
+        // r[impl sam.encode.references+2]
         // r[impl sam.encode.fixups]
         // The order is htslib's: each fix-up sees the ones before it.
         let mut tid = match rname {
@@ -260,10 +258,10 @@ impl SamRecordEncoder {
         let mut mate_tid = match rnext {
             b"=" => tid,
             b"*" => None,
-            name => Some(
-                resolve(header, name)
-                    .ok_or_else(|| SamRecordError::UnknownMateReference { name: name.into() })?,
-            ),
+            name => resolve(header, name).or_else(|| {
+                warn_unknown_mate_reference(name);
+                None
+            }),
         };
         let mate_pos = parse_position(pnext, |value| SamRecordError::InvalidPnext { value })?;
         if mate_pos.is_none() {
@@ -551,6 +549,19 @@ const UNMAPPED: u16 = 0x4;
 
 fn resolve(header: &BamHeader, name: &[u8]) -> Option<Tid> {
     header.tid(std::str::from_utf8(name).ok()?)
+}
+
+// r[impl sam.encode.references+2]
+/// htslib's warning for an RNEXT the header lacks, once per process: a file
+/// written against another header has one on every paired record.
+pub(crate) fn warn_unknown_mate_reference(name: &[u8]) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            rnext = %name.escape_ascii(),
+            "unknown mate reference name; treated as unmapped (further ones not logged)"
+        );
+    }
 }
 
 /// The CIGAR's query length (M, I, S, =, X), as `bam_cigar2qlen`.

@@ -21,8 +21,8 @@ FLAG, POS, MAPQ and PNEXT MUST match `[0-9]+` and TLEN `[-+]?[0-9]+` (the SAM sp
 r[sam.encode.flag]
 A FLAG with a leading zero other than `0` itself MUST fail with `InvalidFlag`. **Deviation:** htslib parses such a FLAG with `strtoul(…, 0)`, so `016` is octal 14 and `0x10` is 16, where the SAM spec reads `016` as 16.
 
-r[sam.encode.references]
-RNAME `*` MUST give no reference; any other name MUST be a target of the header (`UnknownReference`). RNEXT `*` MUST give no mate reference, `=` the record's reference (after `r[sam.encode.fixups]`), and any other name a target of the header (`UnknownMateReference`). **Deviation:** htslib warns and makes the read unmapped (RNAME) or drops the mate reference (RNEXT) for a name its header lacks, losing the name. Alternative names (`@SQ AN:`), which htslib also resolves, are not resolved: seqair's header knows only `SN`.
+r[sam.encode.references+2]
+RNAME `*` MUST give no reference; any other name MUST be a target of the header (`UnknownReference`). **Deviation:** htslib warns and makes the read unmapped for an RNAME its header lacks, losing the name. RNEXT `*` MUST give no mate reference, `=` the record's reference (after `r[sam.encode.fixups]`), and any other name a target of the header; an RNEXT the header lacks MUST, as in htslib, give no mate reference and keep PNEXT and the FLAG as written, with a warning (logged once per process). The indexed reader treats it the same way (`r[sam.record.mate_fields]`), so the indexed and streaming readers keep the same lines. Alternative names (`@SQ AN:`), which htslib also resolves, are not resolved: seqair's header knows only `SN`.
 
 r[sam.encode.fixups]
 The encoder MUST apply htslib's fix-ups, in htslib's order: a record with a reference but POS 0 loses its reference; a record without a reference gets FLAG `0x4`; a record whose CIGAR is `*` gets FLAG `0x4`; a mate reference with PNEXT 0 is dropped. These follow the SAM spec ("no assumptions can be made about RNAME and CIGAR" when POS is 0) rather than lose information.
