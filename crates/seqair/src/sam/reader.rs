@@ -445,7 +445,8 @@ impl<R: Read + Seek> SamRawQuery<'_, R> {
                 return Ok(None);
             }
             match encoder.encode(line, header, scratch) {
-                Ok(()) => Ok(overlaps(scratch, *span).then_some(())),
+                // r[impl sam.reader.overlap_filter+4]
+                Ok(()) => Ok(scratch.overlaps(*span).then_some(())),
                 // Without a record there is no overlap to test: the line is
                 // an error only where `fetch_into` selects it.
                 Err(e) => {
@@ -505,14 +506,6 @@ fn line_reference(line: &[u8], header: &BamHeader) -> Result<Option<Tid>, SamErr
     let rname = std::str::from_utf8(rname)
         .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
     Ok(rname.resolve_tid(header).ok())
-}
-
-/// `r[sam.reader.overlap_filter+4]` on an encoded record: an unmapped one
-/// sits at its POS whatever its CIGAR.
-fn overlaps(record: &RawBamRecord, span: RangeInclusive<Pos0>) -> bool {
-    let Some(pos) = record.pos() else { return false };
-    let last = if record.flags().is_unmapped() { pos } else { record.end_pos().unwrap_or(pos) };
-    pos <= span.last && last >= span.start
 }
 
 /// The alignment lines of a query's index chunks, handed out one at a time
