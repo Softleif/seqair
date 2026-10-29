@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `RawBamRecord::set_seq(&[IupacBase])`, `set_base(QPos, IupacBase)` and `edit_aux` edit a record in place: the sequence (same length, every IUPAC code kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). `RawBamRecord::iupac_bases()` yields the sequence as `IupacBase`s. An edit that would change a long CIGAR's `CG` tag, or that starts from a malformed aux block, is refused. Errors are `bam::RawRecordEditError`.
+- `bam::seq::decode_iupac_bases_into` and `encode_iupac_bases_into`: packed 4-bit SEQ to `IupacBase`s (the SIMD nibble kernel of the ASCII and `Base` paths) and back (a pair loop the compiler vectorises, faster than the kernel on NEON). `RawBamRecord::iupac_bases_into` appends the sequence into a caller's buffer, and `set_seq` packs the same way. The SIMD kernels are tested at Fallback, SSE2, SSE4.2, AVX2 and NEON; the AVX-512 level is compiled but not yet executed.
+
+### Changed
+
+- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
+
+### Fixed
+
+- `AuxData::remove` (and so `OwnedBamRecord` tag edits) no longer panics on a truncated tag value: an unterminated `Z`, a short fixed-size value or a `B` array whose count runs past the end.
+
 ### Performance
 
 - `IndexedFastaReader::fetch_seq`/`fetch_seq_into` strip line terminators by the `.fai` line geometry instead of scanning for them (plain FASTA fetches 1.1–1.25× faster for 1 kb–1 Mb spans on NEON; BGZF fetches, dominated by inflate, ~1.05× at most). A file the index does not describe is stripped by the scan as before, so the output does not change.
