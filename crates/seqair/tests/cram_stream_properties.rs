@@ -259,7 +259,7 @@ fn stream(cram: &Path, fasta: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecor
 
 fn samtools_view(cram: &Path, fasta: &Path, args: &[&str]) -> Vec<u8> {
     run(Command::new("samtools")
-        .args(["view", "--no-PG", "--input-fmt-option", "decode_md=0", "--reference"])
+        .args(["view", "--no-PG", "--reference"])
         .arg(fasta)
         .args(args)
         .arg(cram))
@@ -289,7 +289,7 @@ fn kind_of(sample: &Sample, qname: &[u8]) -> Kind {
 }
 
 // r[verify cram.edge.seq_unknown+2]
-// r[verify cram.stream.fidelity]
+// r[verify cram.stream.fidelity+2]
 /// A mapped record stored with SEQ and QUAL `*` comes back with neither,
 /// from the stream and from the indexed reader, under any writer layout;
 /// samtools prints it as the stream formats it.
@@ -335,7 +335,7 @@ fn mapped_reads_without_seq_come_back_without_seq(tc: TestCase) {
 
 // r[verify cram.stream.all_records]
 // r[verify cram.stream.raw_records]
-// r[verify cram.stream.fidelity]
+// r[verify cram.stream.fidelity+2]
 // r[verify cram.edge.unmapped_reads+2]
 /// Streaming keeps every record — unplaced and placed-unmapped ones
 /// included, in whatever slices the writer put them — as many as
