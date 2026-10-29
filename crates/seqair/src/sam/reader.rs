@@ -388,6 +388,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             shared: Arc::clone(&self.shared),
             encoder: SamRecordEncoder::new(),
             scratch: RawBamRecord::default(),
+            cigar: Vec::new(),
             tid,
             span,
             failed: false,
@@ -404,6 +405,8 @@ pub struct SamRawQuery<'r, R: Read + Seek> {
     /// Each line is encoded here, and swapped out once it is kept, so a
     /// query that ends leaves the caller's record as it was.
     scratch: RawBamRecord,
+    /// For [`select_line`] on a line the encoder rejects.
+    cigar: Vec<CigarOp>,
     tid: Tid,
     span: RangeInclusive<Pos0>,
     failed: bool,
@@ -435,14 +438,26 @@ impl<R: Read + Seek> SamRawQuery<'_, R> {
         if self.failed {
             return Err(SamError::Poisoned);
         }
-        let Self { lines, shared, encoder, scratch, tid, span, .. } = self;
+        let Self { lines, shared, encoder, scratch, cigar, tid, span, .. } = self;
         let header = &shared.header;
         let result = lines.next_line(|line| {
             if line_reference(line, header)? != Some(*tid) {
                 return Ok(None);
             }
-            encoder.encode(line, header, scratch)?;
-            Ok(overlaps(scratch, *span).then_some(()))
+            match encoder.encode(line, header, scratch) {
+                Ok(()) => Ok(overlaps(scratch, *span).then_some(())),
+                // Without a record there is no overlap to test: the line is
+                // an error only where `fetch_into` selects it.
+                Err(e) => {
+                    let (fields, n_fields) = text_scan::split_tabs(line);
+                    let fields = fields.get(..n_fields).unwrap_or_default();
+                    let (start, end) = (span.start.as_i64(), span.last.as_i64());
+                    match select_line(fields, header, *tid, start, end, cigar)? {
+                        Some(_) => Err(e.into()),
+                        None => Ok(None),
+                    }
+                }
+            }
         });
         match result {
             Ok(Some(())) => {
@@ -593,26 +608,27 @@ fn alignment_line(line: &[u8]) -> Option<&[u8]> {
     (!line.is_empty() && line.first() != Some(&b'@')).then_some(line)
 }
 
-// r[impl sam.record.parse]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
-)]
-fn parse_sam_line<E: CustomizeRecordStore>(
-    line: &[u8],
+/// Where a line [`parse_sam_line`] keeps sits, and what it parsed to find out.
+struct SelectedLine {
+    tid: Tid,
+    pos: Pos0,
+    end_pos: Pos0,
+    flags: BamFlags,
+    mapq: MappingQuality,
+}
+
+/// The fields `fetch_into` parses to select a line, in its order and with
+/// its errors: `None` for a line it skips (RNAME `*`, unknown or another
+/// reference, POS 0, or outside `start..=end`). Leaves the CIGAR in
+/// `cigar_buf`.
+fn select_line(
+    fields: &[&[u8]],
     header: &BamHeader,
     tid_filter: Tid,
     start: i64,
     end: i64,
-    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
-    seq_buf: &mut Vec<u8>,
-    qual_buf: &mut Vec<u8>,
-    aux_buf: &mut Vec<u8>,
-    customize: &mut E,
-) -> Result<Option<FetchedRecord>, SamError> {
-    let (fields, n_fields) = text_scan::split_tabs(line);
-    let fields = fields.get(..n_fields).unwrap_or_default();
+) -> Result<Option<SelectedLine>, SamError> {
     if fields.len() < 11 {
         return Err(SamRecordError::TooFewFields { found: fields.len() }.into());
     }
@@ -680,6 +696,34 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     if pos.as_i64() > end || end_pos.as_i64() < start {
         return Ok(None);
     }
+    Ok(Some(SelectedLine { tid: rec_tid, pos, end_pos, flags, mapq }))
+}
+
+// r[impl sam.record.parse]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
+)]
+fn parse_sam_line<E: CustomizeRecordStore>(
+    line: &[u8],
+    header: &BamHeader,
+    tid_filter: Tid,
+    start: i64,
+    end: i64,
+    store: &mut RecordStore<E::Extra>,
+    cigar_buf: &mut Vec<CigarOp>,
+    seq_buf: &mut Vec<u8>,
+    qual_buf: &mut Vec<u8>,
+    aux_buf: &mut Vec<u8>,
+    customize: &mut E,
+) -> Result<Option<FetchedRecord>, SamError> {
+    let (fields, n_fields) = text_scan::split_tabs(line);
+    let fields = fields.get(..n_fields).unwrap_or_default();
+    let Some(SelectedLine { tid: rec_tid, pos, end_pos, flags, mapq }) =
+        select_line(fields, header, tid_filter, start, end, cigar_buf)?
+    else {
+        return Ok(None);
+    };
 
     // Field 1: QNAME
     let qname = fields.first().copied().unwrap_or(b"*");

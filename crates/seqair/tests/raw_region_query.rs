@@ -219,3 +219,205 @@ fn a_cram_raw_query_is_unsupported() {
     let err = reader.query_raw(tid, span).unwrap_err();
     assert!(matches!(err, ReaderError::RawQueryUnsupported), "{err:?}");
 }
+
+/// What a generated record has wrong with it, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flaw {
+    None,
+    /// One base more than its CIGAR covers: htslib rejects it, and neither
+    /// `RecordStore::push_raw` nor the indexed SAM reader checks.
+    CigarSeqMismatch,
+    /// RNEXT (in the SAM) names a contig the header lacks: htslib keeps the
+    /// line with no mate reference.
+    UnknownRnext,
+}
+
+/// A record on `chr1` of the generated files: its 0-based start, the bases
+/// its `M` covers, and its flaw.
+#[derive(Debug, Clone, Copy)]
+struct Generated {
+    pos: u32,
+    len: u32,
+    flaw: Flaw,
+}
+
+const GENERATED_LEN: u32 = 4_000;
+
+/// Records sorted by start, some of them flawed.
+#[hegel::composite]
+fn generated_records(tc: &TestCase) -> Vec<Generated> {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(60));
+    let mut records: Vec<Generated> = (0..n)
+        .map(|_| Generated {
+            pos: tc.draw(gs::integers::<u32>().max_value(GENERATED_LEN - 200)),
+            len: tc.draw(gs::integers::<u32>().min_value(1).max_value(150)),
+            flaw: tc.draw(gs::sampled_from(vec![
+                Flaw::None,
+                Flaw::None,
+                Flaw::CigarSeqMismatch,
+                Flaw::UnknownRnext,
+            ])),
+        })
+        .collect();
+    records.sort_by_key(|r| r.pos);
+    records
+}
+
+struct GeneratedFiles {
+    bam: PathBuf,
+    sam: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+/// The records as an indexed BAM (written by seqair, which does not check
+/// CIGAR against SEQ) and as a bgzipped, tabix-indexed SAM. Read `i` is
+/// named `r<i>`; an unknown RNEXT is in the BAM as htslib converts it.
+fn write_generated(records: &[Generated]) -> GeneratedFiles {
+    use seqair::bam::cigar::{CigarOp, CigarOpType};
+    use seqair::bam::header::BamHeader;
+    use seqair::bam::owned_record::OwnedBamRecord;
+    use seqair::bam::writer::BamWriterBuilder;
+    use seqair::bam::MateFields;
+    use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality};
+
+    let dir = tempfile::tempdir().unwrap();
+    let header_text =
+        format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:{GENERATED_LEN}\n");
+    let header = BamHeader::from_sam_text(&header_text).unwrap();
+    let tid = "chr1".resolve_tid(&header).unwrap();
+    let seq_len = |r: &Generated| r.len + u32::from(r.flaw == Flaw::CigarSeqMismatch);
+
+    let bam = dir.path().join("generated.bam");
+    let mut writer = BamWriterBuilder::to_path(&bam, &header).write_index(true).build().unwrap();
+    for (i, r) in records.iter().enumerate() {
+        let n = seq_len(r) as usize;
+        let record = OwnedBamRecord::builder(
+            Some(tid),
+            Some(Pos0::new(r.pos).unwrap()),
+            format!("r{i}").into_bytes(),
+        )
+        .flags(BamFlags::empty())
+        .mapq(MappingQuality::from_byte(60))
+        .cigar(vec![CigarOp::new(CigarOpType::Match, r.len)])
+        .seq(vec![Base::A; n])
+        .qual(vec![BaseQuality::from_byte(30); n])
+        .mate_fields(MateFields {
+            tid: None,
+            pos: (r.flaw == Flaw::UnknownRnext).then(|| Pos0::new(6).unwrap()),
+            template_len: None,
+        })
+        .build()
+        .unwrap();
+        writer.write(&record).unwrap();
+    }
+    let (_, index) = writer.finish().unwrap();
+    let bai = std::fs::File::create(bam.with_extension("bam.bai")).unwrap();
+    index.unwrap().write_bai(bai, 1).unwrap();
+
+    let mut text = header_text;
+    for (i, r) in records.iter().enumerate() {
+        let (rnext, pnext) = if r.flaw == Flaw::UnknownRnext { ("chrZ", 7) } else { ("*", 0) };
+        let seq = "A".repeat(seq_len(r) as usize);
+        text.push_str(&format!(
+            "r{i}\t1\tchr1\t{}\t60\t{}M\t{rnext}\t{pnext}\t0\t{seq}\t*\n",
+            r.pos + 1,
+            r.len
+        ));
+    }
+    let plain = dir.path().join("generated.sam");
+    std::fs::write(&plain, text).unwrap();
+    run(Command::new("bgzip").arg(&plain));
+    let sam = dir.path().join("generated.sam.gz");
+    run(Command::new("tabix").args(["-p", "sam"]).arg(&sam));
+    GeneratedFiles { bam, sam, _dir: dir }
+}
+
+/// A span of the generated contig, a few widths wide.
+#[hegel::composite]
+fn generated_span(tc: &TestCase) -> RangeInclusive<Pos0> {
+    let start = tc.draw(gs::integers::<u32>().max_value(GENERATED_LEN - 1));
+    let width = tc.draw(gs::sampled_from(vec![0u32, 1, 150, GENERATED_LEN]));
+    RangeInclusive {
+        start: Pos0::new(start).unwrap(),
+        last: Pos0::new(start.saturating_add(width).min(GENERATED_LEN - 1)).unwrap(),
+    }
+}
+
+/// The read index a generated name `r<i>` carries.
+fn generated_index(qname: &[u8]) -> usize {
+    std::str::from_utf8(qname).unwrap().trim_start_matches('r').parse().unwrap()
+}
+
+/// Whether `e` is the error a record that does not validate is reported as,
+/// which the query continues past.
+fn is_invalid_record(e: &ReaderError) -> bool {
+    matches!(
+        e,
+        ReaderError::Bam { source: seqair::bam::BamError::RecordDecode { .. } }
+            | ReaderError::Sam { source: seqair::sam::SamError::MalformedRecord { .. } }
+    )
+}
+
+// r[verify bam.reader.query_raw]
+// r[verify bam.reader.query_raw.errors]
+// r[verify sam.reader.query_raw]
+// r[verify unified.query_raw]
+/// Every record `fetch_into` keeps comes out of `query_raw` in its place:
+/// as itself, or, where it does not validate (a CIGAR that does not cover
+/// SEQ), as an error the query continues past. A SAM line naming an
+/// unknown mate reference is kept, without one, as `fetch_into` keeps it.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn a_record_that_does_not_validate_is_an_error_in_its_place(tc: TestCase) {
+    let records = tc.draw(generated_records());
+    let files = write_generated(&records);
+    let span = tc.draw(generated_span());
+    for path in [&files.bam, &files.sam] {
+        let mut reader = IndexedReader::open(path).unwrap();
+        let tid = "chr1".resolve_tid(reader.header()).unwrap();
+        let mut store = seqair::bam::RecordStore::new();
+        reader.fetch_into(tid, span, &mut store).unwrap();
+        let want: Vec<Option<usize>> = store
+            .records()
+            .map(|r| generated_index(r.qname(&store).unwrap()))
+            .map(|i| (records[i].flaw != Flaw::CigarSeqMismatch).then_some(i))
+            .collect();
+
+        let mut query = reader.query_raw(tid, span).unwrap();
+        let mut record = RawBamRecord::default();
+        let mut got = Vec::new();
+        loop {
+            match query.read_record(&mut record) {
+                Ok(true) => {
+                    let i = generated_index(record.qname());
+                    if records[i].flaw == Flaw::UnknownRnext {
+                        let mate = record.mate_fields();
+                        assert_eq!((mate.tid, mate.pos), (None, Pos0::new(6)), "{path:?} r{i}");
+                    }
+                    got.push(Some(i));
+                }
+                Ok(false) => break,
+                Err(e) => {
+                    assert!(is_invalid_record(&e), "{path:?}: {e:?}");
+                    got.push(None);
+                }
+            }
+        }
+        assert_eq!(got, want, "{path:?} {}..={}", span.start.as_u32(), span.last.as_u32());
+        assert!(!query.read_record(&mut record).unwrap(), "{path:?}: spent, not poisoned");
+        drop(query);
+
+        let iterated: Vec<Option<usize>> = reader
+            .query_raw(tid, span)
+            .unwrap()
+            .map(|r| match r {
+                Ok(r) => Some(generated_index(r.qname())),
+                Err(e) => {
+                    assert!(is_invalid_record(&e), "{path:?}: {e:?}");
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(iterated, want, "{path:?}: the iterator");
+        tc.event_value("errors", want.iter().filter(|w| w.is_none()).count() as f64);
+    }
+}
