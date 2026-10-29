@@ -41,8 +41,8 @@ The header text is parsed via `BamHeader::from_sam_text()` to populate target na
 
 **Note:** The i32 length prefix is part of the block's _decompressed data_, not the block header itself.
 
-r[cram.file.eof]
-The file MUST end with an EOF container. The EOF container produced by samtools has `length=15` (not 0) and `num_records=0`. The reader MUST detect the EOF container as any container where `num_records=0` and `length <= 15`. The reader SHOULD verify the EOF marker but MUST NOT fail if it's missing (truncated files should produce a warning, not a hard error).
+r[cram.file.eof+2]
+The file MUST end with an EOF container. The EOF container produced by samtools has `length=15` (not 0), `num_records=0`, reference -1 and alignment start `0x454f46` ("EOF"). The reader MUST detect it as htslib's `cram_read_container` does: `num_records=0`, reference -1 and alignment start `0x454f46`; any other container without records, however short, is not the end and is skipped. The reader SHOULD verify the EOF marker but MUST NOT fail if it's missing (truncated files should produce a warning, not a hard error).
 
 ### Containers
 
