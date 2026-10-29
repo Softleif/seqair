@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`IupacBase`**: the sixteen BAM sequence codes (`=ACMGRSVTWYHKDBN`) as a `#[repr(u8)]` enum whose discriminants are the 4-bit codes, where `Base` can only hold A/C/G/T/N. `from_code`, `from_nibble`, `code`, `from_ascii` (htslib's `seq_nt16_table`), `to_ascii`, `complement`, the lossy `to_base`, `From<Base>`, and slice helpers `from_ascii_slice`/`to_ascii_slice`.
+
 ## v0.4.0 (2026-10-27)
 
 ### Breaking

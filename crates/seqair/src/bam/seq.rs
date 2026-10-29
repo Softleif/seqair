@@ -4,6 +4,7 @@
 
 use fearless_simd::{Level, dispatch, prelude::*, u8x16};
 use fearless_simd_macros::simd;
+use seqair_types::IupacBase;
 
 // r[impl seq.decode_scalar]
 // r[impl seq.decode_pair_table]
@@ -14,12 +15,12 @@ use fearless_simd_macros::simd;
 // r[impl io.platform_optimizations]
 
 /// BAM 4-bit encoding → ASCII base lookup.
-static DECODE_BASE: &[u8; 16] = b"=ACMGRSVTWYHKDBN";
+static DECODE_BASE: &[u8; 16] = &IupacBase::ASCII;
 
 /// Pre-computed pair table: `DECODE_PAIR[byte]` → `[high_nibble_base, low_nibble_base]`.
 #[allow(clippy::indexing_slicing, reason = "i < 256 = table.len(), nibbles < 16 = BASE.len()")]
 static DECODE_PAIR: [[u8; 2]; 256] = {
-    const BASE: [u8; 16] = *b"=ACMGRSVTWYHKDBN";
+    const BASE: [u8; 16] = IupacBase::ASCII;
     let mut table = [[0u8; 2]; 256];
     let mut i = 0;
     while i < 256 {
@@ -31,41 +32,7 @@ static DECODE_PAIR: [[u8; 2]; 256] = {
 
 /// ASCII → 4-bit encoding table: htslib's `seq_nt16_table`, so SAM text
 /// encodes exactly as htslib encodes it. Unknown characters map to 15 (N).
-#[allow(clippy::indexing_slicing, reason = "const indices: i < 16 = codes.len(), bytes < 256")]
-static ENCODE_BASE: [u8; 256] = {
-    let mut table = [15u8; 256];
-    let codes: [(u8, u8); 16] = [
-        (b'=', 0),
-        (b'A', 1),
-        (b'C', 2),
-        (b'M', 3),
-        (b'G', 4),
-        (b'R', 5),
-        (b'S', 6),
-        (b'V', 7),
-        (b'T', 8),
-        (b'U', 8),
-        (b'W', 9),
-        (b'Y', 10),
-        (b'H', 11),
-        (b'K', 12),
-        (b'D', 13),
-        (b'B', 14),
-    ];
-    let mut i = 0;
-    while i < codes.len() {
-        let (upper, code) = codes[i];
-        table[upper as usize] = code;
-        table[upper.to_ascii_lowercase() as usize] = code;
-        i += 1;
-    }
-    // Colour-space digits, as htslib maps them.
-    table[b'0' as usize] = 1;
-    table[b'1' as usize] = 2;
-    table[b'2' as usize] = 4;
-    table[b'3' as usize] = 8;
-    table
-};
+static ENCODE_BASE: [u8; 256] = IupacBase::CODE_OF_ASCII;
 
 /// Decode a 4-bit packed BAM sequence to ASCII bases (scalar fallback).
 pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {

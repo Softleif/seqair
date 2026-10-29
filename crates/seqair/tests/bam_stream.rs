@@ -286,7 +286,10 @@ fn set_flags_keeps_the_cigar_check() {
 
     let mut record = stream_records(&bam_of_payloads(&[unmapped.payload()])).remove(0);
     let flags = record.flags();
-    assert!(record.set_flags(seqair::bam::flags::BamFlags::empty()).is_err());
+    assert!(matches!(
+        record.set_flags(seqair::bam::flags::BamFlags::empty()),
+        Err(seqair::bam::RawRecordEditError::Flags(_))
+    ));
     assert_eq!(record.flags(), flags);
     assert_eq!(record.as_payload(), unmapped.payload());
     let reverse_unmapped = seqair::bam::flags::BamFlags::from(4 | 16);

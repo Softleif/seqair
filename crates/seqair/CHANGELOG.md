@@ -11,14 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Streaming CRAM.** `cram::stream::CramStreamReader` reads a CRAM 3.0/3.1 front to back from any `io::Read` (a pipe, `stdin`) with no index and no `Seek`, one container at a time; `CramContainerDecoder` (one per thread, `fork`) decodes a `CramContainer` into `RawBamRecord`s in file order — every record, multi-reference slices, unmapped containers and unplaced reads included. Records equal what `samtools view -b --input-fmt-option decode_md=0` writes, byte for byte, except that MD/NM are not generated, IUPAC bases decode as `N` and `lossy_names` files get no generated names.
 - `AlignmentStream` reads CRAM, decoded against the FASTA given with `AlignmentStreamBuilder::reference`; `StreamFormat::Cram`.
+- `RawBamRecord::set_seq(&[IupacBase])`, `set_base(QPos, IupacBase)` and `edit_aux` edit a record in place: the sequence (same length, every IUPAC code kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). `RawBamRecord::iupac_bases()` yields the sequence as `IupacBase`s. An edit that would change a long CIGAR's `CG` tag, or that starts from a malformed aux block, is refused. Errors are `bam::RawRecordEditError`.
 
 ### Changed
 
 - `AlignmentStreamError::CramNotSupported` is replaced by `CramNeedsReference` (CRAM without `reference(...)`) and `Cram` (stream errors).
+- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
 
 ### Fixed
 
 - A mapped CRAM read stored with SEQ `*` (CRAM flag 0x8, e.g. bwa's secondary records) no longer comes back with its reference bases and `0xFF` qualities; it has neither, as in htslib.
+- `AuxData::remove` (and so `OwnedBamRecord` tag edits) no longer panics on a truncated tag value: an unterminated `Z`, a short fixed-size value or a `B` array whose count runs past the end.
 
 ## v0.9.0 (2026-10-29)
 

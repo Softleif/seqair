@@ -7,15 +7,16 @@
 //! and the stored `bin` all survive a read and a write unchanged.
 
 use super::{
-    BamHeader, CigarOp, DecodeError, MateFields,
-    aux::{Aux, AuxValue, find_tag},
+    AuxData, AuxDataError, BamHeader, CigarOp, DecodeError, MateFields,
+    aux::{Aux, AuxLayoutError, AuxValue, find_tag, validate_aux},
     cigar::CIGAR_S,
     record::{self, read2},
     seq,
 };
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::fmt;
+use thiserror::Error;
 
 /// Fixed part of a BAM record, before the read name.
 const FIXED_LEN: usize = 32;
@@ -76,6 +77,41 @@ pub struct RawBamRecord {
     cigar_end: usize,
     seq_end: usize,
     qual_end: usize,
+}
+
+/// Why an in-place edit of a [`RawBamRecord`] was refused. The record is
+/// unchanged.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum RawRecordEditError {
+    #[error("a sequence of {got} bases cannot replace one of {expected}")]
+    SeqLenMismatch { expected: usize, got: usize },
+
+    #[error("base {qpos} is past the end of a sequence of {len} bases")]
+    BaseOutOfRange { qpos: QPos, len: usize },
+
+    #[error("the aux edit would change the record's long CIGAR")]
+    LongCigarChanged,
+
+    #[error(
+        "the edited record would be {len} bytes, over the {} byte limit",
+        record::MAX_RECORD_SIZE
+    )]
+    RecordTooLarge { len: usize },
+
+    /// The record's offsets do not describe its payload; `from_payload`
+    /// rules this out, so it is a bug in seqair, not the caller's input.
+    #[error("the record's field offsets are inconsistent with its payload (a seqair bug)")]
+    InconsistentLayout,
+
+    #[error("FLAG would contradict the record's CIGAR and sequence")]
+    Flags(#[from] DecodeError),
+
+    #[error("aux edit failed")]
+    Aux(#[from] AuxDataError),
+
+    #[error("the record's aux block is malformed")]
+    MalformedAux(#[from] AuxLayoutError),
 }
 
 /// Why [`RawBamRecord::refill`] failed: the caller's fill, or validation.
@@ -337,11 +373,11 @@ impl RawBamRecord {
     /// Set FLAG in place.
     ///
     /// # Errors
-    /// [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
+    /// [`RawRecordEditError::Flags`] wrapping [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
     /// new flags make the record one whose CIGAR must match its sequence and
     /// it does not (`r[bam.raw_record.cigar_seq]`) — clearing `0x4` on an
     /// unmapped record with a stale CIGAR, say. htslib rejects such a record.
-    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), DecodeError> {
+    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), RawRecordEditError> {
         let old = self.flags();
         self.write_flags(flags);
         let checked = record::parse_header(&self.payload).and_then(|h| {
@@ -350,13 +386,109 @@ impl RawBamRecord {
         if checked.is_err() {
             self.write_flags(old);
         }
-        checked
+        Ok(checked?)
     }
 
     fn write_flags(&mut self, flags: BamFlags) {
         if let Some(dst) = self.payload.get_mut(14..16) {
             dst.copy_from_slice(&flags.raw().to_le_bytes());
         }
+    }
+
+    // r[impl bam.raw_record.iupac_bases]
+    /// The sequence, one [`IupacBase`] per base, every 4-bit code kept.
+    pub fn iupac_bases(&self) -> impl ExactSizeIterator<Item = IupacBase> + '_ {
+        let packed = self.packed_seq();
+        (0..self.seq_len()).map(move |i| {
+            let byte = packed.get(i / 2).copied().unwrap_or_default();
+            IupacBase::from_nibble(if i.is_multiple_of(2) { byte >> 4 } else { byte })
+        })
+    }
+
+    // r[impl bam.raw_record.edit_seq]
+    /// Replace the sequence with `seq`, in place.
+    ///
+    /// # Errors
+    /// [`RawRecordEditError::SeqLenMismatch`] if `seq` is not as long as the
+    /// current sequence.
+    pub fn set_seq(&mut self, seq: &[IupacBase]) -> Result<(), RawRecordEditError> {
+        let expected = self.seq_len();
+        if seq.len() != expected {
+            return Err(RawRecordEditError::SeqLenMismatch { expected, got: seq.len() });
+        }
+        let Some(dst) = self.payload.get_mut(self.cigar_end..self.seq_end) else {
+            debug_assert!(false, "offsets within the payload");
+            return Err(RawRecordEditError::InconsistentLayout);
+        };
+        // The unused low nibble of an odd-length sequence is not ours to touch.
+        let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
+        for (d, pair) in dst.iter_mut().zip(seq.chunks(2)) {
+            let hi = pair.first().map_or(0, |b| b.code());
+            let lo = pair.get(1).map_or(0, |b| b.code());
+            *d = (hi << 4) | lo;
+        }
+        if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
+            *last = (*last & 0xF0) | pad;
+        }
+        Ok(())
+    }
+
+    // r[impl bam.raw_record.edit_seq]
+    /// Replace the base at `qpos` with `base`, in place.
+    ///
+    /// # Errors
+    /// [`RawRecordEditError::BaseOutOfRange`] past the end of the sequence.
+    pub fn set_base(&mut self, qpos: QPos, base: IupacBase) -> Result<(), RawRecordEditError> {
+        let len = self.seq_len();
+        let i = qpos.as_usize();
+        if i >= len {
+            return Err(RawRecordEditError::BaseOutOfRange { qpos, len });
+        }
+        let start = self.cigar_end;
+        let Some(byte) = self.payload.get_mut(start.saturating_add(i / 2)) else {
+            debug_assert!(false, "offsets within the payload");
+            return Err(RawRecordEditError::InconsistentLayout);
+        };
+        let code = base.code();
+        *byte =
+            if i.is_multiple_of(2) { (code << 4) | (*byte & 0x0F) } else { (*byte & 0xF0) | code };
+        Ok(())
+    }
+
+    // r[impl bam.raw_record.edit_aux]
+    /// Edit the aux block: `edit` gets the tags as an [`AuxData`] and the
+    /// record takes what it leaves. Tags it does not touch keep their bytes.
+    /// Costs one copy of the aux block.
+    ///
+    /// # Errors
+    /// [`RawRecordEditError::MalformedAux`] if the existing tags are not
+    /// well-formed, `edit`'s own error, [`RawRecordEditError::RecordTooLarge`], or
+    /// [`RawRecordEditError::LongCigarChanged`] if the real CIGAR would
+    /// differ (a `CG` tag removed or rewritten).
+    pub fn edit_aux(
+        &mut self,
+        edit: impl FnOnce(&mut AuxData) -> Result<(), AuxDataError>,
+    ) -> Result<(), RawRecordEditError> {
+        let current = self.payload.get(self.qual_end..).unwrap_or_default();
+        validate_aux(current)?;
+        let mut aux = AuxData::from_bytes(current.to_vec());
+        edit(&mut aux)?;
+        let len = self.qual_end.saturating_add(aux.as_bytes().len());
+        if len > record::MAX_RECORD_SIZE {
+            return Err(RawRecordEditError::RecordTooLarge { len });
+        }
+        let after = long_cigar(
+            self.stored_cigar_bytes(),
+            self.seq_len(),
+            self.tid.is_some() && self.pos.is_some(),
+            Aux::new(aux.as_bytes()),
+        );
+        if self.long_cigar() != after {
+            return Err(RawRecordEditError::LongCigarChanged);
+        }
+        self.payload.truncate(self.qual_end);
+        self.payload.extend_from_slice(aux.as_bytes());
+        Ok(())
     }
 
     /// Set MAPQ in place.
@@ -474,6 +606,69 @@ mod tests {
         let mut out = b">".to_vec();
         record.decode_seq_into(&mut out);
         assert_eq!(out, b">=ACMGRSVTWYHKDBNM");
+    }
+
+    // r[verify bam.raw_record.edit_aux]
+    #[test]
+    fn edit_aux_refuses_a_malformed_block_without_panicking() {
+        let truncated_ml: Vec<u8> = [b"MLBC".as_slice(), &100u32.to_le_bytes(), &[7]].concat();
+        let shapes: [&[u8]; 3] = [b"XMZabc", &truncated_ml, b"NMi\x01"];
+        for aux in shapes {
+            let mut record =
+                RawBamRecord::from_payload(payload(false, 4, &[], &[1, 2], aux), &header())
+                    .unwrap();
+            let before = record.as_payload().to_vec();
+            let err = record
+                .edit_aux(|a| {
+                    a.remove(*b"XM");
+                    a.remove(*b"ML");
+                    a.remove(*b"NM");
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(matches!(err, RawRecordEditError::MalformedAux(_)), "{aux:?}: {err:?}");
+            assert_eq!(record.as_payload(), before);
+        }
+    }
+
+    // r[verify bam.raw_record.edit_aux]
+    #[test]
+    fn edit_aux_stops_at_the_record_size_limit() {
+        let mut record = RawBamRecord::default();
+        // 34 fixed bytes + tag name, type and NUL = 38 bytes besides the text.
+        let fits = record::MAX_RECORD_SIZE - 38;
+        record
+            .edit_aux(|a| {
+                a.set_string(*b"XM", &vec![b'a'; fits]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(record.as_payload().len(), record::MAX_RECORD_SIZE);
+        let before = record.as_payload().to_vec();
+        let err = record
+            .edit_aux(|a| {
+                a.set_string(*b"XM", &vec![b'a'; fits + 1]);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, RawRecordEditError::RecordTooLarge { len } if len == record::MAX_RECORD_SIZE + 1)
+        );
+        assert_eq!(record.as_payload(), before);
+    }
+
+    // r[verify bam.raw_record.iupac_bases]
+    #[test]
+    fn iupac_bases_agree_with_the_ascii_decode() {
+        let codes: Vec<u8> = (0..16).chain([3]).collect();
+        let record =
+            RawBamRecord::from_payload(payload(false, 4, &[], &codes, &[]), &header()).unwrap();
+        let bases: Vec<IupacBase> = record.iupac_bases().collect();
+        assert_eq!(bases.len(), codes.len());
+        assert_eq!(bases.iter().map(|b| b.code()).collect::<Vec<_>>(), codes);
+        let mut ascii = Vec::new();
+        record.decode_seq_into(&mut ascii);
+        assert_eq!(IupacBase::to_ascii_slice(&bases), ascii);
     }
 
     fn op(len: u32, code: u32) -> u32 {
