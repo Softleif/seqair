@@ -156,8 +156,19 @@ enum Reference {
     None,
 }
 
+/// How the input is ordered before it becomes CRAM.
+#[derive(Debug, Clone, Copy)]
+enum Order {
+    Coordinate,
+    /// `samtools sort -n`.
+    Queryname,
+    /// As generated, `SO:unsorted`.
+    Unsorted,
+}
+
 #[derive(Debug, Clone)]
 struct Opts {
+    order: Order,
     version: &'static str,
     reference: Reference,
     seqs_per_slice: u32,
@@ -188,6 +199,11 @@ impl Opts {
 #[hegel::composite]
 fn arb_opts(tc: &TestCase) -> Opts {
     Opts {
+        order: tc.draw_silent(gs::sampled_from(&[
+            Order::Coordinate,
+            Order::Queryname,
+            Order::Unsorted,
+        ])),
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
         reference: tc.draw_silent(gs::sampled_from(&[
             Reference::External,
@@ -234,7 +250,13 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf, u
     let sam_path = dir.join("in.sam");
     std::fs::File::create(&sam_path).unwrap().write_all(sam.as_bytes()).unwrap();
     let bam = dir.join("in.bam");
-    run(Command::new("samtools").args(["sort", "--no-PG", "-o"]).arg(&bam).arg(&sam_path));
+    let mut sort = Command::new("samtools");
+    match opts.order {
+        Order::Coordinate => sort.args(["sort", "--no-PG"]),
+        Order::Queryname => sort.args(["sort", "--no-PG", "-n"]),
+        Order::Unsorted => sort.args(["view", "--no-PG", "-b"]),
+    };
+    run(sort.arg("-o").arg(&bam).arg(&sam_path));
     let cram = dir.join("generated.cram");
     let mut cmd = Command::new("samtools");
     cmd.args(["view", "--no-PG", "-C"]);
@@ -259,6 +281,7 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream.md_nm]
 // r[verify cram.stream.md_nm.option]
 // r[verify cram.stream.iupac]
+// r[verify cram.stream+2]
 /// For any generated sample and CRAM writer options, the streamed records
 /// equal `samtools view -b`'s, byte for byte, and format as `samtools view`
 /// prints them, with MD/NM generation on (samtools' default) or off.

@@ -118,7 +118,7 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-// r[verify cram.stream]
+// r[verify cram.stream+2]
 // r[verify cram.stream.container_header]
 // r[verify cram.stream.framing]
 // r[verify cram.stream.decoder]

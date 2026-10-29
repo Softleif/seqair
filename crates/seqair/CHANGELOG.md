@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `CramStreamReader` (and `AlignmentStream`) read `queryname`-sorted and unsorted CRAM; the coordinate-order check is for indexed access only.
 - A CRAM slice whose only reads are unplaced with SEQ and QUAL `*` no longer fails with `ExternalBlockNotFound`: reading zero values of a series no longer looks for its block, which htslib does not write.
 - A mapped CRAM read stored with SEQ `*` (CRAM flag 0x8, e.g. bwa's secondary records) no longer comes back with its reference bases and `0xFF` qualities; it has neither, as in htslib.
 - `AuxData::remove` (and so `OwnedBamRecord` tag edits) no longer panics on a truncated tag value: an unterminated `Z`, a short fixed-size value or a `B` array whose count runs past the end.
