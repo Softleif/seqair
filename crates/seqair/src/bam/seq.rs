@@ -1,6 +1,26 @@
-//! Encode and decode BAM 4-bit packed sequences. [`decode_seq`] runs one
-//! `fearless_simd` kernel at the best SIMD level the CPU has; every level,
+//! Encode and decode BAM 4-bit packed sequences. Each direction is one
+//! `fearless_simd` kernel, run at the best level the CPU has; every level,
 //! the scalar fallback included, produces identical output.
+//!
+//! - **Decode** (`decode_nibbles`): each nibble through a 16-entry table with
+//!   a byte shuffle, the high and low results interleaved back into read
+//!   order. A table and its 256-entry pair table (two nibbles per byte, for
+//!   the scalar tail) come together: `DECODE_BASE`/`DECODE_PAIR` (ASCII,
+//!   every IUPAC code), `DECODE_BASE_TYPED`/`DECODE_PAIR_TYPED` (`Base`
+//!   discriminants), `IDENTITY`/`IDENTITY_PAIR` (`IupacBase` codes).
+//!   `NibbleOrder` says which nibble comes first: BAM's high one, or the low
+//!   one of CRAM's rANS PACK transform (`cram::rans_nx16`).
+//! - **Encode** (`encode_bases_simd`): each `Base` through a 16-entry table
+//!   indexed by its *low nibble* (`ENCODE_BASE_LO_NIBBLE`: the five
+//!   discriminants have distinct low nibbles), even and odd positions
+//!   deinterleaved and packed `even << 4 | odd`; the tail takes the scalar
+//!   256-entry `ENCODE_BASE`, as ASCII text (`encode_seq_into`, the SAM
+//!   encoder) does. `IupacBase` codes are already nibbles and need no
+//!   lookup: a plain pair loop, which LLVM vectorises, beat the kernel 1.4x
+//!   on NEON.
+//! - The `IupacBase` kernels fill their output through
+//!   `IupacBase::as_codes_mut`, whose contract is that only codes (< 16) are
+//!   left behind; the identity tables hold nothing else.
 
 use fearless_simd::{Level, dispatch, prelude::*, u8x16};
 use fearless_simd_macros::simd;
@@ -358,6 +378,53 @@ fn encode_bases_at(level: Level, bases: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// The identity table: `IupacBase` code `i` is nibble `i`.
+static IDENTITY: &[u8; 16] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+#[allow(clippy::indexing_slicing, reason = "i < 256, nibbles < 16")]
+#[allow(clippy::cast_possible_truncation, reason = "nibbles < 16")]
+static IDENTITY_PAIR: [[u8; 2]; 256] = {
+    let mut table = [[0u8; 2]; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = [(i >> 4) as u8, (i & 0xF) as u8];
+        i += 1;
+    }
+    table
+};
+
+// r[impl seq.iupac_bulk+2]
+/// Encode `IupacBase`s to 4-bit packed BAM format, appending
+/// `bases.len().div_ceil(2)` bytes to `buf`; an odd length leaves the last
+/// low nibble 0. The codes are already nibbles, so this is a pair loop LLVM
+/// vectorises (`ld2` on NEON), measured faster than the shuffle kernel.
+#[allow(clippy::arithmetic_side_effects, reason = "a 4-bit code shifted by 4 fits a u8")]
+pub fn encode_iupac_bases_into(bases: &[IupacBase], buf: &mut Vec<u8>) {
+    let (pairs, odd) = bytemuck::cast_slice::<IupacBase, u8>(bases).as_chunks::<2>();
+    buf.reserve(bases.len().div_ceil(2));
+    buf.extend(pairs.iter().map(|&[hi, lo]| (hi << 4) | lo));
+    buf.extend(odd.iter().map(|last| last << 4));
+}
+
+// r[impl seq.iupac_bulk+2]
+/// Decode `out.len()` bases of a 4-bit packed BAM sequence into `out`, every
+/// code kept; all `N` when `encoded` is too short.
+pub fn decode_iupac_bases_into(encoded: &[u8], out: &mut [IupacBase]) {
+    // SAFETY: `decode_nibbles` writes only entries of its tables, and the
+    // identity tables hold only codes 0..16.
+    let codes = unsafe { IupacBase::as_codes_mut(out) };
+    if !decode_nibbles(
+        Level::new(),
+        NibbleOrder::HighFirst,
+        IDENTITY,
+        &IDENTITY_PAIR,
+        encoded,
+        codes,
+    ) {
+        codes.fill(IupacBase::N.code());
+    }
+}
+
 /// Two native-width vectors of bases in, one vector of packed bytes out: each
 /// base is looked up by its low nibble (`pshufb` / `tbl`), the codes are
 /// deinterleaved into even and odd positions, and packed `even << 4 | odd`.
@@ -556,6 +623,7 @@ mod tests {
     // r[verify seq.decode_simd+2]
     // r[verify seq.decode_dispatch+2]
     // r[verify seq.simd_scalar_equivalence]
+    // r[verify seq.iupac_bulk+2]
     // r[verify io.simd_portable]
     #[hegel::test]
     fn every_level_matches_nibble_oracle(tc: TestCase) {
@@ -563,7 +631,11 @@ mod tests {
         // Up to one nibble fewer than `packed` holds, so an odd `len` leaves
         // the low nibble of the last byte unread.
         let len = tc.draw(gs::integers::<usize>().max_value(packed.len() * 2));
-        for (lut, pairs) in [(DECODE_BASE, &DECODE_PAIR), (DECODE_BASE_TYPED, &DECODE_PAIR_TYPED)] {
+        for (lut, pairs) in [
+            (DECODE_BASE, &DECODE_PAIR),
+            (DECODE_BASE_TYPED, &DECODE_PAIR_TYPED),
+            (IDENTITY, &IDENTITY_PAIR),
+        ] {
             let expected = nibble_oracle(lut, &packed, len);
             for level in crate::simd_levels::levels() {
                 let mut out = vec![0u8; len];
@@ -638,6 +710,39 @@ mod tests {
             assert_eq!(buf[0], 0xAB);
             assert_eq!(&buf[1..], expected.as_slice(), "{level:?}, len={}", seq.len());
         }
+    }
+
+    // r[verify seq.iupac_bulk+2]
+    // r[verify io.simd_portable]
+    /// Codes pack as the spec's high-nibble-first pairs, from any offset
+    /// into the input, appending after what `buf` holds, and decode back at
+    /// the best level (`every_level_matches_nibble_oracle` covers the rest).
+    #[hegel::test]
+    fn encode_iupac_matches_oracle(tc: TestCase) {
+        let len = tc.draw(gs::integers::<usize>().max_value(300));
+        let offset = tc.draw(gs::integers::<usize>().max_value(63));
+        let buf: Vec<IupacBase> = (0..offset + len)
+            .map(|_| IupacBase::from_nibble(tc.draw(gs::integers::<u8>())))
+            .collect();
+        let seq = &buf[offset..];
+        let expected: Vec<u8> =
+            seq.chunks(2).map(|p| (p[0].code() << 4) | p.get(1).map_or(0, |b| b.code())).collect();
+        let mut out = vec![0xAB];
+        encode_iupac_bases_into(seq, &mut out);
+        assert_eq!(out[0], 0xAB);
+        let out = out.split_off(1);
+        assert_eq!(out, expected);
+        let mut decoded = vec![IupacBase::R; len];
+        decode_iupac_bases_into(&out, &mut decoded);
+        assert_eq!(decoded, seq);
+    }
+
+    // r[verify seq.iupac_bulk+2]
+    #[test]
+    fn short_input_decodes_to_iupac_n() {
+        let mut out = [IupacBase::A; 3];
+        decode_iupac_bases_into(&[0x12], &mut out);
+        assert_eq!(out, [IupacBase::N; 3]);
     }
 
     // r[verify seq.encode_bases_simd]
