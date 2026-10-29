@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.9.0 (2026-10-29)
 
 ### Added
 
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An empty BGZF block in the middle of a file no longer ends it.** `BgzfReader` and the region reader (`RegionBuf`) stopped at the first ISIZE=0 block, silently dropping every record after it; htslib skips such blocks. Input that ends inside a block header is now `BgzfError::TruncatedBlock` rather than a clean end, a block that inflates to fewer bytes than its ISIZE is `BgzfError::SizeMismatch`, and read errors keep their `io::Error` (`BgzfError::ReadFailed`).
 - **`BamWriter::write_store_record` binned and indexed reads one base short:** it passed the inclusive `end_pos` where the exclusive end belongs, so a read whose last base starts a new 16 kbp window got the wrong bin and was missing from that window in the index.
-- **SAM aux parsing is strict and matches htslib:** malformed optional fields are errors instead of being skipped, unknown types are errors instead of being stored as `Z`, and integers take the smallest *unsigned* type first, as htslib does. CIGAR lengths of 2^28 or more are errors instead of losing their top bits.
+- **SAM aux parsing is strict and matches htslib:** malformed optional fields are errors instead of being skipped, unknown types are errors instead of being stored as `Z`, and integers take the smallest _unsigned_ type first, as htslib does. CIGAR lengths of 2^28 or more are errors instead of losing their top bits.
 - **Region queries on a truncated BAM/SAM fail instead of returning fewer records.** A block cut off where a query's records are is `BgzfError::TruncatedBlock`; a file cut short only past them is reported once with `warn!`.
 - **Co-produced TBI and CSI indexes match `bcftools index`:** they end with the `n_no_coor` trailer, record ends on a block boundary are named by the next block (`amend_last`, as for BAM), and bins are compressed as htslib's `compress_binning` does for every format.
 - **Indexed SAM: tabix sequences are matched to the header by name**, not position: `tabix -p sam` numbers only sequences that have records, so a SAM whose first `@SQ` sequences were empty fetched the wrong sequence's chunks. `BamIndex::from_tabix_path`/`from_tabix_bytes` now take the header.
