@@ -65,7 +65,7 @@ fn has_uracil(line: &Line) -> bool {
 // r[verify sam.encode.bin]
 // r[verify sam.encode.seq]
 // r[verify sam.encode.qual]
-// r[verify sam.encode.references]
+// r[verify sam.encode.references+2]
 // r[verify sam.aux.types]
 /// Canonical lines — every placement htslib fixes up, IUPAC in both cases,
 /// `=`, `U`, missing SEQ/QUAL, every aux type and B subtype incl. empty
@@ -248,9 +248,7 @@ fn is_documented_deviation(e: &SamRecordError, fields: &[&str]) -> bool {
     let field = |i: usize| fields.get(i).copied().unwrap_or("");
     let empty_or_plus = |f: &str| f.is_empty() || f.starts_with('+');
     match e {
-        SamRecordError::UnknownReference { .. } | SamRecordError::UnknownMateReference { .. } => {
-            true
-        }
+        SamRecordError::UnknownReference { .. } => true,
         SamRecordError::InvalidFlag { .. } => field(1).is_empty() || field(1).starts_with('0'),
         SamRecordError::InvalidPos { .. } => empty_or_plus(field(3)),
         SamRecordError::InvalidMapq { .. } => empty_or_plus(field(4)),
@@ -307,7 +305,7 @@ fn malformed_lines_are_rejected_wherever_htslib_rejects_them(tc: TestCase) {
 // r[verify sam.encode.deviations]
 // r[verify sam.encode.flag]
 // r[verify sam.encode.numbers]
-// r[verify sam.encode.references]
+// r[verify sam.encode.references+2]
 // r[verify sam.encode.cigar]
 // r[verify sam.encode.seq]
 // r[verify sam.aux.parse]
@@ -336,9 +334,6 @@ fn each_deviation_htslib_accepts_and_seqair_rejects() {
         (base(&[(1, "0x10")]), |e| matches!(e, SamRecordError::InvalidFlag { .. })),
         (base(&[(1, "")]), |e| matches!(e, SamRecordError::InvalidFlag { .. })),
         (base(&[(2, "chrX")]), |e| matches!(e, SamRecordError::UnknownReference { .. })),
-        (base(&[(6, "chrX"), (7, "5")]), |e| {
-            matches!(e, SamRecordError::UnknownMateReference { .. })
-        }),
         (base(&[(3, "")]), |e| matches!(e, SamRecordError::InvalidPos { .. })),
         (base(&[(3, "+10")]), |e| matches!(e, SamRecordError::InvalidPos { .. })),
         (base(&[(4, "+1")]), |e| matches!(e, SamRecordError::InvalidMapq { .. })),
@@ -365,6 +360,22 @@ fn each_deviation_htslib_accepts_and_seqair_rejects() {
         assert!(samtools_payloads(sam.as_bytes()).is_ok(), "htslib should accept {line:?}");
         let err = encode(&line).expect_err(&line);
         assert!(check(&err), "{line:?}: {err:?}");
+    }
+}
+
+// r[verify sam.encode.references+2]
+/// An RNEXT the header lacks is no mate reference, PNEXT and FLAG kept: the
+/// bytes `samtools view -b` writes.
+#[test]
+fn an_unknown_mate_reference_is_dropped_as_htslib_drops_it() {
+    for line in [
+        "r\t1\tchr1\t10\t0\t4M\tchrX\t5\t0\tACGT\tIIII",
+        "r\t33\tchr1\t10\t0\t4M\tchrX\t0\t-7\tACGT\t*",
+    ] {
+        let sam = format!("{}{line}\n", header_text());
+        let theirs = samtools_payloads(sam.as_bytes()).unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(encode(line).unwrap(), theirs[0], "{line:?}");
     }
 }
 
