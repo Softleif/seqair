@@ -264,5 +264,4 @@ paragraph above — so it waits until long reads are shown to cost enough.
 **Not supported yet.** The soft-clip overhang (`r[pileup.soft_clip_overhang.activation]`)
 reaches `n` positions before a read's start, so it needs `n` positions of
 lookahead (close at `pos > end + n`, carry at `end_pos + n > end`); the
-column cap `set_max_depth` and a `mutate` hook have no spelling. CRAM is not
-streamable (`r[unified.stream.detect]`).
+column cap `set_max_depth` and a `mutate` hook have no spelling.
