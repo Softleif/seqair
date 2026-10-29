@@ -74,7 +74,11 @@ impl IupacBase {
     /// ASCII → 4-bit code, htslib's `seq_nt16_table`: either case, `U` as
     /// `T`, the colour-space digits `0`..`3` as A/C/G/T, anything else `N`.
     /// The scalar reference for vectorized encoders.
-    #[allow(clippy::indexing_slicing, reason = "const indices: i < 16, bytes < 256")]
+    #[allow(
+        clippy::indexing_slicing,
+        clippy::cast_possible_truncation,
+        reason = "const indices: i < 16, bytes < 256"
+    )]
     pub const CODE_OF_ASCII: [u8; 256] = {
         let mut table = [15u8; 256];
         let mut i = 0;

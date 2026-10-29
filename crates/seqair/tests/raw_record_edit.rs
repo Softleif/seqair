@@ -81,7 +81,7 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
         let after_base = record.as_payload();
         assert_eq!(after_base[..byte_at], before_base[..byte_at]);
         assert_eq!(after_base[byte_at + 1..], before_base[byte_at + 1..]);
-        let kept_nibble = if i % 2 == 0 { 0x0F } else { 0xF0 };
+        let kept_nibble = if i.is_multiple_of(2) { 0x0F } else { 0xF0 };
         assert_eq!(after_base[byte_at] & kept_nibble, before_base[byte_at] & kept_nibble);
         if len % 2 == 1 && i == len - 1 {
             assert_eq!(after_base[byte_at] & 0x0F, before_base[byte_at] & 0x0F, "pad nibble");
