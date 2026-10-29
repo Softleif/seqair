@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past; any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`). CRAM is `ReaderError::RawQueryUnsupported` for now.
+- **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past (for BAM `BamError::InvalidRecord`, with the record's virtual offset); any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`). CRAM is `ReaderError::RawQueryUnsupported` for now.
 
 ### Changed
 

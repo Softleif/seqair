@@ -79,6 +79,15 @@ pub enum BamError {
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
 
+    /// A record of a raw query that fails validation; the query goes on
+    /// (`r[bam.reader.query_raw.errors]`).
+    #[error("invalid BAM record at virtual offset {offset:#x}")]
+    InvalidRecord {
+        offset: u64,
+        #[source]
+        source: DecodeError,
+    },
+
     /// An earlier error ended this raw query (`r[bam.reader.query_raw.errors]`).
     #[error("BAM query already failed; an earlier read returned the error")]
     Poisoned,
@@ -416,15 +425,15 @@ impl<R: Read + Seek> RawQuery<'_, R> {
     /// the end of the region, which leaves `record` unchanged.
     ///
     /// # Errors
-    /// [`BamError::RecordDecode`] for a record that fails validation — the
-    /// query stays usable. Anything else ends the query: later calls return
+    /// [`BamError::InvalidRecord`], with the record's virtual offset, for a
+    /// record that fails validation — the query stays usable. Anything else ends the query: later calls return
     /// [`BamError::Poisoned`].
     pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, BamError> {
         if self.failed {
             return Err(BamError::Poisoned);
         }
         let header = &self.shared.header;
-        let result = self.query.run_loop(|raw| {
+        let result = self.query.run_loop(|offset, raw| {
             record
                 .refill(header, |payload| {
                     payload.extend_from_slice(raw);
@@ -432,14 +441,14 @@ impl<R: Read + Seek> RawQuery<'_, R> {
                 })
                 .map_err(|e| match e {
                     Refill::Fill(never) => match never {},
-                    Refill::Invalid(source) => BamError::RecordDecode { source },
+                    Refill::Invalid(source) => BamError::InvalidRecord { offset: offset.0, source },
                 })?;
             Ok(ControlFlow::Break(()))
         });
         match result {
             Ok(flow) => Ok(flow.is_break()),
             Err(e) => {
-                if !matches!(e, BamError::RecordDecode { .. }) {
+                if !matches!(e, BamError::InvalidRecord { .. }) {
                     self.failed = true;
                 }
                 Err(e)
@@ -561,14 +570,15 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
         F: FnMut(&[u8]) -> Result<(), E>,
         E: From<BamError>,
     {
-        let flow = self.run_loop(|raw| f(raw).map(|()| ControlFlow::Continue(())))?;
+        let flow = self.run_loop(|_, raw| f(raw).map(|()| ControlFlow::Continue(())))?;
         debug_assert!(flow.is_continue(), "nothing here asks the loop to stop");
         Ok(self.counts())
     }
 
     /// Drive the cursor: a flat `loop` + `continue` state machine over two
-    /// phases, resumable so a caller can stop after any record (`f` returns
-    /// `Break`, and `run_loop` returns it). State persists in
+    /// phases, resumable so a caller can stop after any record (`f`, given
+    /// each record and its virtual offset, returns `Break`, and `run_loop`
+    /// returns it). State persists in
     /// `self.{region, chunk_idx, chunk_end}` between iterations.
     ///
     /// 1. **Advance** — the cursor passed the current chunk's `end`: step to
@@ -601,7 +611,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
 
     fn run_loop<F, E>(&mut self, mut f: F) -> Result<ControlFlow<()>, E>
     where
-        F: FnMut(&[u8]) -> Result<ControlFlow<()>, E>,
+        F: FnMut(VirtualOffset, &[u8]) -> Result<ControlFlow<()>, E>,
         E: From<BamError>,
     {
         loop {
@@ -701,7 +711,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 *self.first_hit = Some(current_voff);
             }
             self.accepted = self.accepted.saturating_add(1);
-            if f(raw)?.is_break() {
+            if f(current_voff, raw)?.is_break() {
                 return Ok(ControlFlow::Break(()));
             }
         }

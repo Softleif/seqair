@@ -347,12 +347,24 @@ fn generated_index(qname: &[u8]) -> usize {
     std::str::from_utf8(qname).unwrap().trim_start_matches('r').parse().unwrap()
 }
 
+/// The read name of the BAM record at virtual offset `offset`, read with
+/// nothing but a BGZF reader.
+fn qname_at(bam: &Path, offset: u64) -> Vec<u8> {
+    use seqair::bam::bgzf::{BgzfReader, VirtualOffset};
+    let mut bgzf = BgzfReader::open(bam).unwrap();
+    bgzf.seek_virtual(VirtualOffset::new(offset >> 16, (offset & 0xFFFF) as u16)).unwrap();
+    let mut record = vec![0; bgzf.read_u32().unwrap() as usize];
+    bgzf.read_exact_into(&mut record).unwrap();
+    let l_read_name = usize::from(record[8]);
+    record[32..32 + l_read_name - 1].to_vec()
+}
+
 /// Whether `e` is the error a record that does not validate is reported as,
 /// which the query continues past.
 fn is_invalid_record(e: &ReaderError) -> bool {
     matches!(
         e,
-        ReaderError::Bam { source: seqair::bam::BamError::RecordDecode { .. } }
+        ReaderError::Bam { source: seqair::bam::BamError::InvalidRecord { .. } }
             | ReaderError::Sam { source: seqair::sam::SamError::MalformedRecord { .. } }
     )
 }
@@ -397,6 +409,13 @@ fn a_record_that_does_not_validate_is_an_error_in_its_place(tc: TestCase) {
                 Ok(false) => break,
                 Err(e) => {
                     assert!(is_invalid_record(&e), "{path:?}: {e:?}");
+                    if let ReaderError::Bam {
+                        source: seqair::bam::BamError::InvalidRecord { offset, .. },
+                    } = e
+                    {
+                        let i = generated_index(&qname_at(path, offset));
+                        assert_eq!(records[i].flaw, Flaw::CigarSeqMismatch, "r{i} at {offset:#x}");
+                    }
                     got.push(None);
                 }
             }
@@ -470,7 +489,7 @@ fn a_truncated_bam_poisons_its_raw_query() {
         }
     };
     assert!(read > 0 && read < 3_000, "{read}");
-    assert!(!matches!(err, BamError::RecordDecode { .. }), "{err:?}");
+    assert!(!matches!(err, BamError::InvalidRecord { .. }), "{err:?}");
     assert!(matches!(query.read_record(&mut record), Err(BamError::Poisoned)));
     assert!(matches!(query.read_record(&mut record), Err(BamError::Poisoned)));
     drop(query);
