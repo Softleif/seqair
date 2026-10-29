@@ -274,7 +274,6 @@ impl<B: SeqBase> DecodedSlice<B> {
 impl DecodedSlice {
     // r[impl cram.fetch_into_customized.push_time+2]
     // r[impl cram.fetch_into_customized.filtered_mate_fields]
-    // r[impl interval.overlap_test]
     /// Push the records overlapping `query_start..=query_end` into `store`,
     /// consulting `customize` for each and adding each fetched record to
     /// `counts`.
@@ -291,11 +290,7 @@ impl DecodedSlice {
         counts: &mut crate::reader::FetchCounts,
     ) -> Result<(), CramError> {
         for r in &self.records {
-            // Both bounds are inclusive, as are `pos` and `end_pos`: a record
-            // is kept iff `pos <= query_end && end_pos >= query_start`. An
-            // unmapped record's `end_pos` is its `pos`, as in BAM.
-            let wanted = r.pos <= query_end && r.end_pos >= query_start;
-            if !wanted {
+            if !r.overlaps(query_start, query_end) {
                 continue;
             }
             let idx = store.push_fields(
@@ -324,11 +319,24 @@ impl DecodedSlice {
     }
 }
 
+impl SliceRecord {
+    // r[impl interval.overlap_test]
+    /// Both bounds are inclusive, as are `pos` and `end_pos`. An unmapped
+    /// record's `end_pos` is its `pos`, as in BAM.
+    fn overlaps(&self, start: Pos0, last: Pos0) -> bool {
+        self.pos <= last && self.end_pos >= start
+    }
+}
+
 impl DecodedSlice<IupacBase> {
     /// Every record, in slice order, as the fields of its BAM record
     /// (`r[cram.stream.raw_records]`).
     pub(crate) fn alignments(&self) -> impl ExactSizeIterator<Item = AlignmentFields<'_>> {
-        self.records.iter().map(|r| AlignmentFields {
+        self.records.iter().map(|r| self.fields(r))
+    }
+
+    fn fields(&self, r: &SliceRecord) -> AlignmentFields<'_> {
+        AlignmentFields {
             tid: r.tid,
             pos: (!r.unplaced).then_some(r.pos),
             flags: r.flags.raw(),
@@ -339,7 +347,7 @@ impl DecodedSlice<IupacBase> {
             seq: Seq::Iupac(field(&self.bases, r.seq)),
             qual: Qualities::Raw(field(&self.qual, r.qual)),
             aux: field(&self.aux, r.aux),
-        })
+        }
     }
 }
 
@@ -433,7 +441,7 @@ pub(crate) enum Keep {
 }
 
 impl Keep {
-    fn keeps(self, tid: Option<Tid>) -> bool {
+    pub(crate) fn keeps(self, tid: Option<Tid>) -> bool {
         match self {
             Self::Tid(t) => tid == Some(t),
             Self::All => true,
@@ -534,6 +542,40 @@ pub(crate) fn decode_slice<B: SeqBase>(
         scratch,
     )
     .map(|(slice, _)| slice)
+}
+
+/// [`decode_slice`], with each decoded record's 0-based index among all of
+/// the slice's records, which differs from its index in the decoded slice
+/// where `keep` passes records over.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
+)]
+pub(crate) fn decode_slice_indexed<B: SeqBase>(
+    ch: &CompressionHeader,
+    container_data: &[u8],
+    slice_offset: usize,
+    reference: SliceReference<'_, B::Ref>,
+    header: &BamHeader,
+    read_group_ids: &[SmolStr],
+    keep: Keep,
+    synthesis: Synthesis<'_>,
+    scratch: &mut SliceScratch<B>,
+) -> Result<(DecodedSlice<B>, Vec<u32>), CramError> {
+    let (slice, infos) = decode_slice_records(
+        ch,
+        container_data,
+        slice_offset,
+        reference,
+        header,
+        read_group_ids,
+        keep,
+        synthesis,
+        scratch,
+    )?;
+    let indices =
+        infos.iter().zip(0u32..).filter(|(info, _)| info.slot.is_some()).map(|(_, i)| i).collect();
+    Ok((slice, indices))
 }
 
 // r[impl cram.stream.reference_window+2]

@@ -8,7 +8,9 @@ use super::{
     compression_header::CompressionHeader,
     container::{ContainerHeader, RefSeqId},
     reader::{self, CramError},
-    slice::{self, Keep, SliceHeader, SliceReference, SliceScratch, Synthesis, TidWindow},
+    slice::{
+        self, DecodedSlice, Keep, SliceHeader, SliceReference, SliceScratch, Synthesis, TidWindow,
+    },
     varint,
 };
 use crate::bam::{BamHeader, DecodeError, RawBamRecord};
@@ -17,7 +19,7 @@ use crate::reader::Tid;
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
 use seqair_types::{IupacBase, Pos0, SmolStr};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -150,8 +152,8 @@ impl<R: Read> CramStreamReader<R> {
         }
 
         // r[impl cram.file.header_container]
-        let (_, data) = read_container(&mut inner, 0)?
-            .ok_or(CramStreamError::TruncatedContainer { container: 0 })?;
+        let truncated = || CramStreamError::TruncatedContainer { container: 0 };
+        let (_, data) = read_container(&mut inner, truncated)?.ok_or_else(truncated)?;
         let header = reader::header_from_container_data(&data)?;
         let read_group_ids = reader::parse_read_group_ids(header.header_text());
         Ok(Self {
@@ -174,7 +176,7 @@ impl<R: Read> CramStreamReader<R> {
     /// The FASTA or its index cannot be opened.
     pub fn decoder(&self, fasta: &Path) -> Result<CramContainerDecoder, CramStreamError> {
         let fasta = IndexedFastaReader::open(fasta).map_err(CramError::from)?;
-        Ok(CramContainerDecoder::new(Arc::clone(&self.shared), fasta))
+        Ok(CramContainerDecoder { fasta, slices: SliceDecoder::new(Arc::clone(&self.shared)) })
     }
 
     // r[impl cram.stream.framing+2]
@@ -193,7 +195,9 @@ impl<R: Read> CramStreamReader<R> {
         }
         loop {
             let number = self.containers;
-            let read = read_container(&mut self.inner, number);
+            let read = read_container(&mut self.inner, || CramStreamError::TruncatedContainer {
+                container: number,
+            });
             let Some((header, data)) = read.inspect_err(|_| self.state = State::Failed)? else {
                 // r[impl cram.file.eof+2]
                 warn!(containers = number, "CRAM stream ends without an EOF container");
@@ -234,13 +238,14 @@ impl<R: Read> Read for Recording<'_, R> {
 
 // r[impl cram.stream.container_header]
 /// Read one container (header and body) from `inner`. `None` when the input
-/// ends before its first byte.
+/// ends before its first byte; `truncated` is the error for input that ends
+/// inside it.
 fn read_container<R: Read>(
     inner: &mut R,
-    number: u64,
+    truncated: impl Fn() -> CramStreamError,
 ) -> Result<Option<(ContainerHeader, Vec<u8>)>, CramStreamError> {
-    let truncated = |e: io::Error| match e.kind() {
-        io::ErrorKind::UnexpectedEof => CramStreamError::TruncatedContainer { container: number },
+    let truncated_by = |e: io::Error| match e.kind() {
+        io::ErrorKind::UnexpectedEof => truncated(),
         _ => CramStreamError::Io { source: e },
     };
 
@@ -259,25 +264,25 @@ fn read_container<R: Read>(
     {
         let mut r = Recording { inner: &mut *inner, bytes: &mut bytes };
         let mut rest_of_length = [0u8; 3];
-        r.read_exact(&mut rest_of_length).map_err(truncated)?;
+        r.read_exact(&mut rest_of_length).map_err(&truncated_by)?;
         // reference id, alignment start, span, record count
         for _ in 0..4 {
-            varint::read_itf8(&mut r).map_err(truncated)?;
+            varint::read_itf8(&mut r).map_err(&truncated_by)?;
         }
         // record counter, bases
         for _ in 0..2 {
-            varint::read_ltf8(&mut r).map_err(truncated)?;
+            varint::read_ltf8(&mut r).map_err(&truncated_by)?;
         }
-        varint::read_itf8(&mut r).map_err(truncated)?; // block count
-        let landmarks = varint::read_itf8(&mut r).map_err(truncated)?.cast_signed();
+        varint::read_itf8(&mut r).map_err(&truncated_by)?; // block count
+        let landmarks = varint::read_itf8(&mut r).map_err(&truncated_by)?.cast_signed();
         let count = usize::try_from(landmarks)
             .map_err(|_| CramError::InvalidLength { value: landmarks })?;
         reader::check_alloc_size(count.saturating_mul(4), "container landmark array")?;
         for _ in 0..count {
-            varint::read_itf8(&mut r).map_err(truncated)?;
+            varint::read_itf8(&mut r).map_err(&truncated_by)?;
         }
         let mut crc = [0u8; 4];
-        r.read_exact(&mut crc).map_err(truncated)?;
+        r.read_exact(&mut crc).map_err(&truncated_by)?;
     }
     let header = ContainerHeader::parse(&bytes)?;
 
@@ -291,7 +296,7 @@ fn read_container<R: Read>(
         .read_to_end(&mut data)
         .map_err(|source| CramStreamError::Io { source })?;
     if got != len {
-        return Err(CramStreamError::TruncatedContainer { container: number });
+        return Err(truncated());
     }
     Ok(Some((header, data)))
 }
@@ -301,13 +306,8 @@ fn read_container<R: Read>(
 /// per thread ([`Self::fork`]); its buffers and codec tables are reused from
 /// container to container.
 pub struct CramContainerDecoder {
-    shared: Arc<StreamShared>,
     fasta: IndexedFastaReader,
-    scratch: SliceScratch<IupacBase>,
-    ref_buf: Vec<u8>,
-    windows: Vec<TidWindow<u8>>,
-    decode_md: bool,
-    name_prefix: SmolStr,
+    slices: SliceDecoder,
 }
 
 impl std::fmt::Debug for CramContainerDecoder {
@@ -317,29 +317,18 @@ impl std::fmt::Debug for CramContainerDecoder {
 }
 
 impl CramContainerDecoder {
-    fn new(shared: Arc<StreamShared>, fasta: IndexedFastaReader) -> Self {
-        Self {
-            shared,
-            fasta,
-            scratch: SliceScratch::default(),
-            ref_buf: Vec::new(),
-            windows: Vec::new(),
-            decode_md: true,
-            name_prefix: SmolStr::new_static("-"),
-        }
-    }
-
     /// A decoder for another thread, sharing the header and the FASTA index.
     ///
     /// # Errors
     /// The FASTA cannot be reopened.
     pub fn fork(&self) -> Result<Self, CramStreamError> {
         let fasta = self.fasta.fork().map_err(CramError::from)?;
-        Ok(Self {
-            decode_md: self.decode_md,
-            name_prefix: self.name_prefix.clone(),
-            ..Self::new(Arc::clone(&self.shared), fasta)
-        })
+        let slices = SliceDecoder {
+            decode_md: self.slices.decode_md,
+            name_prefix: self.slices.name_prefix.clone(),
+            ..SliceDecoder::new(Arc::clone(&self.slices.shared))
+        };
+        Ok(Self { fasta, slices })
     }
 
     // r[impl cram.stream.md_nm.option]
@@ -348,7 +337,7 @@ impl CramContainerDecoder {
     /// `samtools view --input-fmt-option decode_md=0`. On by default.
     #[must_use]
     pub fn decode_md(mut self, on: bool) -> Self {
-        self.decode_md = on;
+        self.slices.decode_md = on;
         self
     }
 
@@ -359,13 +348,13 @@ impl CramContainerDecoder {
     /// `--input-fmt-option name_prefix=` sets it.
     #[must_use]
     pub fn name_prefix(mut self, prefix: impl Into<SmolStr>) -> Self {
-        self.name_prefix = prefix.into();
+        self.slices.name_prefix = prefix.into();
         self
     }
 
     /// The file header records are validated against.
     pub fn header(&self) -> &BamHeader {
-        &self.shared.header
+        self.slices.header()
     }
 
     // r[impl cram.stream.all_records]
@@ -393,92 +382,18 @@ impl CramContainerDecoder {
         out: &mut Vec<RawBamRecord>,
     ) -> Result<(), CramStreamError> {
         let data = container.data.as_slice();
-        let (comp_block, _) = block::parse_block_with(data, &mut self.scratch.codec)?;
-        if comp_block.content_type != block::ContentType::CompressionHeader {
-            return Err(
-                CramError::ExpectedCompressionHeader { found: comp_block.content_type }.into()
-            );
-        }
-        let ch = CompressionHeader::parse(&comp_block.data)?;
-        let header = &self.shared.header;
-        let read_group_ids = self.shared.read_group_ids.as_slice();
-
+        let ch = self.slices.compression_header(data)?;
         for &landmark in &container.header.landmarks {
             let offset = usize::try_from(landmark)
                 .map_err(|_| CramError::InvalidLength { value: landmark })?;
-            let slice_data =
-                data.get(offset..).ok_or(CramError::Truncated { context: "slice offset" })?;
-            let (sh_block, _) = block::parse_block_with(slice_data, &mut self.scratch.codec)?;
-            if sh_block.content_type != block::ContentType::SliceHeader {
-                return Err(CramError::ExpectedSliceHeader { found: sh_block.content_type }.into());
-            }
-            let sh = SliceHeader::parse(&sh_block.data)?;
-            let slice_ref = sh.ref_seq_id.resolve(header).map_err(CramError::from)?;
-
-            // r[impl cram.stream.reference_window+2]
-            // A file written without a reference (`RR` false) is decoded
-            // without one (`r[cram.record.no_ref_fill]`): nothing to fetch.
-            let no_ref = !ch.preservation.reference_required;
-            let reference = match slice_ref {
-                RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
-                _ if no_ref => SliceReference::Window { bases: Some(&[]), start: 0 },
-                RefSeqId::Ref(tid) => {
-                    let begin =
-                        u64::try_from(sh.alignment_start.max(1)).unwrap_or(1).saturating_sub(1);
-                    let span = u64::try_from(sh.alignment_span).unwrap_or(0);
-                    let end = begin.saturating_add(span).min(header.target_len(tid).unwrap_or(0));
-                    let found = fetch(&mut self.fasta, header, tid, begin, end, &mut self.ref_buf)?;
-                    SliceReference::Window {
-                        bases: found.then_some(self.ref_buf.as_slice()),
-                        start: begin.cast_signed(),
-                    }
-                }
-                RefSeqId::Multi => {
-                    let spans = slice::multi_ref_spans(
-                        &ch,
-                        data,
-                        offset,
-                        header,
-                        read_group_ids,
-                        &mut self.scratch,
-                    )?;
-                    self.windows.clear();
-                    for (tid, span) in spans {
-                        let begin = u64::try_from(span.start).unwrap_or(0);
-                        let end = u64::try_from(span.end)
-                            .unwrap_or(0)
-                            .min(header.target_len(tid).unwrap_or(0));
-                        if !fetch(&mut self.fasta, header, tid, begin, end, &mut self.ref_buf)? {
-                            return Err(CramError::MissingReference {
-                                contig: header.target_name(tid).unwrap_or("?").into(),
-                            }
-                            .into());
-                        }
-                        let bases = self.ref_buf.to_ascii_uppercase();
-                        self.windows.push(TidWindow { tid, start: begin.cast_signed(), bases });
-                    }
-                    SliceReference::PerTid(&self.windows)
-                }
-            };
-
-            let decoded = slice::decode_slice(
-                &ch,
-                data,
-                offset,
-                reference,
-                header,
-                read_group_ids,
-                Keep::All,
-                Synthesis { md_nm: self.decode_md, name_prefix: Some(&self.name_prefix) },
-                &mut self.scratch,
-            )?;
+            let decoded =
+                self.slices.decode_slice(&mut self.fasta, &ch, data, offset, Keep::All)?;
+            let header = self.slices.header();
 
             // r[impl cram.stream.raw_records]
             // r[impl cram.stream.fidelity+2]
-            let first = u64::try_from(sh.record_counter).unwrap_or(0);
-            out.reserve(decoded.alignments().len());
-            for (i, fields) in (0u64..).zip(decoded.alignments()) {
-                let record = first.saturating_add(i);
+            out.reserve(decoded.records.alignments().len());
+            for (&record, fields) in decoded.numbers.iter().zip(decoded.records.alignments()) {
                 let mut payload = Vec::new();
                 encode_alignment(&mut payload, &fields)
                     .map_err(|source| CramStreamError::RecordEncode { record, source })?;
@@ -491,11 +406,144 @@ impl CramContainerDecoder {
     }
 }
 
+/// One slice's records, decoded by [`SliceDecoder::decode_slice`].
+#[derive(Debug, Default)]
+pub(crate) struct StreamSlice {
+    pub(crate) records: DecodedSlice<IupacBase>,
+    /// Each record's 0-based number in the file, for errors.
+    pub(crate) numbers: Vec<u64>,
+}
+
+// r[impl cram.stream.slice_decode]
+/// The state decoding a slice needs besides the FASTA, which the caller
+/// lends: a [`CramContainerDecoder`] owns its own, the indexed reader's raw
+/// query lends the reader's.
+pub(crate) struct SliceDecoder {
+    shared: Arc<StreamShared>,
+    scratch: SliceScratch<IupacBase>,
+    ref_buf: Vec<u8>,
+    windows: Vec<TidWindow<u8>>,
+    decode_md: bool,
+    name_prefix: SmolStr,
+}
+
+impl SliceDecoder {
+    fn new(shared: Arc<StreamShared>) -> Self {
+        Self {
+            shared,
+            scratch: SliceScratch::default(),
+            ref_buf: Vec::new(),
+            windows: Vec::new(),
+            decode_md: true,
+            name_prefix: SmolStr::new_static("-"),
+        }
+    }
+
+    pub(crate) fn header(&self) -> &BamHeader {
+        &self.shared.header
+    }
+
+    /// The compression header, the first block of a container's `data`.
+    pub(crate) fn compression_header(
+        &mut self,
+        data: &[u8],
+    ) -> Result<CompressionHeader, CramError> {
+        let (comp_block, _) = block::parse_block_with(data, &mut self.scratch.codec)?;
+        if comp_block.content_type != block::ContentType::CompressionHeader {
+            return Err(CramError::ExpectedCompressionHeader { found: comp_block.content_type });
+        }
+        CompressionHeader::parse(&comp_block.data)
+    }
+
+    /// Decode the records `keep` names of the slice at `offset` in a
+    /// container's `data`, against the reference `fasta` holds for it.
+    pub(crate) fn decode_slice<F: Read + Seek>(
+        &mut self,
+        fasta: &mut IndexedFastaReader<F>,
+        ch: &CompressionHeader,
+        data: &[u8],
+        offset: usize,
+        keep: Keep,
+    ) -> Result<StreamSlice, CramError> {
+        let header = &self.shared.header;
+        let read_group_ids = self.shared.read_group_ids.as_slice();
+        let slice_data =
+            data.get(offset..).ok_or(CramError::Truncated { context: "slice offset" })?;
+        let (sh_block, _) = block::parse_block_with(slice_data, &mut self.scratch.codec)?;
+        if sh_block.content_type != block::ContentType::SliceHeader {
+            return Err(CramError::ExpectedSliceHeader { found: sh_block.content_type });
+        }
+        let sh = SliceHeader::parse(&sh_block.data)?;
+        let slice_ref = sh.ref_seq_id.resolve(header)?;
+
+        // r[impl cram.stream.reference_window+2]
+        // A file written without a reference (`RR` false) is decoded
+        // without one (`r[cram.record.no_ref_fill]`): nothing to fetch.
+        let no_ref = !ch.preservation.reference_required;
+        let reference = match slice_ref {
+            RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
+            _ if no_ref => SliceReference::Window { bases: Some(&[]), start: 0 },
+            RefSeqId::Ref(tid) => {
+                let begin = u64::try_from(sh.alignment_start.max(1)).unwrap_or(1).saturating_sub(1);
+                let span = u64::try_from(sh.alignment_span).unwrap_or(0);
+                let end = begin.saturating_add(span).min(header.target_len(tid).unwrap_or(0));
+                let found = fetch(fasta, header, tid, begin, end, &mut self.ref_buf)?;
+                SliceReference::Window {
+                    bases: found.then_some(self.ref_buf.as_slice()),
+                    start: begin.cast_signed(),
+                }
+            }
+            RefSeqId::Multi => {
+                let spans = slice::multi_ref_spans(
+                    ch,
+                    data,
+                    offset,
+                    header,
+                    read_group_ids,
+                    &mut self.scratch,
+                )?;
+                self.windows.clear();
+                // r[impl cram.query_raw.htslib]
+                // Only the references whose records are kept need theirs.
+                for (tid, span) in spans.into_iter().filter(|(tid, _)| keep.keeps(Some(*tid))) {
+                    let begin = u64::try_from(span.start).unwrap_or(0);
+                    let end = u64::try_from(span.end)
+                        .unwrap_or(0)
+                        .min(header.target_len(tid).unwrap_or(0));
+                    if !fetch(fasta, header, tid, begin, end, &mut self.ref_buf)? {
+                        return Err(CramError::MissingReference {
+                            contig: header.target_name(tid).unwrap_or("?").into(),
+                        });
+                    }
+                    let bases = self.ref_buf.to_ascii_uppercase();
+                    self.windows.push(TidWindow { tid, start: begin.cast_signed(), bases });
+                }
+                SliceReference::PerTid(&self.windows)
+            }
+        };
+
+        let (records, indices) = slice::decode_slice_indexed(
+            ch,
+            data,
+            offset,
+            reference,
+            header,
+            read_group_ids,
+            keep,
+            Synthesis { md_nm: self.decode_md, name_prefix: Some(&self.name_prefix) },
+            &mut self.scratch,
+        )?;
+        let first = u64::try_from(sh.record_counter).unwrap_or(0);
+        let numbers = indices.into_iter().map(|i| first.saturating_add(u64::from(i))).collect();
+        Ok(StreamSlice { records, numbers })
+    }
+}
+
 /// Fetch `begin..end` (0-based, half-open) of `tid` from the FASTA into
 /// `buf`. `false` when the FASTA lacks the contig; an empty span fetches
 /// nothing and succeeds.
-fn fetch(
-    fasta: &mut IndexedFastaReader,
+fn fetch<F: Read + Seek>(
+    fasta: &mut IndexedFastaReader<F>,
     header: &BamHeader,
     tid: Tid,
     begin: u64,
