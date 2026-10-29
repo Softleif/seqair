@@ -44,6 +44,7 @@ fn fixtures() -> Vec<(PathBuf, PathBuf)> {
         "fidelity_lossy_names",
         "fidelity_embed_ref2",
         "fidelity_no_ref",
+        "onlyu",
     ] {
         out.push((data(&format!("cram-stream/{f}.cram")), fidelity_fa.clone()));
     }

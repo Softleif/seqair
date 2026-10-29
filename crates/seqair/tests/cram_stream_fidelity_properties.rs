@@ -207,7 +207,8 @@ fn run(cmd: &mut Command) -> Vec<u8> {
     out.stdout
 }
 
-fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf) {
+/// The CRAM, its reference, and how many records it holds.
+fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf, usize) {
     let fasta = dir.join("ref.fa");
     let mut fa = String::new();
     let mut sam = String::from("@HD\tVN:1.6\tSO:unsorted\n");
@@ -216,14 +217,17 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf) {
         writeln!(sam, "@SQ\tSN:c{i}\tLN:{CONTIG_LEN}").unwrap();
     }
     sam.push_str("@RG\tID:grpA\tSM:x\n@RG\tID:grpB\tSM:x\n");
+    let mut written = 0;
     for (i, line) in sample.lines.iter().enumerate() {
-        // samtools 1.25 fails to build a consensus for a slice of SEQ `*`
-        // reads ("Failed to build reference") and writes a broken file.
-        let seq_star = line.split('\t').nth(8) == Some("*");
-        if matches!(opts.reference, Reference::Consensus) && seq_star {
+        // samtools 1.25 fails to build a consensus for a slice of mapped
+        // SEQ `*` reads ("Failed to build reference") and writes a broken file.
+        let fields: Vec<&str> = line.split('\t').collect();
+        let mapped_seq_star = fields[0] != "4" && fields[8] == "*";
+        if matches!(opts.reference, Reference::Consensus) && mapped_seq_star {
             continue;
         }
         writeln!(sam, "r{i}\t{line}").unwrap();
+        written += 1;
     }
     std::fs::write(&fasta, fa).unwrap();
     run(Command::new("samtools").arg("faidx").arg(&fasta));
@@ -238,7 +242,7 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf) {
         cmd.arg("--output-fmt-option").arg(opt);
     }
     run(cmd.arg("-T").arg(&fasta).arg("-o").arg(&cram).arg(&bam));
-    (cram, fasta)
+    (cram, fasta, written)
 }
 
 fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
@@ -263,8 +267,38 @@ fn streamed_records_are_what_samtools_writes(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = tc.draw(arb_opts().print_as_debug());
     let decode_md = tc.draw(gs::booleans());
+    assert_streams_as_samtools(&sample, &opts, decode_md);
+}
+
+/// An unplaced read with SEQ and QUAL `*` has no bases, so a slice of only
+/// such reads has no base or quality block at all.
+const UNPLACED_NO_SEQ: &str = "4\t*\t0\t0\t*\t*\t0\t0\t*\t*";
+
+#[hegel::composite]
+fn arb_unplaced_no_seq_sample(tc: &TestCase) -> Sample {
+    let reference = tc.draw_silent(text("ACGT", CONTIG_LEN));
+    let mut lines: Vec<String> =
+        (0..tc.draw_silent(int(0, 4))).map(|_| arb_mapped(tc, 0, &reference)).collect();
+    lines.extend((0..tc.draw_silent(int(1, 8))).map(|_| UNPLACED_NO_SEQ.to_owned()));
+    Sample { contigs: vec![reference], lines }
+}
+
+// r[verify cram.stream.all_records]
+// r[verify cram.encoding.external_empty]
+/// Unplaced reads with SEQ and QUAL `*`, alone in their slice or after
+/// mapped reads, stream as samtools reads them.
+#[hegel::test(test_cases = pinned::cases(24))]
+fn unplaced_reads_without_seq_stream_as_samtools_reads_them(tc: TestCase) {
+    let sample = tc.draw(arb_unplaced_no_seq_sample().print_as_debug());
+    let opts = tc.draw(arb_opts().print_as_debug());
+    assert_streams_as_samtools(&sample, &opts, true);
+}
+
+/// The streamed records of `sample` written under `opts` against samtools';
+/// one per record written.
+fn assert_streams_as_samtools(sample: &Sample, opts: &Opts, decode_md: bool) {
     let dir = tempfile::tempdir().unwrap();
-    let (cram, fasta) = write_files(dir.path(), &sample, &opts);
+    let (cram, fasta, written) = write_files(dir.path(), sample, opts);
 
     let ours = streamed(&cram, &fasta, decode_md);
     let header = CramStreamReader::new(std::fs::File::open(&cram).unwrap()).unwrap().into_header();
@@ -300,4 +334,5 @@ fn streamed_records_are_what_samtools_writes(tc: TestCase) {
     }
     let mut rest = Vec::new();
     assert!(!reader.read_payload_into(&mut rest).unwrap());
+    assert_eq!(ours.len(), written);
 }
