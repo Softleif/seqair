@@ -559,3 +559,21 @@ fn a_truncated_or_corrupt_cram_poisons_its_raw_query() {
     }
     std::fs::write(&file.cram, &bytes).unwrap();
 }
+
+// r[verify cram.stream.container_header+2]
+/// A container of 512 two-record slices has a container header longer than
+/// a fixed 1 KiB read: `fetch_into` and `query_raw` both read every record.
+#[test]
+fn a_container_with_hundreds_of_slices_is_read_whole() {
+    let file = generate(1_024, None, &["seqs_per_slice=2", "slices_per_container=512"]);
+    let offsets = container_offsets(&file.crai);
+    assert!(offsets.len() <= 2, "{} containers", offsets.len());
+    let mut reader = open_generated(&file);
+    let tid = "chr1".resolve_tid(reader.header()).unwrap();
+    let whole = span(0, GENERATED_LEN - 1);
+    let mut store = RecordStore::new();
+    assert_eq!(reader.fetch_into(tid, whole, &mut store).unwrap(), 1_024);
+    let raw: Vec<RawBamRecord> =
+        reader.query_raw(tid, whole).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(raw.len(), 1_024);
+}

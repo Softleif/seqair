@@ -19,7 +19,7 @@ use crate::reader::Tid;
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
 use seqair_types::{IupacBase, Pos0, SmolStr};
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -158,7 +158,8 @@ impl<R: Read> CramStreamReader<R> {
 
         // r[impl cram.file.header_container]
         let truncated = || CramStreamError::TruncatedContainer { container: 0 };
-        let (_, data) = read_container(&mut inner, truncated)?.ok_or_else(truncated)?;
+        let mut data = Vec::new();
+        read_container(&mut inner, &mut data, truncated)?.ok_or_else(truncated)?;
         let header = reader::header_from_container_data(&data)?;
         let read_group_ids = reader::parse_read_group_ids(header.header_text());
         Ok(Self {
@@ -200,10 +201,11 @@ impl<R: Read> CramStreamReader<R> {
         }
         loop {
             let number = self.containers;
-            let read = read_container(&mut self.inner, || CramStreamError::TruncatedContainer {
-                container: number,
+            let mut data = Vec::new();
+            let read = read_container(&mut self.inner, &mut data, || {
+                CramStreamError::TruncatedContainer { container: number }
             });
-            let Some((header, data)) = read.inspect_err(|_| self.state = State::Failed)? else {
+            let Some(header) = read.inspect_err(|_| self.state = State::Failed)? else {
                 // r[impl cram.file.eof+2]
                 warn!(containers = number, "CRAM stream ends without an EOF container");
                 self.state = State::Ended;
@@ -242,28 +244,40 @@ impl<R: Read> Read for Recording<'_, R> {
 }
 
 // r[impl cram.query_raw]
-/// Read the container at byte `offset` of `file` as the stream reads one.
-/// `None` for the EOF container.
+// r[impl cram.stream.container_header+2]
+/// Read the container at byte `offset` of `file` as the stream reads one,
+/// its body into `data`. `None` for the EOF container.
 pub(crate) fn read_container_at<R: Read + Seek>(
     file: &mut R,
     offset: u64,
-) -> Result<Option<(ContainerHeader, Vec<u8>)>, CramStreamError> {
+    data: &mut Vec<u8>,
+) -> Result<Option<ContainerHeader>, CramStreamError> {
     let truncated = || CramStreamError::TruncatedContainerAt { offset };
     file.seek(SeekFrom::Start(offset)).map_err(|source| CramStreamError::Io { source })?;
-    // Buffered, as the header is read a field at a time.
-    let (header, data) =
-        read_container(&mut BufReader::new(file), truncated)?.ok_or_else(truncated)?;
-    Ok((!header.is_eof()).then_some((header, data)))
+    // One read for the header, which `read_container` takes a field at a
+    // time: a few hundred bytes cover all but containers of many slices,
+    // whose rest comes from the file.
+    let mut prefix = [0u8; 512];
+    let n = loop {
+        match file.read(&mut prefix) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            read => break read.map_err(|source| CramStreamError::Io { source })?,
+        }
+    };
+    let mut input = prefix.get(..n).unwrap_or_default().chain(file);
+    let header = read_container(&mut input, data, truncated)?.ok_or_else(truncated)?;
+    Ok((!header.is_eof()).then_some(header))
 }
 
-// r[impl cram.stream.container_header]
-/// Read one container (header and body) from `inner`. `None` when the input
-/// ends before its first byte; `truncated` is the error for input that ends
-/// inside it.
-fn read_container<R: Read>(
+// r[impl cram.stream.container_header+2]
+/// Read one container from `inner`: its header, and its body into `data`
+/// (cleared first). `None` when the input ends before its first byte;
+/// `truncated` is the error for input that ends inside it.
+pub(crate) fn read_container<R: Read>(
     inner: &mut R,
+    data: &mut Vec<u8>,
     truncated: impl Fn() -> CramStreamError,
-) -> Result<Option<(ContainerHeader, Vec<u8>)>, CramStreamError> {
+) -> Result<Option<ContainerHeader>, CramStreamError> {
     let truncated_by = |e: io::Error| match e.kind() {
         io::ErrorKind::UnexpectedEof => truncated(),
         _ => CramStreamError::Io { source: e },
@@ -310,15 +324,15 @@ fn read_container<R: Read>(
         .map_err(|_| CramError::InvalidLength { value: header.length })?;
     reader::check_alloc_size(len, "container data")?;
     // Grown as the bytes arrive, so a corrupt length cannot allocate ahead.
-    let mut data = Vec::new();
+    data.clear();
     let got = inner
         .take(u64::try_from(len).unwrap_or(u64::MAX))
-        .read_to_end(&mut data)
+        .read_to_end(data)
         .map_err(|source| CramStreamError::Io { source })?;
     if got != len {
         return Err(truncated());
     }
-    Ok(Some((header, data)))
+    Ok(Some(header))
 }
 
 // r[impl cram.stream.decoder]

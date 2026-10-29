@@ -24,7 +24,7 @@ use core::range::RangeInclusive;
 use seqair_types::{Pos0, Pos1, SmallVec, SmolStr};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::instrument;
@@ -555,7 +555,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
         }
 
         let mut cursor = Cursor::new(cram_data.clone());
-        cursor.seek(SeekFrom::Start(26))?;
+        cursor.seek(std::io::SeekFrom::Start(26))?;
         let header = read_header_container(&mut cursor)?;
         header.validate_sort_order()?;
 
@@ -744,6 +744,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             decoder,
             slices: slices.into_iter(),
             container: None,
+            data: Vec::new(),
             slice: StreamSlice::default(),
             next: 0,
             tid,
@@ -787,6 +788,8 @@ pub struct CramRawQuery<'r, R: Read + Seek> {
     slices: std::vec::IntoIter<(u64, u64)>,
     /// The container the last slice came from, kept for its next slices.
     container: Option<Box<RawContainer>>,
+    /// The bytes of `container`, reused from container to container.
+    data: Vec<u8>,
     slice: StreamSlice,
     /// Index in `slice` of the next record to look at.
     next: usize,
@@ -802,7 +805,7 @@ pub struct CramRawQuery<'r, R: Read + Seek> {
 /// or nothing for the EOF container.
 struct RawContainer {
     offset: u64,
-    body: Option<(ContainerHeader, Vec<u8>, CompressionHeader)>,
+    body: Option<(ContainerHeader, CompressionHeader)>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for CramRawQuery<'_, R> {
@@ -886,17 +889,19 @@ impl<R: Read + Seek> CramRawQuery<'_, R> {
         let container = match &mut self.container {
             Some(c) if c.offset == container_offset => c,
             slot => {
-                let body = match stream::read_container_at(&mut *self.file, container_offset)? {
-                    Some((header, data)) => {
-                        let compression = self.decoder.compression_header(&data)?;
-                        Some((header, data, compression))
+                let read =
+                    stream::read_container_at(&mut *self.file, container_offset, &mut self.data);
+                let body = match read? {
+                    Some(header) => {
+                        let compression = self.decoder.compression_header(&self.data)?;
+                        Some((header, compression))
                     }
                     None => None,
                 };
                 slot.insert(Box::new(RawContainer { offset: container_offset, body }))
             }
         };
-        let Some((header, data, compression)) = &container.body else { return Ok(()) };
+        let Some((header, compression)) = &container.body else { return Ok(()) };
         // r[impl cram.index.crai_per_slice]
         if !header.landmarks.iter().any(|&l| u64::try_from(l).is_ok_and(|l| l == slice_offset)) {
             return Ok(());
@@ -906,7 +911,7 @@ impl<R: Read + Seek> CramRawQuery<'_, R> {
         self.slice = self.decoder.decode_slice(
             self.fasta,
             compression,
-            data,
+            &self.data,
             offset,
             Keep::Tid(self.tid),
         )?;
@@ -951,33 +956,13 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         tid: Tid,
         ref_name: &str,
     ) -> Result<Option<LoadedContainer>, CramError> {
-        self.file.seek(SeekFrom::Start(container_offset))?;
-
-        // Read container header
-        let mut header_buf = [0u8; 1024]; // container headers are typically < 100 bytes
-        let bytes_read = self.file.read(&mut header_buf)?;
-        let container_header = ContainerHeader::parse(
-            header_buf
-                .get(..bytes_read)
-                .ok_or(CramError::Truncated { context: "container header buf" })?,
-        )?;
-
-        if container_header.is_eof() {
+        // r[impl cram.stream.container_header+2]
+        let Some(container_header) =
+            stream::read_container_at(&mut self.file, container_offset, &mut self.container_buf)
+                .map_err(container_read_error)?
+        else {
             return Ok(None);
-        }
-
-        // Read container data; non-negative checked, so try_from is infallible here.
-        let data_len = usize::try_from(container_header.length)
-            .map_err(|_| CramError::Truncated { context: "container negative length" })?;
-        check_alloc_size(data_len, "container data")?;
-        self.container_buf.clear();
-        self.container_buf.resize(data_len, 0);
-        self.file.seek(SeekFrom::Start(
-            container_offset
-                .checked_add(container_header.header_size as u64)
-                .ok_or(CramError::Truncated { context: "container seek offset overflow" })?,
-        ))?;
-        self.file.read_exact(&mut self.container_buf)?;
+        };
 
         // Parse compression header (first block)
         let (comp_block, _) =
@@ -1125,27 +1110,24 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
 // r[impl cram.file.header_container]
 /// Read the file header container and extract the SAM header text.
-fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, CramError> {
-    // Read enough for the container header (usually < 100 bytes)
-    let mut buf = [0u8; 4096];
-    let pos = file.stream_position()?;
-    let bytes_read = file.read(&mut buf)?;
-
-    let container_header = ContainerHeader::parse(
-        buf.get(..bytes_read).ok_or(CramError::Truncated { context: "header container buf" })?,
-    )?;
-
-    // Read the container data; non-negative checked above so the cast is safe.
-    let data_len = usize::try_from(container_header.length)
-        .map_err(|_| CramError::Truncated { context: "header container negative length" })?;
-    check_alloc_size(data_len, "header container data")?;
-    let mut data = vec![0u8; data_len];
-    file.seek(SeekFrom::Start(
-        pos.checked_add(container_header.header_size as u64)
-            .ok_or(CramError::Truncated { context: "header container seek offset overflow" })?,
-    ))?;
-    file.read_exact(&mut data)?;
+// r[impl cram.stream.container_header+2]
+fn read_header_container<R: Read>(file: &mut R) -> Result<BamHeader, CramError> {
+    let mut data = Vec::new();
+    stream::read_container(file, &mut data, || CramStreamError::TruncatedContainer {
+        container: 0,
+    })
+    .map_err(container_read_error)?
+    .ok_or(CramError::Truncated { context: "header container" })?;
     header_from_container_data(&data)
+}
+
+/// A container read's error as the indexed reader reports it.
+fn container_read_error(e: CramStreamError) -> CramError {
+    match e {
+        CramStreamError::Cram { source } => source,
+        CramStreamError::Io { source } => CramError::Io(source),
+        _ => CramError::Truncated { context: "container" },
+    }
 }
 
 /// The SAM header held by the file header container whose body is `data`.
