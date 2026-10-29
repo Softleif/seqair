@@ -405,7 +405,7 @@ impl RawBamRecord {
         })
     }
 
-    // r[impl seq.iupac_bulk]
+    // r[impl seq.iupac_bulk+2]
     /// Append the sequence to `out`, one [`IupacBase`] per base, every 4-bit
     /// code kept: [`Self::iupac_bases`] into a caller's buffer.
     pub fn iupac_bases_into(&self, out: &mut Vec<IupacBase>) {
@@ -433,7 +433,7 @@ impl RawBamRecord {
         };
         // The unused low nibble of an odd-length sequence is not ours to touch.
         let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
-        // r[impl seq.iupac_bulk]
+        // r[impl seq.iupac_bulk+2]
         seq::encode_iupac_bases_to(seq, dst);
         if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
             *last = (*last & 0xF0) | pad;
@@ -666,7 +666,7 @@ mod tests {
     }
 
     // r[verify bam.raw_record.iupac_bases]
-    // r[verify seq.iupac_bulk]
+    // r[verify seq.iupac_bulk+2]
     #[test]
     fn iupac_bases_agree_with_the_ascii_decode() {
         let codes: Vec<u8> = (0..16).chain([3]).collect();
