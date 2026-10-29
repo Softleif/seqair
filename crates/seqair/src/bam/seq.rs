@@ -687,7 +687,11 @@ mod tests {
     // r[verify io.simd_portable]
     #[hegel::test]
     fn encode_bases_every_level_matches_oracle(tc: TestCase) {
-        let seq = to_bases(tc.draw(gs::vecs(gs::integers::<u8>().max_value(4)).max_size(400)));
+        // The length drawn as an integer: hegel keeps a vector's own size
+        // short, which would rarely reach AVX-512's 128-base step and its
+        // overlapping tail.
+        let len = tc.draw(gs::integers::<usize>().max_value(400));
+        let seq = to_bases((0..len).map(|_| tc.draw(gs::integers::<u8>().max_value(4))).collect());
         let expected = encode_oracle(&seq);
         let bytes: &[u8] = bytemuck::cast_slice(&seq);
         assert_eq!(encode_seq(bytes), expected, "256-entry table");
