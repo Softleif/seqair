@@ -14,6 +14,7 @@ use super::{
     seq,
 };
 use crate::reader::Tid;
+use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::fmt;
 use thiserror::Error;
@@ -326,6 +327,16 @@ impl RawBamRecord {
     /// (`r[bam.record.end_pos]`); `None` for an unplaced record.
     pub fn end_pos(&self) -> Option<Pos0> {
         record::compute_end_pos_from_raw(&self.payload)
+    }
+
+    // r[impl interval.overlap_test]
+    /// Whether the record overlaps `span` as region queries test it: an
+    /// unmapped one sits at its POS whatever its CIGAR
+    /// (`r[record_store.end_pos_htslib]`); an unplaced one overlaps nothing.
+    pub(crate) fn overlaps(&self, span: RangeInclusive<Pos0>) -> bool {
+        let Some(pos) = self.pos else { return false };
+        let last = if self.flags().is_unmapped() { pos } else { self.end_pos().unwrap_or(pos) };
+        pos <= span.last && last >= span.start
     }
 
     /// The number of bases in the sequence (0 when SEQ is `*`).
