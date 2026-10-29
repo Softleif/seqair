@@ -1043,6 +1043,32 @@ mod tests {
         assert_eq!(store.record(first).unwrap().qname(), b"r1");
     }
 
+    // r[verify cram.edge.seq_unknown+2]
+    /// A mapped read stored with SEQ and QUAL `*` (CRAM flag 0x8) comes back
+    /// without bases or qualities, as htslib gives it, and the records after
+    /// it decode normally.
+    #[test]
+    fn mapped_read_without_sequence_has_none() {
+        let cram = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/cram-stream/fidelity_v31.cram"
+        ));
+        let fasta = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/cram-stream/fidelity.fa"
+        ));
+        let mut reader = IndexedCramReader::open(cram, fasta).unwrap();
+        let mut store = RecordStore::new();
+        let chr1 = reader.header().tid("chr1").unwrap();
+        reader.fetch_into(chr1, (Pos0::ZERO..=Pos0::MAX).into(), &mut store).unwrap();
+        let record = |name: &[u8]| {
+            store.indices().map(|i| store.record(i).unwrap()).find(|r| r.qname() == name).unwrap()
+        };
+        let sec = record(b"secStar");
+        assert_eq!(sec.seq_len, 0);
+        assert_eq!(record(b"qualStar").seq_len, 20);
+    }
+
     // r[verify cram.edge.missing_reference+2]
     /// `test.cram` does not embed its reference, so a FASTA without its
     /// contigs fails the fetch — per slice, once decoding needs the bases.

@@ -1022,6 +1022,14 @@ fn decode_record(
         // BAM/SAM path's `compute_end_pos` and the pileup engine's
         // eviction check (`end_pos < pos`). For zero-refspan reads we
         // store `pos` itself, the same fallback BAM uses.
+        // r[impl cram.edge.seq_unknown+2]
+        // The bases and `RL` qualities were decoded only to keep the series
+        // in step; SEQ and QUAL are `*`.
+        if seq_unknown {
+            bases_buf.clear();
+            qual_buf.clear();
+        }
+
         // r[impl cram.record.end_pos]
         let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(ref_consumed));
         let end_pos_inclusive_raw =
@@ -1069,7 +1077,7 @@ fn decode_record(
     }
 
     // Unmapped read
-    // r[impl cram.edge.seq_unknown]
+    // r[impl cram.edge.seq_unknown+2]
     if !seq_unknown {
         for _ in 0..read_length {
             let base_byte = ds.base.decode(ctx)?;
