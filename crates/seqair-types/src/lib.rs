@@ -5,6 +5,7 @@
 pub mod bam_flags;
 mod base;
 mod base_quality;
+mod iupac_base;
 mod mapping_quality;
 mod mod_probability;
 mod phred;
@@ -24,6 +25,7 @@ pub use {
     bam_flags::BamFlags,
     base::{Base, BaseError},
     base_quality::BaseQuality,
+    iupac_base::IupacBase,
     mapping_quality::MappingQuality,
     mod_probability::ModProbability,
     phred::Phred,
