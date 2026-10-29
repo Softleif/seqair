@@ -749,10 +749,8 @@ mod tests {
             .map(|_| IupacBase::from_nibble(tc.draw(gs::integers::<u8>())))
             .collect();
         let seq = &buf[offset..];
-        let expected: Vec<u8> = seq
-            .chunks(2)
-            .map(|p| (p[0].code() << 4) | p.get(1).map_or(0, |b| b.code()))
-            .collect();
+        let expected: Vec<u8> =
+            seq.chunks(2).map(|p| (p[0].code() << 4) | p.get(1).map_or(0, |b| b.code())).collect();
         let mut out = vec![0xAB];
         encode_iupac_bases_into(seq, &mut out);
         assert_eq!(out[0], 0xAB);

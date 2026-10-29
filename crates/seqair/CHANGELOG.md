@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A CRAM container header with a negative landmark count is `CramError::InvalidLength` (was `AllocationTooLarge`); a FASTA sequence shorter than the CRAM header's `LN` is `CramError::ReferenceTooShort` in the stream (was a FASTA out-of-bounds error).
 - A CRAM container without records is the end of the file only when it is the EOF container as htslib recognises it (reference -1, start `0x454f46`); a short empty container before real ones no longer ends the stream or a scan.
 - A CRAM written without a reference (`no_ref`, `RR` false) is decoded without one, as htslib does: the stream no longer needs its references in the FASTA, and implicit matches (which samtools never writes there) read as `=`.
 - CRAM reads that store no quality array get the qualities of their `B`, `Q` and `q` features, as htslib applies them (the read filled with 30 first); a read group that is the header's last `@RG` named `UNKNOWN` (Java CRAM's) adds no `RG` tag; an `RG` index outside the header's read groups is `CramError::ReadGroupOutOfRange` instead of being ignored.

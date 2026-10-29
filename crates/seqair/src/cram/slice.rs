@@ -460,7 +460,7 @@ pub(crate) enum SliceReference<'a, B> {
     /// not embed its reference minds.
     Window { bases: Option<&'a [u8]>, start: i64 },
     /// A window per reference, sorted by tid, for every reference a
-    /// multi-reference slice keeps records of (`r[cram.stream.reference_window]`).
+    /// multi-reference slice keeps records of (`r[cram.stream.reference_window+2]`).
     PerTid(&'a [TidWindow<B>]),
 }
 
@@ -536,7 +536,7 @@ pub(crate) fn decode_slice<B: SeqBase>(
     .map(|(slice, _)| slice)
 }
 
-// r[impl cram.stream.reference_window]
+// r[impl cram.stream.reference_window+2]
 /// Where the mapped records of a multi-reference slice lie: per reference,
 /// sorted by tid, the 0-based half-open span from the lowest start to the
 /// highest end. Reconstructs nothing, so it needs no reference.
@@ -1092,9 +1092,10 @@ fn decode_record<B: SeqBase>(
     // Appended last, after any generated MD/NM, as `cram_to_bam` does.
     let rg_id = match usize::try_from(read_group) {
         Ok(i) => {
-            let id = read_group_ids
-                .get(i)
-                .ok_or(CramError::ReadGroupOutOfRange { read_group, count: read_group_ids.len() })?;
+            let id = read_group_ids.get(i).ok_or(CramError::ReadGroupOutOfRange {
+                read_group,
+                count: read_group_ids.len(),
+            })?;
             // htslib's workaround for Java CRAM, which adds an `UNKNOWN` read
             // group last for records that have none.
             let unknown = i.saturating_add(1) == read_group_ids.len() && id == "UNKNOWN";

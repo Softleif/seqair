@@ -76,7 +76,8 @@ fn iupac(c: &mut Criterion) {
     let mut group = c.benchmark_group("iupac");
     for len in READ_LENGTHS {
         group.throughput(Throughput::Bytes(len as u64));
-        let ascii: Vec<u8> = bytes(len, 5).iter().map(|b| b"ACGTNacgtnRY="[*b as usize % 13]).collect();
+        let ascii: Vec<u8> =
+            bytes(len, 5).iter().map(|b| b"ACGTNacgtnRY="[*b as usize % 13]).collect();
         let mut bases = IupacBase::from_ascii_slice(&ascii);
         let packed = bytes(len.div_ceil(2), 6);
         let mut codes_out: Vec<IupacBase> = Vec::with_capacity(len);
@@ -153,9 +154,8 @@ fn iupac(c: &mut Criterion) {
         });
         bench("unpack/table", &mut || {
             bytes_out.clear();
-            bytes_out.extend(
-                black_box(&packed[..len / 2]).iter().flat_map(|&b| pairs[usize::from(b)]),
-            );
+            bytes_out
+                .extend(black_box(&packed[..len / 2]).iter().flat_map(|&b| pairs[usize::from(b)]));
         });
         bench("unpack/simd", &mut || {
             codes_out.clear();

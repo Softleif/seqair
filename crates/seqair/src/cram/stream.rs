@@ -177,7 +177,7 @@ impl<R: Read> CramStreamReader<R> {
         Ok(CramContainerDecoder::new(Arc::clone(&self.shared), fasta))
     }
 
-    // r[impl cram.stream.framing]
+    // r[impl cram.stream.framing+2]
     /// Read the next container that holds records. `Ok(None)` at the end of
     /// the stream.
     ///
@@ -269,12 +269,11 @@ fn read_container<R: Read>(
             varint::read_ltf8(&mut r).map_err(truncated)?;
         }
         varint::read_itf8(&mut r).map_err(truncated)?; // block count
-        let landmarks = varint::read_itf8(&mut r).map_err(truncated)?;
-        reader::check_alloc_size(
-            usize::try_from(landmarks).unwrap_or(usize::MAX).saturating_mul(4),
-            "container landmark array",
-        )?;
-        for _ in 0..landmarks {
+        let landmarks = varint::read_itf8(&mut r).map_err(truncated)?.cast_signed();
+        let count = usize::try_from(landmarks)
+            .map_err(|_| CramError::InvalidLength { value: landmarks })?;
+        reader::check_alloc_size(count.saturating_mul(4), "container landmark array")?;
+        for _ in 0..count {
             varint::read_itf8(&mut r).map_err(truncated)?;
         }
         let mut crc = [0u8; 4];
@@ -416,7 +415,7 @@ impl CramContainerDecoder {
             let sh = SliceHeader::parse(&sh_block.data)?;
             let slice_ref = sh.ref_seq_id.resolve(header).map_err(CramError::from)?;
 
-            // r[impl cram.stream.reference_window]
+            // r[impl cram.stream.reference_window+2]
             // A file written without a reference (`RR` false) is decoded
             // without one (`r[cram.record.no_ref_fill]`): nothing to fetch.
             let no_ref = !ch.preservation.reference_required;
@@ -518,6 +517,12 @@ fn fetch(
     match fasta.fetch_seq_into(name, span, buf) {
         Ok(()) => Ok(true),
         Err(FastaError::SequenceNotFound { .. }) => Ok(false),
+        // r[impl cram.stream.reference_window+2]
+        Err(FastaError::RegionOutOfBounds { seq_len, .. }) => Err(CramError::ReferenceTooShort {
+            contig: name.into(),
+            header_len: header.target_len(tid).unwrap_or(0),
+            fasta_len: seq_len,
+        }),
         Err(e) => Err(e.into()),
     }
 }
