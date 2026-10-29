@@ -6,7 +6,7 @@ description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
 license = "MIT OR Apache-2.0"
 rust-version = "1.98.1"
-readme = "../../README.md"
+readme = "README.md"
 exclude = ["tests/*", "benches/*"]
 
 [package.metadata.docs.rs]

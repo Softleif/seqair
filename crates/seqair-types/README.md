@@ -1,6 +1,7 @@
 # seqair-types
 
-Helper types for [seqair](https://github.com/Softleif/seqair)
+Bioinformatic types, used in [seqair](https://github.com/Softleif/seqair) and other libraries.
+For example: `Base`, `Strand`, `Phred`, `Probability`, `RegionString`.
 
 ## License
 
