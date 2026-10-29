@@ -788,6 +788,74 @@ fn write_raw_round_trips_and_indexes_like_samtools(tc: TestCase) {
     );
 }
 
+/// `samtools view` of `path` with `args`, its stdout.
+fn samtools_out(args: &[&str], path: &Path) -> Vec<u8> {
+    let out = std::process::Command::new("samtools").args(args).arg(path).output().unwrap();
+    assert!(out.status.success(), "samtools {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    out.stdout
+}
+
+// r[verify bam.stream]
+// r[verify bam_writer.write_raw]
+// r[verify bam.record.unplaced_pos]
+/// `AlignmentStream` keeps every record of a BAM — unplaced and
+/// placed-unmapped ones included — as many as `samtools view -c` counts,
+/// each byte for byte what `samtools view -b` writes; and `write_raw` of all
+/// of them gives a file samtools prints exactly as it prints the input.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn alignment_stream_keeps_every_record_samtools_reads(tc: TestCase) {
+    use seqair::reader::AlignmentStream;
+
+    let lines = tc.draw(sam_lines());
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, sam_text(&lines)).unwrap();
+    let input = htslib_bam(dir.path(), &sam);
+
+    let threads = tc.draw(gs::integers::<u8>().max_value(3));
+    let builder = AlignmentStream::builder(std::fs::File::open(&input).unwrap());
+    let mut stream = match std::num::NonZeroU8::new(threads) {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
+    .build()
+    .unwrap();
+    let header = stream.header().clone();
+    let mut records = Vec::new();
+    let mut record = RawBamRecord::default();
+    while stream.read_record(&mut record).unwrap() {
+        records.push(record.clone());
+    }
+
+    let count = String::from_utf8(samtools_out(&["view", "-c"], &input)).unwrap();
+    assert_eq!(records.len(), count.trim().parse::<usize>().unwrap(), "samtools view -c");
+    assert_eq!(records.len(), lines.len(), "generated");
+
+    let rewritten = samtools_out(&["view", "--no-PG", "-b"], &input);
+    let mut reader = BamStreamReader::new(&rewritten[..]).unwrap();
+    let mut theirs = Vec::new();
+    let mut payload = Vec::new();
+    while reader.read_payload_into(&mut payload).unwrap() {
+        theirs.push(std::mem::take(&mut payload));
+    }
+    assert_eq!(theirs.len(), records.len(), "samtools view -b");
+    for (i, (ours, theirs)) in records.iter().zip(&theirs).enumerate() {
+        assert!(ours.as_payload() == theirs.as_slice(), "record {i} differs from samtools'");
+    }
+
+    let out = dir.path().join("out.bam");
+    let mut writer = BamWriterBuilder::to_path(&out, &header).build().unwrap();
+    for record in &records {
+        writer.write_raw(record).unwrap();
+    }
+    writer.finish().unwrap();
+    assert_eq!(
+        String::from_utf8(samtools_out(&["view"], &out)).unwrap(),
+        String::from_utf8(samtools_out(&["view"], &input)).unwrap(),
+        "samtools prints the written file differently"
+    );
+}
+
 /// One reference of a BAI: bins (by id) with their chunks, and the linear
 /// index.
 type BaiRef = (std::collections::BTreeMap<u32, Vec<(u64, u64)>>, Vec<u64>);
