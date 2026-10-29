@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `RawBamRecord::set_seq`, `set_base` and `edit_aux` edit a record in place: the sequence (same length, IUPAC kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). An edit that would change a long CIGAR's `CG` tag is refused. Errors are `bam::RawRecordEditError`.
+- `RawBamRecord::set_seq(&[IupacBase])`, `set_base(QPos, IupacBase)` and `edit_aux` edit a record in place: the sequence (same length, every IUPAC code kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). `RawBamRecord::iupac_bases()` yields the sequence as `IupacBase`s. An edit that would change a long CIGAR's `CG` tag, or that starts from a malformed aux block, is refused. Errors are `bam::RawRecordEditError`.
+
+### Changed
+
+- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError`; this is **breaking** for callers of the unreleased-in-0.9.0 API only in the error type they match on.
+
+### Fixed
+
+- `AuxData::remove` (and so `OwnedBamRecord` tag edits) no longer panics on a truncated tag value: an unterminated `Z`, a short fixed-size value or a `B` array whose count runs past the end.
 
 ## v0.9.0 (2026-10-29)
 
