@@ -331,6 +331,22 @@ fn alignment_stream_names_lossy_records_after_the_file() {
     assert_eq!(by_reader, dash);
 }
 
+// r[verify cram.record.no_ref_fill]
+/// A file written without a reference streams as samtools reads it against
+/// a FASTA that lacks every one of its references.
+#[test]
+fn no_ref_files_need_no_reference() {
+    let cram = data("cram-stream/fidelity_no_ref.cram");
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("other.fa");
+    std::fs::write(&fasta, ">other\nACGT\n").unwrap();
+    let status = Command::new("samtools").arg("faidx").arg(&fasta).status().unwrap();
+    assert!(status.success());
+    let (records, _) = stream_records(&cram, &fasta, 4096);
+    let theirs = samtools(&["view", "--no-PG"], &cram, &fasta);
+    assert_eq!(sam_lines(&records, &cram), theirs.lines().collect::<Vec<_>>());
+}
+
 // r[verify cram.stream.framing]
 /// A CRAM cut inside a container is a typed error that poisons the stream;
 /// one cut cleanly before the EOF container ends with a warning.
