@@ -15,8 +15,8 @@ use super::{
 };
 use crate::reader::Tid;
 use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0, QPos};
-use thiserror::Error;
 use std::fmt;
+use thiserror::Error;
 
 /// Fixed part of a BAM record, before the read name.
 const FIXED_LEN: usize = 32;
@@ -93,7 +93,10 @@ pub enum RawRecordEditError {
     #[error("the aux edit would change the record's long CIGAR")]
     LongCigarChanged,
 
-    #[error("the edited record would be {len} bytes, over the {} byte limit", record::MAX_RECORD_SIZE)]
+    #[error(
+        "the edited record would be {len} bytes, over the {} byte limit",
+        record::MAX_RECORD_SIZE
+    )]
     RecordTooLarge { len: usize },
 
     #[error("aux edit failed")]
