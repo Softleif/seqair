@@ -13,8 +13,8 @@
 mod support;
 
 use compair::{
-    Band, Base, BaseQuality, Betas, Haplotype, Read, StandardEmission, TapsEmission,
-    align_banded_f64_rows, align_full,
+    Band, Base, BaseQuality, Betas, Haplotype, PAIRS, Read, StandardEmission, TapsEmission,
+    Workspace, align_banded_f64_rows, align_full, align_strips_simd,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
@@ -103,4 +103,56 @@ fn the_banded_reference_is_mirror_symmetric(tc: TestCase) {
         align_banded_f64_rows(&mirrored.haplotype, &mirrored.read, &standard, mirrored_band).get(),
         "banded",
     );
+}
+
+/// A band around the case's offset, and its mirror.
+fn mirrored_bands(tc: &TestCase, case: &Case) -> (Band, Band) {
+    let (h, r) = (case.haplotype.len(), case.read.len());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(64));
+    let offset = case.offset + tc.draw(gs::integers::<i32>().min_value(-3).max_value(3));
+    let mirrored_offset =
+        i32::try_from(h).expect("short") - i32::try_from(r).expect("short") - offset;
+    match (Band::new(width, offset), Band::new(width, mirrored_offset)) {
+        (Ok(band), Ok(mirrored_band)) => (band, mirrored_band),
+        _ => tc.reject(),
+    }
+}
+
+/// The kernels a caller runs, the strip kernel and the pairs kernel behind
+/// `align_reads`, to their precision: a millionth of a log10 above their trust
+/// floor, which is what every kernel promises of the `f64` recurrence.
+#[hegel::test]
+fn the_kernels_are_mirror_symmetric(tc: TestCase) {
+    let case = tc.draw(end_case());
+    let mirrored = mirror(&case).expect("the mirror of a valid read is valid");
+    let (band, mirrored_band) = mirrored_bands(&tc, &case);
+    let standard = StandardEmission::default();
+    let close = |forward: f64, backward: f64, what: &str| {
+        let same = forward == backward || (forward - backward).abs() <= 2e-6;
+        assert!(same, "{what}: {forward} forward, {backward} mirrored");
+    };
+    close(
+        align_strips_simd(&case.haplotype, &case.read, &standard, band).get(),
+        align_strips_simd(&mirrored.haplotype, &mirrored.read, &standard, mirrored_band).get(),
+        "strips",
+    );
+    let mut workspace = Workspace::new();
+    let (mut forward, mut backward) = (Vec::new(), Vec::new());
+    // A full group of pairs, so that the pairs kernel scores them, not the
+    // strip kernel it hands a short group to.
+    workspace.align_reads(
+        &[&case.haplotype; PAIRS],
+        &[(&case.read, band)],
+        &standard,
+        &mut forward,
+    );
+    workspace.align_reads(
+        &[&mirrored.haplotype; PAIRS],
+        &[(&mirrored.read, mirrored_band)],
+        &standard,
+        &mut backward,
+    );
+    for (forward, backward) in forward.iter().zip(&backward) {
+        close(forward.get(), backward.get(), "align_reads");
+    }
 }
