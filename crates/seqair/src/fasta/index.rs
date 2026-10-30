@@ -4,7 +4,7 @@
 
 use rustc_hash::FxHashMap;
 use seqair_types::SmolStr;
-use std::path::Path;
+use std::{num::NonZeroU64, path::Path};
 use tracing::instrument;
 
 // r[impl io.errors]
@@ -33,17 +33,8 @@ pub enum FaiEntryError {
     #[error("invalid {field} value {raw_value:?}: not a valid integer")]
     InvalidField { field: &'static str, raw_value: String },
 
-    #[error("linebases is 0 (would cause division by zero) for sequence {name:?}")]
-    ZeroLinebases { name: SmolStr },
-
-    #[error("linewidth ({linewidth}) < linebases ({linebases}) for sequence {name:?}")]
-    LinewidthTooSmall { name: SmolStr, linebases: u64, linewidth: u64 },
-
-    #[error(
-        "line terminator is {terminator} bytes (linewidth {linewidth} - linebases {linebases}) \
-         for sequence {name:?}; at most 2 (CRLF) is possible"
-    )]
-    LineTerminatorTooLong { name: SmolStr, linebases: u64, linewidth: u64, terminator: u64 },
+    #[error("{kind} for sequence {name:?}")]
+    InvalidLineLayout { name: SmolStr, kind: LineLayoutError },
 
     #[error("sequence length is 0 for sequence {name:?}")]
     ZeroLength { name: SmolStr },
@@ -58,18 +49,111 @@ pub enum FaiEntryError {
     DuplicateName { name: SmolStr },
 }
 
+/// Why a `.fai` entry's `linebases`/`linewidth` pair describes no file.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LineLayoutError {
+    #[error("linebases is 0")]
+    ZeroLinebases,
+
+    #[error("linewidth ({linewidth}) < linebases ({linebases})")]
+    LinewidthTooSmall { linebases: u64, linewidth: u64 },
+
+    #[error(
+        "linewidth ({linewidth}) - linebases ({linebases}) is a line terminator longer than \
+         2 bytes (CRLF)"
+    )]
+    TerminatorTooLong { linebases: u64, linewidth: u64 },
+}
+
+/// The bytes ending each full line of a record: `linewidth - linebases`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineTerminator {
+    /// The record is one line with no trailing newline.
+    Empty,
+    Lf,
+    CrLf,
+}
+
+impl LineTerminator {
+    pub const fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::Empty => b"",
+            Self::Lf => b"\n",
+            Self::CrLf => b"\r\n",
+        }
+    }
+
+    /// Bytes the terminator adds to a line: `linewidth - linebases`.
+    pub const fn width(self) -> u64 {
+        self.bytes().len() as u64
+    }
+}
+
+/// How a record's bases sit on its lines: [`linebases`](Self::linebases)
+/// bases per full line, each followed by a [`LineTerminator`]. Only a layout a
+/// FASTA writer can produce is constructible, so every byte offset is a
+/// division by a nonzero line length and a fetch spans at most three bytes
+/// per base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineLayout {
+    linebases: NonZeroU64,
+    terminator: LineTerminator,
+}
+
+impl LineLayout {
+    // r[impl fasta.index.validation]
+    // r[impl fasta.index.terminator_bound]
+    /// The layout of a `.fai` entry's `linebases` and `linewidth` columns.
+    ///
+    /// The terminator is bounded because `linewidth` multiplies every byte
+    /// offset: a fetch spans `bases * linewidth / linebases` bytes and is
+    /// allocated before a single byte is read, so an index claiming a huge
+    /// line width would turn a small query into a huge allocation.
+    pub fn new(linebases: u64, linewidth: u64) -> Result<Self, LineLayoutError> {
+        let Some(nonzero) = NonZeroU64::new(linebases) else {
+            return Err(LineLayoutError::ZeroLinebases);
+        };
+        let Some(terminator) = linewidth.checked_sub(linebases) else {
+            return Err(LineLayoutError::LinewidthTooSmall { linebases, linewidth });
+        };
+        let terminator = match terminator {
+            0 => LineTerminator::Empty,
+            1 => LineTerminator::Lf,
+            2 => LineTerminator::CrLf,
+            _ => return Err(LineLayoutError::TerminatorTooLong { linebases, linewidth }),
+        };
+        Ok(Self { linebases: nonzero, terminator })
+    }
+
+    /// Bases on every line but the last.
+    pub const fn linebases(self) -> NonZeroU64 {
+        self.linebases
+    }
+
+    /// Bytes per full line, terminator included.
+    pub const fn linewidth(self) -> u64 {
+        // `new` took this as `linewidth`, so the sum fits.
+        self.linebases.get().saturating_add(self.terminator.width())
+    }
+
+    pub const fn terminator(self) -> LineTerminator {
+        self.terminator
+    }
+}
+
 /// A single entry from a `.fai` index file.
 ///
 /// The same type covers FASTA and FASTQ. A FASTQ index carries one extra
 /// column, `qual_offset`, and the sequence-block geometry (`offset`,
-/// `linebases`, `linewidth`) means exactly the same thing in both.
+/// `layout`) means exactly the same thing in both.
 #[derive(Debug, Clone)]
 pub struct FaiEntry {
     pub name: SmolStr,
     pub length: u64,
     pub offset: u64,
-    pub linebases: u64,
-    pub linewidth: u64,
+    /// The `linebases` and `linewidth` columns.
+    pub layout: LineLayout,
     // r[impl fastq.access.index_format]
     /// Byte offset of the record's quality block. `Some` only for a FASTQ
     /// (6-column) index; always `None` for FASTA.
@@ -79,11 +163,10 @@ pub struct FaiEntry {
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
     // r[impl fasta.index.terminator_bound]
-    /// Byte offset of the base at 0-based position `pos`, or `None` if
-    /// `linebases == 0` (division by zero) or the entry's `offset` combined
-    /// with `pos` overflows `u64` — either way a hostile or corrupt entry,
-    /// since a real `.fai` never produces either. Checked rather than
-    /// wrapping arithmetic matters here: `offset` is untrusted and can sit
+    /// Byte offset of the base at 0-based position `pos`, or `None` if the
+    /// entry's `offset` combined with `pos` overflows `u64` — a hostile or
+    /// corrupt entry, since a real `.fai` never produces one. Checked rather
+    /// than wrapping arithmetic matters here: `offset` is untrusted and can sit
     /// near `u64::MAX`, and wrapping would silently fold it back into a
     /// small, in-bounds-looking offset instead of surfacing the corruption.
     pub fn byte_offset(&self, pos: u64) -> Option<u64> {
@@ -99,14 +182,10 @@ impl FaiEntry {
         self.offset_from(self.qual_offset?, pos)
     }
 
-    // `FaiEntry`'s fields are public, so a caller can build one directly with
-    // `linebases == 0` without going through the parser's `ZeroLinebases`
-    // check — this MUST NOT rely on that check as an invariant. `checked_div`/
-    // `checked_rem` fail closed via `?` instead of panicking.
     fn offset_from(&self, base: u64, pos: u64) -> Option<u64> {
-        let line = pos.checked_div(self.linebases)?;
-        let col = pos.checked_rem(self.linebases)?;
-        line.checked_mul(self.linewidth)?.checked_add(col)?.checked_add(base)
+        let linebases = self.layout.linebases();
+        let (line, col) = (pos / linebases, pos % linebases);
+        line.checked_mul(self.layout.linewidth())?.checked_add(col)?.checked_add(base)
     }
 
     /// Whether this entry came from a FASTQ (6-column) index.
@@ -180,40 +259,16 @@ impl FastaIndex {
                 .transpose()?;
 
             // r[impl fasta.index.validation]
-            if linebases == 0 {
-                return Err(FaiError::InvalidEntry {
-                    path: path.to_path_buf(),
-                    line_number: line_num.wrapping_add(1),
-                    kind: FaiEntryError::ZeroLinebases { name },
-                });
-            }
-            if linewidth < linebases {
-                return Err(FaiError::InvalidEntry {
-                    path: path.to_path_buf(),
-                    line_number: line_num.wrapping_add(1),
-                    kind: FaiEntryError::LinewidthTooSmall { name, linebases, linewidth },
-                });
-            }
-            // r[impl fasta.index.terminator_bound]
-            // Without this, `linewidth` is an unbounded multiplier on every
-            // byte offset: a fetch spans `bases * linewidth / linebases` bytes
-            // and is allocated before a single byte is read, so an index
-            // claiming a huge line width turns a small query into a huge
-            // allocation. A real line terminator is LF or CRLF, and 0 means
-            // "one line, no trailing newline" — nothing else is producible.
-            let terminator = linewidth.saturating_sub(linebases);
-            if terminator > 2 {
-                return Err(FaiError::InvalidEntry {
-                    path: path.to_path_buf(),
-                    line_number: line_num.wrapping_add(1),
-                    kind: FaiEntryError::LineTerminatorTooLong {
-                        name,
-                        linebases,
-                        linewidth,
-                        terminator,
-                    },
-                });
-            }
+            let layout = match LineLayout::new(linebases, linewidth) {
+                Ok(layout) => layout,
+                Err(kind) => {
+                    return Err(FaiError::InvalidEntry {
+                        path: path.to_path_buf(),
+                        line_number: line_num.wrapping_add(1),
+                        kind: FaiEntryError::InvalidLineLayout { name, kind },
+                    });
+                }
+            };
             if length == 0 {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
@@ -247,7 +302,7 @@ impl FastaIndex {
             }
 
             name_to_idx.insert(name.clone(), entries.len());
-            entries.push(FaiEntry { name, length, offset, linebases, linewidth, qual_offset });
+            entries.push(FaiEntry { name, length, offset, layout, qual_offset });
         }
 
         if entries.is_empty() {
@@ -298,6 +353,25 @@ mod tests {
         PathBuf::from("test.fai")
     }
 
+    fn layout_error(err: &FaiError) -> Option<LineLayoutError> {
+        match err {
+            FaiError::InvalidEntry {
+                kind: FaiEntryError::InvalidLineLayout { kind, .. }, ..
+            } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    fn entry(length: u64, offset: u64, linebases: u64, linewidth: u64) -> FaiEntry {
+        FaiEntry {
+            name: "s".into(),
+            length,
+            offset,
+            layout: LineLayout::new(linebases, linewidth).unwrap(),
+            qual_offset: None,
+        }
+    }
+
     // r[verify fasta.index.parse]
     // r[verify fasta.index.name_lookup]
     #[test]
@@ -309,8 +383,7 @@ mod tests {
         let e1 = idx.get("seq1").unwrap();
         assert_eq!(e1.length, 100);
         assert_eq!(e1.offset, 6);
-        assert_eq!(e1.linebases, 50);
-        assert_eq!(e1.linewidth, 51);
+        assert_eq!(e1.layout, LineLayout::new(50, 51).unwrap());
 
         let e2 = idx.get("seq2").unwrap();
         assert_eq!(e2.length, 200);
@@ -411,10 +484,14 @@ mod tests {
         let err = FastaIndex::parse(contents, &test_path()).unwrap_err();
         match err {
             FaiError::InvalidEntry {
-                kind: FaiEntryError::LineTerminatorTooLong { terminator, .. },
+                kind:
+                    FaiEntryError::InvalidLineLayout {
+                        kind: LineLayoutError::TerminatorTooLong { linewidth, .. },
+                        ..
+                    },
                 ..
-            } => assert_eq!(terminator, 1_099_511_627_775),
-            other => panic!("expected LineTerminatorTooLong, got {other:?}"),
+            } => assert_eq!(linewidth, 1 << 40),
+            other => panic!("expected TerminatorTooLong, got {other:?}"),
         }
     }
 
@@ -426,14 +503,14 @@ mod tests {
             let contents = format!("s\t100\t6\t50\t{}\n", 50 + terminator);
             let idx = FastaIndex::parse(&contents, &test_path())
                 .unwrap_or_else(|e| panic!("terminator {terminator} must be accepted: {e:?}"));
-            assert_eq!(idx.get("s").unwrap().linewidth, 50 + terminator);
+            assert_eq!(idx.get("s").unwrap().layout.linewidth(), 50 + terminator);
         }
         // 3 is not producible by any writer.
         let err = FastaIndex::parse("s\t100\t6\t50\t53\n", &test_path()).unwrap_err();
-        assert!(matches!(
-            err,
-            FaiError::InvalidEntry { kind: FaiEntryError::LineTerminatorTooLong { .. }, .. }
-        ));
+        assert_eq!(
+            layout_error(&err),
+            Some(LineLayoutError::TerminatorTooLong { linebases: 50, linewidth: 53 })
+        );
     }
 
     // r[verify fasta.index.fields]
@@ -483,10 +560,7 @@ mod tests {
     fn reject_zero_linebases() {
         let contents = "seq1\t100\t6\t0\t1\n";
         let err = FastaIndex::parse(contents, &test_path()).unwrap_err();
-        assert!(
-            matches!(err, FaiError::InvalidEntry { kind: FaiEntryError::ZeroLinebases { .. }, .. }),
-            "expected ZeroLinebases, got {err:?}"
-        );
+        assert_eq!(layout_error(&err), Some(LineLayoutError::ZeroLinebases), "{err:?}");
     }
 
     // r[verify fasta.index.validation]
@@ -494,12 +568,10 @@ mod tests {
     fn reject_linewidth_less_than_linebases() {
         let contents = "seq1\t100\t6\t50\t49\n";
         let err = FastaIndex::parse(contents, &test_path()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                FaiError::InvalidEntry { kind: FaiEntryError::LinewidthTooSmall { .. }, .. }
-            ),
-            "expected LinewidthTooSmall, got {err:?}"
+        assert_eq!(
+            layout_error(&err),
+            Some(LineLayoutError::LinewidthTooSmall { linebases: 50, linewidth: 49 }),
+            "{err:?}"
         );
     }
 
@@ -534,14 +606,7 @@ mod tests {
     #[test]
     fn byte_offset_single_line() {
         // Sequence fits on one line: 4 bases, linebases=4, linewidth=5
-        let entry = FaiEntry {
-            name: "s".into(),
-            length: 4,
-            offset: 6,
-            linebases: 4,
-            linewidth: 5,
-            qual_offset: None,
-        };
+        let entry = entry(4, 6, 4, 5);
         // pos 0 → offset + 0 = 6
         assert_eq!(entry.byte_offset(0), Some(6));
         // pos 3 → offset + 3 = 9
@@ -551,14 +616,7 @@ mod tests {
     #[test]
     fn byte_offset_multi_line() {
         // 100 bases, 50 per line, linewidth 51 (50 bases + \n)
-        let entry = FaiEntry {
-            name: "s".into(),
-            length: 100,
-            offset: 10,
-            linebases: 50,
-            linewidth: 51,
-            qual_offset: None,
-        };
+        let entry = entry(100, 10, 50, 51);
         // pos 0 → 10
         assert_eq!(entry.byte_offset(0), Some(10));
         // pos 49 → 10 + 49 = 59 (last base of first line)
@@ -572,35 +630,9 @@ mod tests {
     #[test]
     fn byte_offset_crlf() {
         // Windows-style line endings: linewidth = linebases + 2
-        let entry = FaiEntry {
-            name: "s".into(),
-            length: 100,
-            offset: 10,
-            linebases: 50,
-            linewidth: 52, // 50 bases + \r\n
-            qual_offset: None,
-        };
+        let entry = entry(100, 10, 50, 52); // 50 bases + \r\n
         // pos 50 → 10 + 1*52 + 0 = 62 (skips \r\n)
         assert_eq!(entry.byte_offset(50), Some(62));
-    }
-
-    // r[verify fasta.index.offset_calculation]
-    /// `FaiEntry`'s fields are public, so a caller can build one with
-    /// `linebases == 0` without going through the parser's `ZeroLinebases`
-    /// check. `byte_offset` must fail closed (`None`), not panic on the
-    /// division its `Option` signature promises to guard against.
-    #[test]
-    fn byte_offset_returns_none_for_hand_built_zero_linebases() {
-        let entry = FaiEntry {
-            name: "s".into(),
-            length: 4,
-            offset: 0,
-            linebases: 0,
-            linewidth: 0,
-            qual_offset: Some(0),
-        };
-        assert_eq!(entry.byte_offset(0), None);
-        assert_eq!(entry.qual_byte_offset(0), None);
     }
 
     #[test]

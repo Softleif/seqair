@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Performance
+
+- `IndexedFastaReader::fetch_seq`/`fetch_seq_into` strip line terminators by the `.fai` line geometry instead of scanning for them (plain FASTA fetches 1.1–1.25× faster for 1 kb–1 Mb spans on NEON; BGZF fetches, dominated by inflate, ~1.05× at most). A file the index does not describe is stripped by the scan as before, so the output does not change.
+
+### Breaking
+
+- `FaiEntry`'s `linebases`/`linewidth` fields are replaced by `layout: fasta::LineLayout`, which only a valid pair constructs (`LineLayout::new(linebases, linewidth)`: nonzero `linebases`, a terminator of 0, 1 or 2 bytes as `fasta::LineTerminator`). `FaiEntryError::{ZeroLinebases, LinewidthTooSmall, LineTerminatorTooLong}` become `FaiEntryError::InvalidLineLayout { name, kind: fasta::LineLayoutError }`.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added

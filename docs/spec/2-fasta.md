@@ -67,6 +67,9 @@ Returned sequence bytes MUST be uppercased. FASTA files may contain lowercase ba
 r[fasta.fetch.newline_stripping]
 When reading from the file, the reader MUST strip line terminators (LF `\n` and CR `\r`) from the raw bytes. The returned sequence MUST contain only base characters.
 
+r[fasta.fetch.line_stride]
+The reader MAY strip by the entry's line geometry instead of scanning: copy the `linebases - start % linebases` bases left on the span's first line, skip `linewidth - linebases` terminator bytes, then copy `linebases` bases per line. The index is untrusted, so the result MUST be byte-identical to stripping every `\n` and `\r` from the span: every skipped run MUST be exactly the terminator the geometry implies (nothing for 0, `\n` for 1, `\r\n` for 2), no copied byte may be `\n` or `\r`, and on any mismatch the reader MUST discard the stride's output and strip the whole span by scanning.
+
 r[fasta.fetch.unknown_sequence]
 When the requested sequence name is not in the index, the reader MUST produce an error listing the requested name. It SHOULD include available sequence names if the index is small (fewer than 20 entries) to help diagnose typos.
 

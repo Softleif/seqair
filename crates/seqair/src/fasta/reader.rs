@@ -5,7 +5,7 @@
 use super::{
     gzi::{GziError, GziIndex},
     index::{FaiError, FastaIndex},
-    strip::strip_newlines_uppercase,
+    strip::strip_uppercase,
 };
 use crate::bam::bgzf::{BgzfError, BgzfReader};
 use core::range::RangeInclusive;
@@ -459,7 +459,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         // The span above is bounded by the record's `length`, so on a FASTQ
         // this never reaches the `+` separator or the quality block.
         out.reserve(num_bases);
-        strip_newlines_uppercase(&self.raw_buf, out);
+        strip_uppercase(&self.raw_buf, entry.layout, start, out);
 
         Ok(())
     }
