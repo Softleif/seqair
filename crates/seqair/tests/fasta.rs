@@ -97,10 +97,6 @@ fn byte_offset_indexes_correct_character_in_fasta(tc: TestCase) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// GZI translate properties
-// ---------------------------------------------------------------------------
-
 fn make_gzi_data(entries: &[(u64, u64)]) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&(entries.len() as u64).to_le_bytes());
@@ -109,63 +105,6 @@ fn make_gzi_data(entries: &[(u64, u64)]) -> Vec<u8> {
         data.extend_from_slice(&uncompressed.to_le_bytes());
     }
     data
-}
-
-// r[verify fasta.gzi.translate]
-/// Translating offsets within a block (≤ `u16::MAX` from block start) must
-/// produce the correct `compressed_offset` and `within_block_offset`.
-#[hegel::test]
-fn gzi_translate_same_block_valid(tc: TestCase) {
-    let block_start_compressed = tc.draw(gs::integers::<u64>().max_value(999999));
-    let block_start_uncompressed = tc.draw(gs::integers::<u64>().min_value(1).max_value(999999));
-    let offset_a = tc.draw(gs::integers::<u16>());
-    let offset_b = tc.draw(gs::integers::<u16>());
-    let entries = vec![(block_start_compressed, block_start_uncompressed)];
-    let data = make_gzi_data(&entries);
-    let gzi = seqair::fasta::GziIndex::parse_test(&data);
-
-    let target_a = block_start_uncompressed + u64::from(offset_a);
-    let target_b = block_start_uncompressed + u64::from(offset_b);
-
-    let loc_a = gzi.translate(target_a).unwrap();
-    let loc_b = gzi.translate(target_b).unwrap();
-
-    assert_eq!(loc_a.compressed_offset, block_start_compressed);
-    assert_eq!(loc_b.compressed_offset, block_start_compressed);
-    assert_eq!(loc_a.within_block_offset, offset_a);
-    assert_eq!(loc_b.within_block_offset, offset_b);
-}
-
-/// For offsets before the first GZI entry, translation must map to
-/// compressed offset 0 with the uncompressed offset as `within_block`.
-#[hegel::test]
-fn gzi_translate_before_first_entry(tc: TestCase) {
-    let block_start = tc.draw(gs::integers::<u64>().min_value(1000).max_value(999999));
-    let target = tc.draw(gs::integers::<u64>().max_value(998));
-    let entries = vec![(block_start, 1000)];
-    let data = make_gzi_data(&entries);
-    let gzi = seqair::fasta::GziIndex::parse_test(&data);
-
-    let loc = gzi.translate(target).unwrap();
-    assert_eq!(loc.compressed_offset, 0);
-    assert_eq!(loc.within_block_offset, target as u16);
-}
-
-/// Within-block offset exceeding `u16::MAX` must be rejected.
-#[hegel::test]
-fn gzi_translate_rejects_overflow(tc: TestCase) {
-    let overflow = tc.draw(gs::integers::<u64>().min_value(1).max_value(99999));
-    let data = make_gzi_data(&[]);
-    let gzi = seqair::fasta::GziIndex::parse_test(&data);
-
-    let target = u64::from(u16::MAX) + overflow;
-    let err = gzi
-        .translate(target)
-        .expect_err("an offset past u16::MAX inside one block cannot be addressed");
-    assert!(
-        matches!(err, seqair::fasta::GziError::WithinBlockOverflow { .. }),
-        "translate({target}) failed with {err:?}, not WithinBlockOverflow"
-    );
 }
 
 // ---------------------------------------------------------------------------

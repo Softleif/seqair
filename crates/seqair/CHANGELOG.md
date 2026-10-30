@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bam::seq::encode_bases_into` (`&[Base]` to packed SEQ) and its SIMD kernel: nothing packs `Base`s any more. Use `encode_iupac_bases_into` with `IupacBase::from`.
 - `sam::format::format_g` and `format_kputd` (public since 0.9.0) are crate-private: they are the float printers behind `format_sam_record`.
 - `sam::stream::MAX_LINE_LEN` is crate-private; `SamStreamError::LineTooLong` still names the limit.
+- `fasta::GziIndex::parse_test`, a hidden test helper that panicked on invalid data. The `fuzz` feature's `GziIndex::from_bytes` returns the error instead.
 
 ## v0.9.0 (2026-10-29)
 
