@@ -1,14 +1,15 @@
 # compair
 
 A fast pair-HMM for scoring sequencing reads against candidate haplotypes.
-It computes the same likelihoods as GATK's `PairHMM`, but lets you plug in
-the emission model, so that conversion chemistry (TAPS, 5-base) is scored as
-a probability instead of a mismatch.
+It computes GATK's `PairHMM` likelihoods but for the two ends of a read,
+which it scores alike, and lets you plug in the emission model, so that
+conversion chemistry (TAPS, 5-base) is scored as a probability instead of a
+mismatch.
 It is the read-likelihood engine of [rastair](https://github.com/bsbludwig/rastair).
 
 > [!WARNING]
 > **This is an experimental project!**
-> It reproduces GATK's numbers on GATK's published test vectors,
+> Its recurrence reproduces GATK's numbers on GATK's published test vectors,
 > but it has not yet been used outside rastair.
 
 ## Usage
@@ -63,7 +64,10 @@ they measure.
 ## Features
 
 - GATK `PairHMM` semantics, checked against GATK's 104 test vectors and
-  against rust-bio as an independent implementation
+  against rust-bio as an independent implementation, except at a read's
+  ends: a read may begin with an insertion as it may end with one, so a
+  read and its reverse complement score the same (see *Where compair
+  differs from GATK* in the API docs)
 - Pluggable emission model (`Emission` trait)
 - Banded, with a clear contract: a path outside the band scores lower,
   never wrong
