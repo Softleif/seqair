@@ -136,7 +136,7 @@ impl Base {
     /// # Safety
     /// Every byte in `bytes` must be a valid `Base` discriminant:
     /// 65 (A), 67 (C), 71 (G), 84 (T), or 78 (Unknown).
-    pub unsafe fn vec_u8_into_vec_base(bytes: Vec<u8>) -> Vec<Base> {
+    unsafe fn vec_u8_into_vec_base(bytes: Vec<u8>) -> Vec<Base> {
         let mut bytes = std::mem::ManuallyDrop::new(bytes);
         let ptr = bytes.as_mut_ptr() as *mut Base;
         let len = bytes.len();
