@@ -78,9 +78,20 @@ impl Read {
         })
     }
 
-    /// A read whose insertion and deletion qualities come from `model` (one
-    /// gap-open track for both, from the tandem repeats in its own bases) and
-    /// whose gap-continuation quality is `gap_qual` at every base.
+    /// A read whose insertion and deletion qualities come from `model`, from
+    /// the tandem repeats in its own bases, and whose gap-continuation quality
+    /// is `gap_qual` at every base.
+    ///
+    /// An insertion of a base opens at that base's quality, the gap-open track
+    /// [`PcrIndelModel::fill_gap_open`] writes. A deletion after a base lies
+    /// between it and the next, and opens at the higher of their two
+    /// qualities: easily only inside a repeat. GATK's PCR model charges it the
+    /// first base's alone, so a deletion just before a repeat costs a full
+    /// gap open and the same deletion just after one costs the repeat's, and a
+    /// read scores differently from its reverse complement wherever a deletion
+    /// of a base that is no repeat unit competes with a mismatch beside a run
+    /// (the crate docs, *Where compair differs from GATK*). A unit that
+    /// slipped can always be deleted between two bases of its own repeat.
     pub fn with_pcr_indel_model(
         bases: impl Into<Box<[Base]>>,
         base_quals: &[BaseQuality],
@@ -91,6 +102,11 @@ impl Read {
         Self::with_indel_tracks(bases, base_quals, strand, |bases, insertion, deletion, gap| {
             model.fill_gap_open(bases, insertion);
             deletion.copy_from_slice(insertion);
+            for (slot, pair) in deletion.iter_mut().zip(insertion.windows(2)) {
+                if let [here, next] = pair {
+                    *slot = BaseQuality::from_byte(here.as_byte().max(next.as_byte()));
+                }
+            }
             gap.fill(gap_qual);
         })
     }
@@ -273,6 +289,13 @@ fn steady_growth(
 /// easier. At a base inside `r` repetitions of some unit the gap-open quality
 /// is `gap_open - exp(r / (rate * ln 2)) + 1`, rounded, and kept between
 /// `floor` and `gap_open`.
+///
+/// GATK's formula, not GATK's placement: GATK gives the gap after each base
+/// the repetitions of the repeat ending at it or starting after it, and uses
+/// that for both the insertion and the deletion charged to the base. Here
+/// every base of a run carries the run's quality, an insertion of a base its
+/// own, and a deletion between two bases the higher of theirs
+/// ([`Read::with_pcr_indel_model`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PcrIndelModel {
     /// Gap-open quality outside any repeat.
@@ -422,6 +445,46 @@ mod tests {
         let extend = BaseQuality::from_byte(10);
         let got = Read::with_pcr_indel_model(seq.clone(), &quals, &model, extend, Strand::OB);
         let gaps = vec![extend; seq.len()];
-        assert_eq!(got, Read::new(seq, &quals, &want, &want, &gaps, Strand::OB));
+        // A deletion between two bases opens at the higher of their qualities;
+        // the last base has no next.
+        let deletions: Vec<_> = (0..seq.len())
+            .map(|k| {
+                BaseQuality::from_byte(
+                    want[k].as_byte().max(want.get(k + 1).unwrap_or(&want[k]).as_byte()),
+                )
+            })
+            .collect();
+        assert_eq!(got, Read::new(seq, &quals, &want, &deletions, &gaps, Strand::OB));
+    }
+
+    /// The reverse complement of a read has the mirror of its gap model: the
+    /// insertion of a base opens as the insertion of its complement does, and
+    /// a deletion between two bases as the deletion between their
+    /// complements, which the reverse complement charges to the other base.
+    #[hegel::test]
+    fn the_gap_model_of_a_reverse_complement_is_the_mirror(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let model = PcrIndelModel { floor: BaseQuality::from_byte(20), ..PcrIndelModel::default() };
+        let len = tc.draw(gs::integers::<usize>().min_value(1).max_value(60));
+        // Two letters, so that repeats and their edges are everywhere.
+        let seq: Vec<Base> =
+            (0..len).map(|_| tc.draw_silent(gs::sampled_from(&[Base::A, Base::C]))).collect();
+        let mirrored: Vec<Base> = seq.iter().rev().map(|base| base.inverse()).collect();
+        let build = |bases: Vec<Base>| {
+            let quals = vec![BaseQuality::from_byte(30); len];
+            Read::with_pcr_indel_model(
+                bases,
+                &quals,
+                &model,
+                BaseQuality::from_byte(10),
+                Strand::OT,
+            )
+            .expect("a valid read")
+        };
+        let (forward, backward) = (build(seq), build(mirrored));
+        let reversed = |quals: &[BaseQuality]| quals.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(forward.insertion_quals(), reversed(backward.insertion_quals()));
+        let between = |read: &Read| read.deletion_quals()[..len - 1].to_vec();
+        assert_eq!(between(&forward), reversed(&between(&backward)));
     }
 }

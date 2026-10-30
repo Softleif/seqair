@@ -1,7 +1,9 @@
 //! The model scores a read and a haplotype as it scores their reverse
 //! complements, wherever the read's gap qualities are the same at every
 //! base: the property GATK's conventions lack and compair restores (the crate
-//! docs, *Where compair differs from GATK*).
+//! docs, *Where compair differs from GATK*). With the tandem-repeat gap model
+//! the deletions keep it to a bound and the insertions do not; both are
+//! pinned at the end.
 //!
 //! The emission's half of it, `C` on OT against `G` on OB, is exact and
 //! tested in `tests/emission.rs`; this is the dynamic program's half, which
@@ -13,8 +15,8 @@
 mod support;
 
 use compair::{
-    Band, Base, BaseQuality, Betas, Haplotype, PAIRS, Read, StandardEmission, TapsEmission,
-    Workspace, align_banded_f64_rows, align_full, align_strips_simd,
+    Band, Base, BaseQuality, Betas, Haplotype, PAIRS, PcrIndelModel, Read, StandardEmission,
+    Strand, TapsEmission, Workspace, align_banded_f64_rows, align_full, align_strips_simd,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
@@ -155,4 +157,132 @@ fn the_kernels_are_mirror_symmetric(tc: TestCase) {
     for (forward, backward) in forward.iter().zip(&backward) {
         close(forward.get(), backward.get(), "align_reads");
     }
+}
+
+/// A haplotype of homopolymer runs, a read cut out of it with one base
+/// substituted, and the run edges where a gap quality from the repeat model
+/// changes along the read.
+#[hegel::composite]
+fn repeat_case_inner(tc: &TestCase) -> (Haplotype, Vec<Base>) {
+    let len = tc.draw_silent(length(20, 60));
+    let mut hap = Vec::with_capacity(len + 8);
+    while hap.len() < len {
+        let base = tc.draw(any_base());
+        let run = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        hap.extend(std::iter::repeat_n(base, run));
+    }
+    let start = tc.draw(gs::integers::<usize>().max_value(5));
+    let end = hap.len() - tc.draw(gs::integers::<usize>().max_value(5));
+    let mut bases = hap.get(start..end).unwrap_or_default().to_vec();
+    let at = tc.draw(gs::integers::<usize>().max_value(bases.len() - 1));
+    if let Some(base) = bases.get_mut(at) {
+        *base = tc.draw(any_base());
+    }
+    (Haplotype::new(hap), bases)
+}
+
+fn repeat_case() -> impl PrintableGenerator<(Haplotype, Vec<Base>)> {
+    repeat_case_inner().print_as_debug()
+}
+
+/// rastair's tandem-repeat gap model: GATK's, with the gap open floored at Q20.
+fn pcr_model() -> PcrIndelModel {
+    PcrIndelModel { floor: BaseQuality::from_byte(20), ..PcrIndelModel::default() }
+}
+
+fn reverse_complement(bases: &[Base]) -> Vec<Base> {
+    bases.iter().rev().map(Base::inverse).collect()
+}
+
+/// GATK's `match_to_match` of each read base, `1 - (p_ins + p_del)` with both
+/// raised to Q6, in natural log.
+fn ln_match_to_match(read: &Read) -> Vec<f64> {
+    let open = |q: &BaseQuality| 10f64.powf(-f64::from(q.as_byte().max(6)) / 10.0);
+    read.insertion_quals()
+        .iter()
+        .zip(read.deletion_quals())
+        .map(|(insertion, deletion)| (1.0 - open(insertion) - open(deletion)).ln())
+        .collect()
+}
+
+/// With the deletion qualities of the repeat model and the insertion and
+/// gap-continuation qualities the same at every base, a read scores as its
+/// reverse complement does but for GATK's `match_to_match`, which is all the
+/// bound below allows.
+///
+/// A deletion between two bases opens at the higher of their qualities
+/// (`Read::with_pcr_indel_model`), so it costs the same in both orientations,
+/// as every other transition and emission does. `match_to_match` does not:
+/// the step from read base `i - 1` to `i` takes `1 - p_ins - p_del(i)`, the
+/// deletion quality of the gap after base `i`, so in the mirror the same step
+/// takes the gap before base `i - 1`. So no path's weight moves by more than
+/// a factor of `e^B`, with `B` the sum over the steps of how far the two
+/// `ln(match_to_match)` lie apart, and neither does the total. With GATK's
+/// rule, a deletion charged to the base before it, the scores part by up to
+/// two in log10 here, where a deletion beside a run competes with a mismatch.
+#[hegel::test]
+fn the_repeat_models_deletions_are_mirror_symmetric(tc: TestCase) {
+    let (haplotype, bases) = tc.draw(repeat_case());
+    let r = bases.len();
+    let read = |bases: Vec<Base>| {
+        let quals = vec![BaseQuality::from_byte(40); r];
+        let gap = BaseQuality::from_byte(10);
+        let deletions =
+            Read::with_pcr_indel_model(bases.clone(), &quals, &pcr_model(), gap, Strand::OT)
+                .expect("a valid read")
+                .deletion_quals()
+                .to_vec();
+        let insertions = vec![BaseQuality::from_byte(44); r];
+        Read::new(bases, &quals, &insertions, &deletions, &vec![gap; r], Strand::OT)
+            .expect("a valid read")
+    };
+    let (forward, backward) = (read(bases.clone()), read(reverse_complement(&bases)));
+    let (ln_forward, ln_backward) = (ln_match_to_match(&forward), ln_match_to_match(&backward));
+    // The step into forward row `i` (0-based base `i`, `1..r`) is the step
+    // into mirror base `r - i` (0-based).
+    let bound: f64 = (1..r)
+        .filter_map(|i| Some((ln_forward.get(i)? - ln_backward.get(r - i)?).abs()))
+        .sum::<f64>()
+        / core::f64::consts::LN_10;
+    let standard = StandardEmission::default();
+    let (one, other) = (
+        align_full(&haplotype, &forward, &standard).get(),
+        align_full(&haplotype.reverse_complement(), &backward, &standard).get(),
+    );
+    assert!(
+        (one - other).abs() <= bound + 1e-9,
+        "{one} forward, {other} mirrored, {} apart, more than the bound {bound}",
+        (one - other).abs()
+    );
+}
+
+/// A property the model does **not** have, pinned so that nobody adds it as
+/// a test and watches it fail: with the repeat model's insertion qualities a
+/// read does not score as its reverse complement.
+///
+/// A multi-base insertion is charged its first base's insertion quality. At
+/// a read's end, the insertion that explains a stray base can open inside a
+/// homopolymer, at the repeat's Q20, and run to the read's last base; at its
+/// start, the mirror of that insertion has to open at the read's first base,
+/// outside the run, at Q44. Here the read's second base is a mismatch next to
+/// a run of `G`, and the two orientations part by more than one in log10. A
+/// symmetric charge would have to look at both ends of an insertion, which
+/// GATK's recurrence, charging each transition to one row, cannot.
+#[test]
+fn a_multi_base_insertion_is_charged_at_its_first_base() {
+    let haplotype = Haplotype::from_ascii(b"TTTTGGGGGGGGGGGGTTTTT");
+    let bases = Haplotype::from_ascii(b"GCGGGGGGGGG").bases().to_vec();
+    let score = |haplotype: &Haplotype, bases: Vec<Base>| {
+        let quals = vec![BaseQuality::from_byte(40); bases.len()];
+        let gap = BaseQuality::from_byte(10);
+        let read = Read::with_pcr_indel_model(bases, &quals, &pcr_model(), gap, Strand::OT)
+            .expect("a valid read");
+        align_full(haplotype, &read, &StandardEmission::default()).get()
+    };
+    let forward = score(&haplotype, bases.clone());
+    let backward = score(&haplotype.reverse_complement(), reverse_complement(&bases));
+    assert!(
+        (forward - backward).abs() > 1.0,
+        "the asymmetry is real and worth documenting: {forward} forward, {backward} mirrored"
+    );
 }

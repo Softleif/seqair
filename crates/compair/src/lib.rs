@@ -162,10 +162,30 @@
 //!
 //! With these the model is mirror-symmetric: scoring a read and a haplotype
 //! gives what scoring their reverse complements gives, wherever the read's gap
-//! qualities are the same at every base. Where they vary along the read (as a
-//! tandem-repeat gap model makes them) it is not and cannot be, since GATK's
-//! recurrence charges a gap's opening and closing to one of the two rows it
-//! joins.
+//! qualities are the same at every base (`tests/symmetry.rs`).
+//!
+//! **The tandem-repeat gap model.** Where the gap qualities vary along the read,
+//! as [`PcrIndelModel`] makes them, GATK's recurrence charges each gap to one
+//! of the two rows it joins, and the orientation shows again:
+//!
+//! - *Deletions*: GATK's PCR model gives the gap after a base the quality of
+//!   the repeat that ends at the base or starts after it, so the gap just
+//!   before a repeat is cheap and the one just after it is not.
+//!   [`Read::with_pcr_indel_model`] gives a deletion between two bases the
+//!   higher of their qualities: cheap only inside a repeat, where a slipped
+//!   unit can always be deleted. Otherwise a mismatch beside a run scores up to
+//!   two in log10 apart in the two orientations, as the deletion of the base
+//!   next to the run is cheap in one and not in the other. What is left is
+//!   GATK's `match_to_match`, which takes the deletion quality of the gap after
+//!   the step's second base: bounded, and below `0.01` in log10 there.
+//! - *Insertions* are left as GATK has them, charged at their first inserted
+//!   base. A single inserted base is charged its own quality in either
+//!   orientation, but a longer insertion that runs out of a repeat is not: at a
+//!   read's end, one that absorbs a stray base can open inside a homopolymer
+//!   at the repeat's quality, where its mirror at the read's start opens at
+//!   the read's first base, and the two orientations can part by more than one
+//!   in log10. A symmetric charge would have to look at both ends of the
+//!   insertion, which a recurrence charging each transition to one row cannot.
 //!
 //! **When the numbers differ from GATK's.** Every read picks up the paths that
 //! begin with an insertion, about `match_to_insertion` of its likelihood

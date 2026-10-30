@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs' *Where compair differs from GATK* says why, how, and how far the numbers move;
   `align_full_gatk` (doc-hidden) keeps GATK's ends for the tests that compare with GATK and
   rust-bio.
+- **`Read::with_pcr_indel_model` opens a deletion at the higher of the two bases' qualities it lies
+  between**, so it is cheap only inside a repeat. It took the quality of the base before it, so a
+  deletion just after a run was as cheap as one inside it and the same deletion just before the
+  run was not: a mismatch beside a homopolymer scored up to two in log10 apart in the two
+  orientations. Indel likelihoods in and next to tandem repeats move. Insertions keep the quality
+  of their first base, which leaves a smaller asymmetry for insertions of more than one base that
+  run out of a repeat (the crate docs, *Where compair differs from GATK*).
 
 ## v0.3.0 (2026-10-27)
 
