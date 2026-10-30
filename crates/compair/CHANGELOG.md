@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.4.0 (2026-10-30)
 
 ### Changed
 
@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now impossible. GATK's own write-up of its model calls the limitation unnecessary. The crate
   docs' *Where compair differs from GATK* says why, how, and how far the numbers move;
   `align_full_gatk` (doc-hidden) keeps GATK's ends for the tests that compare with GATK and
-  rust-bio.
+  rust-bio. In rastair on NA12878 chr12 (26x and 73x, GIAB and Platinum Genomes) SNV and indel
+  F1 move by at most 0.0001.
 
 ## v0.3.0 (2026-10-27)
 
