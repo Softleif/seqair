@@ -131,7 +131,7 @@ On construction, the store MUST pre-allocate all six vectors with estimated capa
 ## Decoding into slabs
 
 r[record_store.push_raw+3]
-`push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `IupacBase` codes in the bases slab, every code kept (`r[seq.iupac_bulk+2]`).
+`push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `IupacBase` codes in the bases slab, every code kept (`r[seq.iupac_bulk+3]`).
 
 r[record_store.seq_lossless]
 The bases slab MUST hold each record's SEQ as `IupacBase`, as the file stores it: for BAM the 4-bit code, for SAM the code of `r[sam.record.seq_decode+1]`, for CRAM the code the decode rebuilds (`r[cram.stream.iupac+1]`). A record's `seq()` MUST therefore equal `RawBamRecord::iupac_bases()` of the same record read by `query_raw` or a stream reader, code for code.

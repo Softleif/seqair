@@ -50,7 +50,7 @@ r[bam.record.seq_at]
 The record MUST support decoding a single base at a given read position.
 
 r[bam.record.seq_at_simd+3]
-The decoder MAY decode the full 4-bit sequence into `IupacBase` values at construction time using SIMD-accelerated bulk decoding (`r[seq.iupac_bulk+2]`). Single-base access via `base_at(qpos)` returns the pre-decoded `IupacBase` directly.
+The decoder MAY decode the full 4-bit sequence into `IupacBase` values at construction time using SIMD-accelerated bulk decoding (`r[seq.iupac_bulk+3]`). Single-base access via `base_at(qpos)` returns the pre-decoded `IupacBase` directly.
 
 ## Flag access
 
