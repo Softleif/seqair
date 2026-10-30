@@ -23,9 +23,11 @@
 //! - `N` (reference skip): contribute 0 (introns are not edits).
 //! - `S` / `H` / `P`: contribute 0.
 //!
-//! Comparing to `Base::Unknown`: a query `N` aligned against a reference
-//! `A` counts as a mismatch (htslib behavior). Two `N`s also count as a
-//! mismatch (they're not provably equal).
+//! Under `M`, a read `=` matches whatever the reference holds, and any other
+//! read base matches only an equal `A`/`C`/`G`/`T`, as `samtools calmd`
+//! counts them. A read `N` or ambiguity code is a mismatch, also against a
+//! reference `N`. calmd also matches a read ambiguity code against the same
+//! code in the reference; `RefSeq` holds those as `N`, so here they mismatch.
 //!
 //! ## MD semantics
 //!
@@ -47,7 +49,7 @@
 
 use super::aligned_pairs::MatchKind;
 use super::aligned_pairs_view::{AlignedPairWithRef, AlignedPairsWithRef};
-use seqair_types::Base;
+use seqair_types::{Base, IupacBase};
 use thiserror::Error;
 
 /// Errors from `md()` (and any future strict NM-style computations).
@@ -65,7 +67,7 @@ pub enum NmMdError {
 }
 
 impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
-    // r[impl cigar.aligned_pairs.nm.compute]
+    // r[impl cigar.aligned_pairs.nm.compute+1]
     /// Compute the `NM` tag (edit distance) by consuming this iterator.
     ///
     /// Best-effort: positions where the reference is outside the loaded
@@ -86,7 +88,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         for ev in self {
             match ev {
                 AlignedPairWithRef::Match { kind, query, ref_base, .. } => {
-                    nm = nm.saturating_add(match_contribution(kind, query.to_base(), ref_base));
+                    nm = nm.saturating_add(match_contribution(kind, query, ref_base));
                 }
                 AlignedPairWithRef::Insertion { query, .. } => {
                     // I contributes its length to edit distance.
@@ -107,7 +109,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         nm
     }
 
-    // r[impl cigar.aligned_pairs.md.compute]
+    // r[impl cigar.aligned_pairs.md.compute+1]
     /// Compute the `MD` tag bytes by consuming this iterator.
     ///
     /// Returns [`NmMdError::MissingReference`] if any required reference base
@@ -136,7 +138,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
                     let is_match = match kind {
                         MatchKind::SeqMatch => true,
                         MatchKind::SeqMismatch => false,
-                        MatchKind::Match => bases_equal(query.to_base(), rb),
+                        MatchKind::Match => read_matches(query, rb),
                     };
                     if is_match {
                         run = run.saturating_add(1);
@@ -185,7 +187,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
 }
 
 /// Per-position NM contribution for a `Match` event.
-fn match_contribution(kind: MatchKind, query: Base, ref_base: Option<Base>) -> u32 {
+fn match_contribution(kind: MatchKind, query: IupacBase, ref_base: Option<Base>) -> u32 {
     match kind {
         MatchKind::SeqMatch => 0,
         MatchKind::SeqMismatch => 1,
@@ -193,18 +195,17 @@ fn match_contribution(kind: MatchKind, query: Base, ref_base: Option<Base>) -> u
             // Ambiguous: compare query against ref_base. If ref isn't loaded,
             // skip (count 0) — best-effort semantics.
             match ref_base {
-                Some(rb) if !bases_equal(query, rb) => 1,
+                Some(rb) if !read_matches(query, rb) => 1,
                 _ => 0,
             }
         }
     }
 }
 
-/// Two `Base` values are "equal" for NM/MD purposes if they're identical AND
-/// both are concrete (A/C/G/T). Two `N`s are NOT equal — htslib treats them as
-/// a mismatch since neither is provably equal to the other.
-fn bases_equal(a: Base, b: Base) -> bool {
-    a == b && a != Base::Unknown
+/// Whether a read base under `M` matches the reference base: a read `=`
+/// always does, otherwise only an equal concrete base (two `N`s mismatch).
+fn read_matches(query: IupacBase, reference: Base) -> bool {
+    query == IupacBase::Eq || (query.to_base() == reference && reference != Base::Unknown)
 }
 
 /// Convert a `Base` to its single-byte ASCII letter for MD encoding.
@@ -248,7 +249,7 @@ mod tests {
     use super::*;
     use crate::bam::test_util::ri;
     use crate::bam::test_util::tid;
-    use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
+    use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, Pos0};
     use std::rc::Rc;
 
     fn op(t: CigarOpType, len: u32) -> CigarOp {
@@ -282,7 +283,7 @@ mod tests {
 
     // ── NM ───────────────────────────────────────────────────────────────
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_match_only_no_mismatches_is_zero() {
         // 5M, query == ref everywhere
@@ -300,7 +301,7 @@ mod tests {
         assert_eq!(nm, 0);
     }
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_counts_mismatches_in_match_op() {
         // 5M, 2 mismatches: query ACGTA vs ref ACGAA → only position 3 differs
@@ -318,7 +319,7 @@ mod tests {
         assert_eq!(nm, 1);
     }
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_counts_insertions_and_deletions() {
         // 2M + 3I + 2M + 1D + 1M
@@ -351,7 +352,7 @@ mod tests {
         assert_eq!(nm, 4);
     }
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_seqmatch_and_seqmismatch_dont_consult_ref() {
         // 2= + 3X + 2= → NM = 0 + 3 + 0 = 3 (without consulting ref).
@@ -375,7 +376,7 @@ mod tests {
         assert_eq!(nm, 3, "X always contributes regardless of ref agreement");
     }
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_skips_match_positions_outside_loaded_ref() {
         // Read at pos 100 with 5M, but ref window starts at 200 — entire
@@ -395,7 +396,7 @@ mod tests {
         assert_eq!(nm, 0);
     }
 
-    // r[verify cigar.aligned_pairs.nm.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
     #[test]
     fn nm_treats_n_as_mismatch() {
         // Query N vs ref A — htslib counts this as a mismatch (1).
@@ -415,7 +416,7 @@ mod tests {
 
     // ── MD ───────────────────────────────────────────────────────────────
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_perfect_match_is_just_length_number() {
         // 5M with all matches — MD = "5"
@@ -434,7 +435,7 @@ mod tests {
         assert_eq!(md, b"5");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_single_mismatch_emits_ref_base() {
         // 5M, query ACGTA vs ref ACTTA → mismatch at pos 2: G vs T
@@ -454,7 +455,7 @@ mod tests {
         assert_eq!(md, b"2T2");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_consecutive_mismatches() {
         // 5M, query ACGTA vs ref TCGGT → mismatches at 0, 3, 4
@@ -482,7 +483,7 @@ mod tests {
         assert_eq!(std::str::from_utf8(&md).unwrap(), "0T2G0T0");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_deletion_emits_caret_and_ref_bases() {
         // 2M + 3D + 2M, all matches in M ops, deletion of "ACG"
@@ -506,7 +507,7 @@ mod tests {
         assert_eq!(std::str::from_utf8(&md).unwrap(), "2^ACG2");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_skips_insertions_and_soft_clips() {
         // 2S + 2M + 3I + 2M, no mismatches
@@ -531,7 +532,7 @@ mod tests {
         assert_eq!(md, b"4");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_starts_with_zero_when_first_position_mismatches() {
         // 3M, query TGC vs ref AGC → mismatch at pos 0: T vs A
@@ -551,7 +552,7 @@ mod tests {
         assert_eq!(md, b"0A2");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_seqmatch_and_seqmismatch_use_ref_base_for_mismatch_letter() {
         // 2= + 1X + 2= — for X, MD must emit the REF base, not the query.
@@ -577,7 +578,7 @@ mod tests {
         assert_eq!(md, b"2G2");
     }
 
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn md_errors_on_missing_reference() {
         // Read at pos 100 with 3M, ref window starts at 200 — first M position
@@ -598,8 +599,8 @@ mod tests {
 
     // ── End-to-end: NM + MD on a realistic record ─────────────────────────
 
-    // r[verify cigar.aligned_pairs.nm.compute]
-    // r[verify cigar.aligned_pairs.md.compute]
+    // r[verify cigar.aligned_pairs.nm.compute+1]
+    // r[verify cigar.aligned_pairs.md.compute+1]
     #[test]
     fn nm_and_md_realistic_record() {
         // 2S + 3M + 1I + 2M + 1D + 2M
@@ -821,6 +822,62 @@ mod tests {
                 md[md.len() - 1].is_ascii_digit(),
                 "MD must end with a digit: {:?}",
                 std::str::from_utf8(&md),
+            );
+        }
+
+        // r[verify cigar.aligned_pairs.nm.compute+1]
+        // r[verify cigar.aligned_pairs.md.compute+1]
+        /// A read `=` under `M` matches whatever the reference holds, as
+        /// `samtools calmd` counts it; every other read base matches only an
+        /// equal concrete reference base.
+        #[hegel::test]
+        fn a_read_eq_is_a_match_under_m(tc: TestCase) {
+            let len = tc.draw(gs::integers::<usize>().min_value(1).max_value(30));
+            let pick = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+            let reference: Vec<Base> =
+                (0..len).map(|_| tc.draw(gs::sampled_from(&pick[..]))).collect();
+            let read: Vec<IupacBase> = (0..len)
+                .map(|_| {
+                    if tc.draw(gs::booleans()) {
+                        IupacBase::Eq
+                    } else {
+                        IupacBase::from(tc.draw(gs::sampled_from(&pick[..])))
+                    }
+                })
+                .collect();
+
+            let qual = vec![BaseQuality::from_byte(30); len];
+            let owned = OwnedBamRecord::builder(Some(tid(0)), Some(p0(10)), b"r".to_vec())
+                .flags(BamFlags::empty())
+                .cigar(vec![op(CigarOpType::Match, u32::try_from(len).unwrap())])
+                .seq(read.clone())
+                .qual(qual)
+                .build()
+                .unwrap();
+            let mut buf = Vec::new();
+            owned.to_bam_bytes(&mut buf).unwrap();
+            let mut store = RecordStore::<()>::new();
+            let _ = store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
+            let ref_seq = RefSeq::new(Rc::from(reference.clone()), p0(10));
+            let pairs = || store.record(ri(0)).unwrap().aligned_pairs_with_read(&store).unwrap();
+
+            let (mut want_nm, mut want_md, mut run) = (0u32, Vec::new(), 0u32);
+            for (&q, &r) in read.iter().zip(&reference) {
+                if q == IupacBase::Eq || (q.to_base() == r && r != Base::Unknown) {
+                    run += 1;
+                } else {
+                    want_nm += 1;
+                    push_number(&mut want_md, run);
+                    want_md.push(r as u8);
+                    run = 0;
+                }
+            }
+            push_number(&mut want_md, run);
+
+            assert_eq!(pairs().with_reference(&ref_seq).nm(), want_nm);
+            assert_eq!(
+                String::from_utf8(pairs().with_reference(&ref_seq).md().unwrap()).unwrap(),
+                String::from_utf8(want_md).unwrap()
             );
         }
     }
