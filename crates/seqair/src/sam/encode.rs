@@ -381,19 +381,27 @@ impl SamRecordEncoder {
     }
 }
 
-/// Why [`encode_alignment`] could not encode a record: a field BAM cannot
-/// hold.
+/// A decoded record has a field BAM cannot hold, so it has no BAM form.
+///
+/// The CRAM reader returns this inside
+/// [`CramStreamError::RecordEncode`](crate::cram::stream::CramStreamError::RecordEncode);
+/// SAM parsing reports the same limits as [`SamRecordError`] variants.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RecordEncodeError {
+    /// The read name, without its NUL, is longer than BAM's 254 bytes.
     #[error("QNAME is {len} bytes; BAM allows at most 254")]
     QnameTooLong { len: usize },
 
+    /// A CIGAR too long for the record's 16-bit op count goes in a `CG` tag,
+    /// behind a placeholder whose `N` op holds the reference length in 28 bits.
     #[error(
         "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
     )]
     CigarRefLenTooLong { ref_len: u64 },
 
+    /// The whole record exceeds the reader/writer record limit
+    /// (`r[io.writer_limits]`).
     #[error("record would be {size} bytes, over the {MAX_RECORD_SIZE}-byte limit")]
     RecordTooLarge { size: usize },
 }

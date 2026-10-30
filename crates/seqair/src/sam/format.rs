@@ -2,10 +2,9 @@
 //! prints (`r[sam.format]`), and the header as `samtools view -h --no-PG`
 //! prints it (`r[sam.format.header]`).
 //!
-//! The float printers are public because they are useful alone:
-//! [`format_g`] is C's `%g` (what htslib prints `f` and `d` tags with) and
-//! [`format_kputd`] is htslib's `kputd` (what it prints `B:f` elements with).
-//! Neither allocates beyond growing `out`, and neither calls libc.
+//! Float tags print as htslib prints them: `f` and `d` values with C's `%g`,
+//! `B:f` elements with htslib's `kputd`. Both are reimplemented here, so no
+//! libc call and no allocation beyond growing `out`.
 
 use crate::bam::{
     BamHeader, RawBamRecord,
