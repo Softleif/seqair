@@ -25,7 +25,7 @@
 //! a read and a band.
 //!
 //! The arithmetic, the order of the operations, the flush to zero, the
-//! power-of-two renormalisation every eight rows and the free start
+//! power-of-two renormalisation every eight rows and the free start (`Start`)
 //! are the strip kernel's, cell for cell. So a batch is bit-identical to
 //! running [`align_strips`] once per haplotype, which is the gate this kernel
 //! is worth nothing without.
@@ -48,6 +48,7 @@ use crate::{
     lanes::{Cells, ColumnBlock, LanesView, SharedRows, lanes_kernel},
     read::Read,
     reference::trusted,
+    transitions::Start,
     types::Log10Likelihood,
 };
 
@@ -149,8 +150,9 @@ pub(crate) struct BatchPlan {
     /// one-based, is lane `k` of `columns[j]`, so `j = 0` is the free-start
     /// column and `j = width + 1` a pad.
     columns: Vec<ColumnBlock>,
-    /// `1 / h` per lane, the read's free start; zero for an absent or empty
-    /// haplotype, which then scores [`Log10Likelihood::IMPOSSIBLE`].
+    /// `1 / h` per lane, the free start's scale; zero for an absent or empty
+    /// haplotype, which then scores [`Log10Likelihood::IMPOSSIBLE`]. What the
+    /// read makes of it is [`BatchPlan::view`]'s.
     init: Window,
     /// `h + 1` per lane, so `column < lengths[k]` is `column <= h`.
     past_end: Window,
@@ -163,7 +165,8 @@ pub(crate) struct BatchPlan {
 pub(crate) struct BatchView<'a> {
     rows: &'a RowTracks,
     columns: &'a [ColumnBlock],
-    init: &'a Window,
+    /// Row 0 per lane, from the read's `Start`.
+    start: Cells,
     past_end: &'a Window,
     width: usize,
 }
@@ -225,12 +228,23 @@ impl BatchPlan {
         Some(())
     }
 
-    /// This plan with a read's rows, as the kernel reads them.
-    pub(crate) fn view<'a>(&'a self, rows: &'a RowTracks) -> BatchView<'a> {
+    /// This plan with a read's rows and start, as the kernel reads them.
+    pub(crate) fn view<'a>(&'a self, rows: &'a RowTracks, start: Start) -> BatchView<'a> {
+        let mut cells = Cells::default();
+        for (lane, &init) in self.init.iter().enumerate() {
+            let [m, i, d] = start.cells_f32(init);
+            for (matrix, cell) in
+                [&mut cells.m, &mut cells.i, &mut cells.d].into_iter().zip([m, i, d])
+            {
+                if let Some(slot) = matrix.get_mut(lane) {
+                    *slot = cell;
+                }
+            }
+        }
         BatchView {
             rows,
             columns: &self.columns,
-            init: &self.init,
+            start: cells,
             past_end: &self.past_end,
             width: self.width,
         }
@@ -310,7 +324,7 @@ impl Workspace {
             let scores = if rows && self.fill_batch(group, read, emission, band).is_some() {
                 crate::simd::batch_kernel_at(
                     level,
-                    self.batch_plan.view(&self.plan.rows),
+                    self.batch_plan.view(&self.plan.rows, read.start()),
                     &mut self.batch_rows,
                     read.len(),
                     band,
@@ -367,7 +381,7 @@ impl Workspace {
             && self.fill_batch(group, read, emission, band).is_some()
         {
             (kernel.run)(
-                self.batch_plan.view(&self.plan.rows),
+                self.batch_plan.view(&self.plan.rows, read.start()),
                 &mut self.batch_rows,
                 read.len(),
                 band,
@@ -409,7 +423,7 @@ pub(crate) fn batch_kernel<L: Lane>(
     let view = LanesView {
         columns: plan.columns,
         origin: 0,
-        init: plan.init,
+        start: &plan.start,
         front: &[0.0; BATCH],
         past_end: plan.past_end,
         lengths: &[read_len; BATCH],

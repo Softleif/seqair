@@ -29,8 +29,9 @@
 //!   past a lane's own read have all-zero tracks and compute to exactly zero,
 //!   as the strip kernel's rows past the read do.
 //! - **The last row.** The score is `m + i` summed along lane `k`'s own last
-//!   row, so the sum is masked per lane, in the strip kernel's form `total +
-//!   masked(m + i)`, and a lane's renormalisation stops after its last row:
+//!   row, without the insertion cell of its last haplotype column, so the sum
+//!   is masked per lane, in the strip kernel's form `total + masked(m +
+//!   masked(i))`, and a lane's renormalisation stops after its last row:
 //!   the strip kernel never renormalises below the read, and a shift after
 //!   the total was taken would be applied to an exponent the total never saw.
 //!
@@ -41,7 +42,9 @@
 //! above and its deletion from the cell to its left, and all three are zero
 //! when row 0 is zero at `j < 0` -- so everything left of the haplotype
 //! computes to exactly zero on every row without a mask, by induction along
-//! the row and down the column.
+//! the row and down the column. Except the insertion at `j = 0`, which reads
+//! the free start's own cells above it; the strip kernel never computes
+//! column 0 below row 0, so the sweep clears that one cell after each row.
 //!
 //! Two more things, neither of them about lanes:
 //!
@@ -356,9 +359,10 @@ pub(crate) struct PairsPlan {
     /// Each lane's columns, and the shifted column of the table's first
     /// entry.
     columns_from: [(ColumnTable, usize); PAIRS],
-    /// `1 / h` per lane, the read's free start; zero for a lane that cannot
-    /// align, which then scores [`Log10Likelihood::IMPOSSIBLE`].
-    init: Window,
+    /// Row 0 per lane, the read's free start (`Start`) over `1 / h`; zero for
+    /// a lane that cannot align, which then scores
+    /// [`Log10Likelihood::IMPOSSIBLE`].
+    start: Cells,
     /// `delta_k` per lane: row 0 is live from here.
     front: Window,
     /// `delta_k + h_k + 1` per lane, so `c < past_end[k]` is `j <= h_k`.
@@ -457,7 +461,7 @@ impl PairsPlan {
         let Self {
             rows_from,
             columns_from,
-            init,
+            start,
             front,
             past_end,
             lengths,
@@ -468,7 +472,7 @@ impl PairsPlan {
         } = self;
         *rows_from = [None; PAIRS];
         *columns_from = [(ColumnTable::None, 0); PAIRS];
-        *init = [0.0; PAIRS];
+        *start = Cells::default();
         *front = [0.0; PAIRS];
         *past_end = [0.0; PAIRS];
         *lengths = [0; PAIRS];
@@ -481,7 +485,10 @@ impl PairsPlan {
             }
             let (haplotype, read) = (pair.haplotype, pair.read);
             let (h, r) = (haplotype.len(), read.len());
-            *init.get_mut(lane)? = 1.0 / h as f32;
+            let [m, i, d] = read.start().cells_f32(1.0 / h as f32);
+            *start.m.get_mut(lane)? = m;
+            *start.i.get_mut(lane)? = i;
+            *start.d.get_mut(lane)? = d;
             *front.get_mut(lane)? = delta as f32;
             *past_end.get_mut(lane)? = (delta + h + 1) as f32;
             *lengths.get_mut(lane)? = r;
@@ -815,7 +822,7 @@ pub(crate) fn pairs_kernel<L: Lane>(
     let view = LanesView {
         columns,
         origin,
-        init: &plan.init,
+        start: &plan.start,
         front: &plan.front,
         past_end: &plan.past_end,
         lengths: &plan.lengths,

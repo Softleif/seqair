@@ -31,6 +31,7 @@ use crate::{
     read::Read,
     reference::trusted,
     strips::{RowBuffer, strip_kernel},
+    transitions::Start,
     types::Log10Likelihood,
 };
 
@@ -173,7 +174,7 @@ impl<E: Emission> StripParts<'_, E> {
         &mut self,
         haplotype: &Haplotype,
         prepared: &mut Prepared<ColumnTracks>,
-        kernel: &mut impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band) -> Log10Likelihood,
+        kernel: &mut impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band, Start) -> Log10Likelihood,
     ) -> Log10Likelihood {
         let (h, r) = (haplotype.len(), self.read.len());
         let emission = self.emission;
@@ -182,7 +183,13 @@ impl<E: Emission> StripParts<'_, E> {
             let columns = prepared
                 .for_strand(strand, |tracks| tracks.fill(haplotype, emission, strand, whole(h)?))?;
             let view = PlanView { rows: self.rows, columns };
-            let score = kernel(view, self.buffer, Shape { haplotype: h, read: r }, self.band);
+            let score = kernel(
+                view,
+                self.buffer,
+                Shape { haplotype: h, read: r },
+                self.band,
+                self.read.start(),
+            );
             Some(trusted(score, haplotype, self.read, emission, self.band))
         });
         score.unwrap_or(Log10Likelihood::IMPOSSIBLE)
@@ -226,9 +233,10 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
             out.resize(haplotypes.len(), Log10Likelihood::IMPOSSIBLE);
             return;
         }
-        let mut kernel = |view: PlanView<'_>, buffer: &mut RowBuffer, shape: Shape, band: Band| {
-            crate::simd::strip_kernel_at(level, view, buffer, shape, band)
-        };
+        let mut kernel =
+            |view: PlanView<'_>, buffer: &mut RowBuffer, shape: Shape, band: Band, start: Start| {
+                crate::simd::strip_kernel_at(level, view, buffer, shape, band, start)
+            };
         let mut strips =
             StripParts { rows: &plan.rows, buffer: rows, emission: &*emission, read, band };
         let strand = read.strand();
@@ -241,7 +249,7 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
                 let scores = batch
                     .for_strand(strand, |plan| plan.fill(group, &*emission, strand, whole))
                     .map(|batch| {
-                        let view = batch.view(strips.rows);
+                        let view = batch.view(strips.rows, read.start());
                         crate::simd::batch_kernel_at(level, view, batch_rows, r, band)
                     })
                     .unwrap_or([Log10Likelihood::IMPOSSIBLE; BATCH]);
@@ -276,8 +284,8 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.strips(read, band, out, |view, buffer, shape, band| {
-            crate::simd::strip_kernel_at(level, view, buffer, shape, band)
+        self.strips(read, band, out, |view, buffer, shape, band, start| {
+            crate::simd::strip_kernel_at(level, view, buffer, shape, band, start)
         });
     }
 
@@ -286,8 +294,8 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     /// The scores replace `out`'s contents, in the haplotypes' order.
     #[doc(hidden)]
     pub fn align_strips(&mut self, read: &Read, band: Band, out: &mut Vec<Log10Likelihood>) {
-        self.strips(read, band, out, |view, buffer, shape, band| {
-            strip_kernel::<f32>((), view, buffer, shape, band)
+        self.strips(read, band, out, |view, buffer, shape, band, start| {
+            strip_kernel::<f32>((), view, buffer, shape, band, start)
         });
     }
 
@@ -298,7 +306,7 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
         read: &Read,
         band: Band,
         out: &mut Vec<Log10Likelihood>,
-        mut kernel: impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band) -> Log10Likelihood,
+        mut kernel: impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band, Start) -> Log10Likelihood,
     ) {
         out.clear();
         let Self { workspace, haplotypes, emission } = self;

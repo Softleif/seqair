@@ -31,8 +31,8 @@
 
 use crate::{
     banded::{
-        CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes, RowTracks,
-        TransitionLanes, Window, prior,
+        CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, LaneMask, RowLanes,
+        RowTracks, TransitionLanes, Window, prior,
     },
     types::Log10Likelihood,
 };
@@ -152,9 +152,9 @@ pub(crate) struct LanesView<'a> {
     /// reaches.
     pub(crate) columns: &'a [ColumnBlock],
     pub(crate) origin: usize,
-    /// `1 / h` per lane, the read's free start; zero for a lane that cannot
-    /// align.
-    pub(crate) init: &'a Window,
+    /// Row 0's three matrices per lane, the read's free start (`Start`);
+    /// zero for a lane that cannot align.
+    pub(crate) start: &'a Cells,
     /// `delta_k` per lane: row 0 is live from here.
     pub(crate) front: &'a Window,
     /// `delta_k + h_k + 1` per lane, so `c < past_end[k]` is `j <= h_k`; zero
@@ -196,6 +196,7 @@ struct RowConstants<L: Lane> {
     lanes: RowLanes<L>,
     t: TransitionLanes<L>,
     past_end: L,
+    front: L,
     /// The lanes whose read ends on this row, for the `SUMMING` steps.
     ends: L::Mask,
 }
@@ -223,12 +224,22 @@ fn flush<L: Lane>(value: L) -> L {
     L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
 }
 
+/// One of row 0's cells in one column: zero left of the lane's column 0 and
+/// past its haplotype. A function, not a closure, for the reason `splat_at`
+/// gives.
+#[inline(always)]
+fn seed<L: Lane>(gone: L::Mask, keep: L::Mask, cell: L) -> L {
+    L::masked_out(gone, L::masked(keep, cell))
+}
+
 /// The column steps over `cells` and `columns`, which are cut to the same
 /// columns, the first of which is `from`.
 ///
 /// `MASKED` zeroes the lanes whose haplotype ended before the column, which
 /// only the columns past the group's shortest haplotype need, and `SUMMING`
-/// adds the cells of the lanes whose read ends on this row into the total.
+/// adds the cells of the lanes whose read ends on this row into the total,
+/// leaving out the insertion cell of a lane's haplotype columns `0` and `h`
+/// (the crate docs, *Where compair differs from GATK*).
 /// Both are constants so that each of the four loops pays only for what its
 /// columns need: the mask is a compare, an add and two `and`s per step, and a
 /// runtime `summing` was a compare and a branch per step on x86 and, on NEON,
@@ -280,7 +291,6 @@ fn steps<L: Lane, const MASKED: bool, const SUMMING: bool>(
         // haplotype is still live.
         let (m, d) = if MASKED {
             let keep = column_lane.below(row.past_end);
-            column_lane = column_lane + one;
             (L::masked(keep, m), L::masked(keep, d))
         } else {
             (m, d)
@@ -293,8 +303,14 @@ fn steps<L: Lane, const MASKED: bool, const SUMMING: bool>(
         if SUMMING {
             // The strip kernel's form, parentheses and mask included: `f32`
             // addition is not associative, and a lane that does not end here
-            // adds an exact zero.
-            *total = *total + L::masked(row.ends, m + i);
+            // adds an exact zero. A lane's column 0 holds an insertion
+            // only on a one-base read's row, which the strip kernel never
+            // computes there.
+            let inside = row.front.below(column_lane).both((column_lane + one).below(row.past_end));
+            *total = *total + L::masked(row.ends, m + L::masked(inside, i));
+        }
+        if MASKED || SUMMING {
+            column_lane = column_lane + one;
         }
         carry.left_m = m;
         carry.left_d = d;
@@ -358,13 +374,19 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     let zero = L::splat(token, 0.0);
     let one = L::splat(token, 1.0);
     let past_end = L::load(token, view.past_end);
-    let init = L::load(token, view.init);
+    let start = (
+        L::load(token, &view.start.m),
+        L::load(token, &view.start.i),
+        L::load(token, &view.start.d),
+    );
 
-    // Row 0, the free start: `1 / h_k` in the deletion matrix at every column
-    // of the band that lane `k`'s haplotype reaches, which starts at its own
-    // column 0, `delta_k`. Left of that, row 0 has to be zero: see `pairs`
-    // for why that alone keeps every row clear there.
+    // Row 0, the free start (`Start`): its three cells at every column of the
+    // band that lane `k`'s haplotype reaches, which starts at its own column
+    // 0, `delta_k`. Left of that, row 0 has to be zero: see `pairs` for why
+    // that keeps every row clear there, with the insertion cell of column 0
+    // cleared by hand after each row, below.
     let front = L::load(token, view.front);
+    let fronts = view.front.map(|front| front as usize);
     let mut crossing = zero;
     let row0_from = (o - w).max(0) as usize;
     let row0_to = (o + w).min(width as i64);
@@ -375,9 +397,13 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     };
     for (column, slot) in (row0_from..).zip(row0) {
         let at = L::splat(token, column as f32);
-        let cell = L::masked_out(at.below(front), L::masked(at.below(past_end), init));
-        cell.store(&mut slot.d);
-        crossing = crossing.vmax(cell);
+        let (gone, keep) = (at.below(front), at.below(past_end));
+        let (m, i, d) =
+            (seed(gone, keep, start.0), seed(gone, keep, start.1), seed(gone, keep, start.2));
+        m.store(&mut slot.m);
+        i.store(&mut slot.i);
+        d.store(&mut slot.d);
+        crossing = crossing.vmax(m).vmax(i).vmax(d);
     }
 
     // The last column at which every lane with a haplotype is still live. A
@@ -467,6 +493,7 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 gap_continuation,
             },
             past_end,
+            front,
             ends: lengths.equals(at),
         };
 
@@ -530,6 +557,16 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 );
             }
             total = sweep.total;
+            // Insertions open on the free start's column 0, which the strip
+            // kernel never computes on a row below row 0: a lane whose
+            // column 0 is shifted into the band would carry that cell down.
+            for (lane, &column) in fronts.iter().enumerate() {
+                if (first..=last).contains(&column)
+                    && let Some(slot) = cells.get_mut(column).and_then(|cell| cell.i.get_mut(lane))
+                {
+                    *slot = 0.0;
+                }
+            }
             if row % STRIP_ROWS == 0
                 && let Some(stored) = cells.get(first..=last)
             {
