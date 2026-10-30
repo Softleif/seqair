@@ -821,17 +821,21 @@ fn no_ref_cram_decodes_reads_with_insertions() {
 ///
 /// The reference window used to be taken from *the first* CRAI entry whose
 /// `container_offset` matched. A multi-ref container holds one entry per slice
-/// per reference — and htslib turns multi-reference slices on by itself once a
-/// container would hold very few records per reference, so this needs no option
-/// to ask for — and when a later slice reached further along the reference than
-/// the first one did, the window stopped short and the bases past its end came
-/// back as `N`. Silently: falling off the end of the fetched reference is only
-/// a warning (`r[cram.slice.ref_bounds_warning]`), so the reads decoded, they
-/// were just wrong. The window is the union of every matching entry now.
+/// per reference, and when a later slice reached further along the reference
+/// than the first one did, the window stopped short and the bases past its end
+/// came back as `N`. Silently: falling off the end of the fetched reference is
+/// only a warning (`r[cram.slice.ref_bounds_warning]`), so the reads decoded,
+/// they were just wrong. The window is the union of every matching entry now.
 ///
 /// Both reads below are 8M on `c1`, one base apart, so the second slice needs
 /// exactly one base more than the first entry's span reports — the smallest
 /// version of the bug there is, which is the version a wider test would miss.
+///
+/// The layout is asked for explicitly: one record per slice, all three slices
+/// in one multi-ref container. htslib also switches to multi-ref slices by
+/// itself when containers run nearly empty, but 1.25 tightened that threshold
+/// so it no longer fires on a file this small, and the test silently stopped
+/// putting both `c1` slices in one container.
 // r[verify cram.index.multi_ref_slices]
 // r[verify cram.record.sequence]
 // r[verify cram.slice.multi_ref_reference_window+2]
@@ -856,8 +860,8 @@ fn multi_ref_containers_use_every_slices_reference_range() {
         version: "3.0",
         embed_ref: 0,
         seqs_per_slice: 1,
-        slices_per_container: 2,
-        multi_seq: None,
+        slices_per_container: 3,
+        multi_seq: Some(true),
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -868,8 +872,12 @@ fn multi_ref_containers_use_every_slices_reference_range() {
     let headers = slice_headers(&cram);
     assert!(headers.iter().filter(|h| h.ref_seq_id == RefSeqId::Multi).count() >= 2, "{headers:?}");
     let entries = crai_entries(&cram);
+    let c1: Vec<_> = entries.iter().filter(|e| e.ref_id == Some(1)).collect();
     assert!(
-        entries.iter().filter(|e| e.ref_id == Some(1)).count() >= 2,
+        c1.len() >= 2
+            && c1
+                .iter()
+                .all(|e| Some(e.container_offset) == c1.first().map(|f| f.container_offset)),
         "c1 needs two index entries in one container: {entries:?}"
     );
     assert_eq!(fetch_all(&cram, &fasta, &sample), fetch_all(&bam, &fasta, &sample));
