@@ -3,9 +3,16 @@
 //! rust-bio implements the textbook (Durbin) pair-HMM, not GATK's, so the two
 //! only line up once the parameters are mapped. The mapping below is *exact* --
 //! transcribing rust-bio's recurrence into linear-space `f64` reproduces
-//! `align_full`'s number to the last bit, plus one extra term named below --
-//! and it is worth writing down, because every part of it is a place the two
+//! GATK's number to the last bit, plus one extra term named below -- and it is
+//! worth writing down, because every part of it is a place the two
 //! conventions could have been confused.
+//!
+//! compair is GATK but for the two ends of a read (the crate docs, *Where
+//! compair differs from GATK*), and rust-bio's ends are GATK's: neither lets
+//! a read begin with an insertion (rust-bio's start sits in the column before
+//! the one its insertion state reads), and both count an insertion after the
+//! haplotype's last base. So rust-bio is compared with `align_full_gatk`, the
+//! reference recurrence with GATK's ends.
 //!
 //! # The mapping
 //!
@@ -103,7 +110,7 @@ use bio::stats::{
     LogProb, Prob,
     pairhmm::{EmissionParameters, GapParameters, PairHMM, StartEndGapParameters, XYEmission},
 };
-use compair::{Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, align_full};
+use compair::{Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, align_full_gatk};
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 
@@ -111,7 +118,7 @@ use hegel::generators::{self as gs, Generator, PrintableGenerator};
 /// exact. Measured worst overshoot over 20 000 random pairs: 1.1e-6.
 const UPPER_SLACK: f64 = 1e-5;
 
-/// How far *below* `align_full` rust-bio may land on the GATK vectors at
+/// How far *below* `align_full_gatk` rust-bio may land on the GATK vectors at
 /// Q45 / Q45 / Q10, where its `ln_sum3_exp_approx` shortcut only ever discards
 /// terms that really are negligible. Measured worst case over all 104: 1.7e-5.
 const GATK_LOWER_SLACK: f64 = 1e-4;
@@ -136,7 +143,7 @@ fn error_probability(phred: u8) -> f64 {
 }
 
 /// The most, in log10, that rust-bio's inclusion of the deletion matrix in the
-/// free end can raise its total above `align_full`'s.
+/// free end can raise its total above `align_full_gatk`'s.
 fn deletion_matrix_bound(deletion_qual: u8, gap_qual: u8) -> f64 {
     let (p_del, g) = (error_probability(deletion_qual), error_probability(gap_qual));
     (1.0 + p_del / (1.0 - g)).log10()
@@ -229,7 +236,7 @@ impl StartEndGapParameters for Mode {
 }
 
 /// rust-bio's answer to the same problem, in log10 and already on
-/// `align_full`'s scale: there is no normalisation left to apply.
+/// `align_full_gatk`'s scale: there is no normalisation left to apply.
 fn rust_bio_log10(
     haplotype: &Haplotype,
     read: &Read,
@@ -311,7 +318,7 @@ fn gatk_vectors_agree_with_rust_bio() {
     for (index, (haplotype, bases, base_quals)) in pairs.into_iter().enumerate() {
         let read = uniform_read(bases, &base_quals, insertion_qual, deletion_qual, gap_qual)
             .expect("the vector's read must build");
-        let mine = align_full(&haplotype, &read, &StandardEmission::default()).get();
+        let mine = align_full_gatk(&haplotype, &read, &StandardEmission::default()).get();
         let theirs = rust_bio_log10(&haplotype, &read, insertion_qual, deletion_qual, gap_qual);
         let delta = theirs - mine;
         assert!(
@@ -408,13 +415,13 @@ fn any_case(max_edits: usize) -> impl PrintableGenerator<Case> {
 
 fn check(tc: &TestCase, case: &Case) {
     let Case { haplotype, read, insertion_qual, deletion_qual, gap_qual, edited } = case;
-    let mine = align_full(haplotype, read, &StandardEmission::default()).get();
+    let mine = align_full_gatk(haplotype, read, &StandardEmission::default()).get();
     let theirs = rust_bio_log10(haplotype, read, *insertion_qual, *deletion_qual, *gap_qual);
     tc.assume(mine.is_finite() && theirs.is_finite());
     let bound = deletion_matrix_bound(*deletion_qual, *gap_qual);
     let delta = theirs - mine;
     // Rigorous: the deletion matrix in rust-bio's free end is the only thing
-    // that can put it above `align_full`, and the deletion recurrence bounds it.
+    // that can put it above `align_full_gatk`, and the deletion recurrence bounds it.
     assert!(
         delta <= bound + UPPER_SLACK,
         "rust-bio {theirs} is {delta} above compair {mine}, more than {bound}"
