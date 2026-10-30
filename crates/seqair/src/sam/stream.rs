@@ -8,7 +8,7 @@ use std::io::{self, BufRead};
 /// The longest line [`SamStreamReader`] buffers (`r[sam.stream.lines]`).
 /// Text of a 2 MiB record (`r[bam.record.max_size]`) fits: its densest
 /// encoding, a `B:c` array, is five text bytes per stored byte.
-pub const MAX_LINE_LEN: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_LINE_LEN: usize = 16 * 1024 * 1024;
 
 /// Why reading a SAM stream failed.
 #[derive(Debug, thiserror::Error)]
