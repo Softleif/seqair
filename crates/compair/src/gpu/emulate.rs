@@ -82,11 +82,13 @@ fn run(
     for p in 0..span {
         let column = pair.offset - half + p as i32;
         let live = p as i32 <= 2 * half && column >= 0 && column <= pair.hap_len as i32;
-        let cell = if live { pair.init } else { 0.0 };
-        if let Some(slot) = del.get_mut(p) {
-            *slot = cell;
+        let [start_m, start_i, start_d] = if live { pair.start } else { [0.0; 3] };
+        for (track, value) in [(&mut m, start_m), (&mut ins, start_i), (&mut del, start_d)] {
+            if let Some(slot) = track.get_mut(p) {
+                *slot = value;
+            }
         }
-        crossing = crossing.max(cell);
+        crossing = crossing.max(start_m).max(start_i).max(start_d);
     }
 
     let mut exponent = 0i32;
@@ -122,7 +124,8 @@ fn run(
         let first = origin + row as i32;
         let track = (pair.weights + base.min(3) * pair.hap_len) as i32 + first - 1;
         let lo = (1 - first).max(0);
-        let hi = (2 * half).min(pair.hap_len as i32 - first);
+        let last = pair.hap_len as i32 - first;
+        let hi = (2 * half).min(last);
         let summing = row == pair.read_len;
         let (mut left_m, mut left_d, mut running) = (0.0f32, 0.0f32, 0.0f32);
         for p in 0..span {
@@ -150,7 +153,7 @@ fn run(
             }
             running = running.max(new_m).max(new_i).max(new_d);
             if summing {
-                total = add(total, add(new_m, new_i));
+                total = add(total, add(new_m, if p as i32 == last { 0.0 } else { new_i }));
             }
             left_m = new_m;
             left_d = new_d;

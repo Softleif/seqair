@@ -12,7 +12,9 @@
 //! the recurrence of `batch::batch_kernel`, the flush of subnormal cells, the
 //! power-of-two renormalisation of the row every eight rows from the maximum
 //! of the row that crosses into the strip, and `total + (m + i)` on the last
-//! row. The row buffer is indexed by *band position* rather than by column --
+//! row, without the insertion of the haplotype's last column. Row 0 holds the
+//! read's start in all three matrices (the crate docs, *Where compair differs
+//! from GATK*). The row buffer is indexed by *band position* rather than by column --
 //! position `p` of row `i` is column `i + offset - half_width + p` -- so a
 //! cell reads its diagonal at `p` and the cell above at `p + 1` of the
 //! previous row and its left neighbour at `p - 1` of its own. Updated in place
@@ -101,8 +103,9 @@ struct Pair {
     hap_len: u32,
     offset: i32,
     half_width: u32,
-    init: f32,
-    pad: u32,
+    start_m: f32,
+    start_i: f32,
+    start_d: f32,
 }
 
 struct RowRecord {
@@ -179,6 +182,9 @@ struct Row {
     // columns `1..=hap_len`.
     lo: i32,
     hi: i32,
+    // The position of column `hap_len`, whose insertion cell is not part of
+    // the total.
+    last: i32,
 }
 
 fn row_inputs(pair: Pair, row: u32, first: i32) -> Row {
@@ -202,7 +208,8 @@ fn row_inputs(pair: Pair, row: u32, first: i32) -> Row {
     out.indel_to_match = transitions[INDEL_TO_MATCH + gap];
     out.gap_continuation = transitions[GAP_CONTINUATION + gap];
     out.lo = max(0, 1 - first);
-    out.hi = min(i32(2u * pair.half_width), i32(pair.hap_len) - first);
+    out.last = i32(pair.hap_len) - first;
+    out.hi = min(i32(2u * pair.half_width), out.last);
     return out;
 }
 
@@ -236,10 +243,16 @@ fn cell(
     return out;
 }
 
-fn row0_cell(pair: Pair, p: i32) -> f32 {
+// Row 0's cells at position `p`: the read's start at every column the band
+// holds, zero elsewhere.
+fn row0_cell(pair: Pair, p: i32) -> Cell {
     let column = pair.offset - i32(pair.half_width) + p;
     let live = p <= i32(2u * pair.half_width) && column >= 0 && column <= i32(pair.hap_len);
-    return select(0.0, pair.init, live);
+    var out: Cell;
+    out.m = select(0.0, pair.start_m, live);
+    out.i = select(0.0, pair.start_i, live);
+    out.d = select(0.0, pair.start_d, live);
+    return out;
 }
 ";
 
@@ -260,8 +273,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var crossing = 0.0;
     for (var p = 0u; p < SPAN; p++) {
         let cell = row0_cell(pair, i32(p));
-        del[p] = cell;
-        crossing = max(crossing, cell);
+        m[p] = cell.m;
+        ins[p] = cell.i;
+        del[p] = cell.d;
+        crossing = max(max(max(crossing, cell.m), cell.i), cell.d);
     }
 
     var exponent = 0i;
@@ -292,7 +307,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             del[p] = c.d;
             running = max(max(max(running, c.m), c.i), c.d);
             if summing {
-                total = total + rounded(c.m + c.i);
+                total = total + rounded(c.m + select(c.i, 0.0, i32(p) == r.last));
             }
             left_m = c.m;
             left_d = c.d;
@@ -322,9 +337,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for p in 0..=span {
         writeln!(out, "    var m_{p} = 0.0; var i_{p} = 0.0; var d_{p} = 0.0;")?;
     }
-    out.push_str("    var crossing = 0.0;\n");
+    out.push_str("    var crossing = 0.0;\n    var c0: Cell;\n");
     for p in 0..span {
-        writeln!(out, "    d_{p} = row0_cell(pair, {p}); crossing = max(crossing, d_{p});")?;
+        writeln!(
+            out,
+            "    c0 = row0_cell(pair, {p}); m_{p} = c0.m; i_{p} = c0.i; d_{p} = c0.d;\n    \
+             crossing = max(max(max(crossing, c0.m), c0.i), c0.d);"
+        )?;
     }
     out.push_str(
         r"
@@ -360,7 +379,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "        c = cell(r, {p}, m_{p}, i_{p} + d_{p}, m_{up}, i_{up}, left_m, left_d);\n        \
              m_{p} = c.m; i_{p} = c.i; d_{p} = c.d;\n        \
              running = max(max(max(running, c.m), c.i), c.d);\n        \
-             if summing {{ total = total + rounded(c.m + c.i); }}\n        \
+             if summing {{ total = total + rounded(c.m + select(c.i, 0.0, {p} == r.last)); }}\n        \
              left_m = c.m; left_d = c.d;"
         )?;
     }
