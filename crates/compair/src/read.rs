@@ -276,13 +276,20 @@ fn steady_growth(
     Some(Growth::steady(transitions.len(), open(low), open(high), first))
 }
 
-/// GATK's PCR indel model: a gap opens more easily inside a tandem repeat,
-/// where polymerase slippage makes stutter, and the more repetitions the
-/// easier. At a base inside `r` repetitions of some unit the gap-open quality
-/// is `gap_open - exp(r / (rate * ln 2)) + 1`, rounded, and kept between
-/// `floor` and `gap_open`.
+/// A PCR indel model after GATK's: a gap opens more easily inside a tandem
+/// repeat, where polymerase slippage makes stutter, and the more repetitions
+/// the easier. At a base inside `r` repetitions of some unit the gap-open
+/// quality is `gap_open - exp(r / (rate * ln 2)) + 1`, rounded, and kept
+/// between `floor` and `gap_open`.
 ///
-/// GATK's formula, not GATK's placement: GATK gives the gap after each base
+/// GATK's curve has the same shape but `pi` where this has `ln 2`, and starts
+/// at Q40 (`getErrorModelAdjustedQual` in GATK's
+/// `PairHMMLikelihoodCalculationEngine`), so it falls far more slowly: at
+/// rate 3 this reaches Q20 at seven repetitions, where GATK's is at Q39 and
+/// still at Q33 at twenty. What a caller gets is the floor in any run of seven
+/// or more, so the floor is the parameter to measure.
+///
+/// Not GATK's placement either: GATK gives the gap after each base
 /// the repetitions of the repeat ending at it or starting after it, and uses
 /// that for both the insertion and the deletion charged to the base. Here
 /// every base of a run carries the run's quality, and an insertion or a
@@ -303,8 +310,9 @@ pub struct PcrIndelModel {
 }
 
 impl Default for PcrIndelModel {
-    /// GATK's conservative setting: Q45 outside repeats, a Q10 floor, rate 3,
-    /// units up to 8 bases, at most 20 repetitions counted.
+    /// Q45 outside repeats, a Q10 floor, rate 3 (GATK's conservative rate and
+    /// floor, on this model's curve), units up to 8 bases, at most 20
+    /// repetitions counted.
     fn default() -> Self {
         Self {
             gap_open: BaseQuality::from_byte(45),
@@ -414,7 +422,7 @@ mod tests {
         assert_eq!(q(6), 28);
         assert_eq!(q(7), 20);
         assert_eq!(q(40), 20);
-        // GATK's own floor is lower, so a long tract keeps falling past Q20.
+        // The default floor is lower, so a long tract keeps falling past Q20.
         let gatk = PcrIndelModel::default();
         assert_eq!(gatk.gap_open_qual(7), BaseQuality::from_byte(17));
         assert_eq!(gatk.gap_open_qual(40), BaseQuality::from_byte(10));
