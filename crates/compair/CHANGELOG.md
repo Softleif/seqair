@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rust-bio. In rastair on NA12878 chr12 (26x and 73x, GIAB and Platinum Genomes) SNV and indel
   F1 move by at most 0.0001.
 
+### Documentation
+
+- `PcrIndelModel` is no longer called GATK's model. It has GATK's shape, rate and floor, but
+  `ln 2` where GATK's curve has `pi` and Q45 where it has Q40, so it reaches Q20 at seven
+  repetitions where GATK's is still at Q39. The scores are unchanged.
+- The crate docs credit GKL for computing in `f32` and redoing a pair in `f64`, and no longer
+  claim `Candidates` is faster than `align_reads` on the 10s dataset (they are within 4% on a
+  3950X). The test data's GKL licence is MIT, not Apache-2.0, and v0.2.0 is dated as released.
+
 ## v0.3.0 (2026-10-27)
 
 ### Breaking
@@ -58,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A failed `collect` unmaps its buffer** (after a timeout, say), so the aligner's next
   `submit` no longer fails with "buffer is still mapped" for the rest of its life.
 
-## v0.2.0 (2026-09-29)
+## v0.2.0 (2026-10-08)
 
 ### Breaking
 
@@ -82,10 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one `Betas::PerSite` slice; this is what lets a TAPS caller score them in one call with
   the column's own methylation estimate, so a deletion spelled across a methylated `CpG` is not
   mistaken for a cheaper conversion. `HapSite` gains `beta` and loses `Eq`.
-- **`PcrIndelModel`**, GATK's PCR indel gap model: the gap-open quality falls inside tandem
+- **`PcrIndelModel`**, a PCR indel gap model after GATK's (documented as GATK's until 0.4.0): the gap-open quality falls inside tandem
   repeats (units of 1 to `max_unit` bases) as `gap_open - exp(repeats / (rate * ln 2)) + 1`,
   rounded and kept between `floor` and `gap_open`. `Default` is GATK's conservative setting (Q45,
-  floor Q10, rate 3, units up to 8, 20 repetitions). `gap_open_qual(repeats)` and
+  floor Q10, rate 3, units up to 8, 20 repetitions; GATK's rate and floor, not its curve). `gap_open_qual(repeats)` and
   `fill_gap_open(bases, track)` compute it, and **`Read::with_pcr_indel_model(bases, base_quals,
   &model, gap_qual, strand)`** builds a read from it, so a caller passes no per-base gap tracks.
 - **`Workspace::align_reads_into` and `ScoreMatrix`**: `align_reads` into a buffer that knows its

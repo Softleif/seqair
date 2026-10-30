@@ -61,8 +61,7 @@
 //! score: every path is bit-identical to the strip kernel. Measured on rastair's
 //! shape (3 haplotypes, 128 reads) `align_reads` is 1.5x `Candidates` on a
 //! 3950X and 1.2x on an M4 Pro; on the 10s dataset, whose groups run to 24
-//! haplotypes, `Candidates` is 1.13x `align_reads` on the 3950X and 0.96x on
-//! the M4. The rest of this list is what they pick between, and
+//! haplotypes, the two are within 4% of each other on the 3950X. The rest of this list is what they pick between, and
 //! what to reach for when the shape of the work is different.
 //!
 //! Implementations of the same recurrence, in two families.
@@ -109,6 +108,10 @@
 //! millionth. A pair that finishes below the floor is scored again by
 //! [`align_banded_f64`], and so is a read whose qualities could overflow the
 //! kernels. The GPU's scores carry the same check with them (`gpu::GpuScore`).
+//! Computing in `f32` and redoing a pair in `f64` is what Intel's GKL does
+//! for GATK; what compair adds is the trigger, a bound that a flush cannot
+//! cross rather than a fixed threshold on the result (GKL's `1e-28`), which
+//! cannot see a cell flushed early in a pair that ends well above it.
 //! The proof
 //! needs every emission and the transitions out of every state to be at most
 //! one: a base error

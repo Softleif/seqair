@@ -3,7 +3,7 @@
 ## `pairhmm-testdata.txt`
 
 104 read/haplotype vectors with GATK's own expected log10 likelihoods, from Intel's
-Genomics Kernel Library (<https://github.com/IntelLabs/GKL>, Apache-2.0), which in
+Genomics Kernel Library (<https://github.com/IntelLabs/GKL>, MIT), which in
 turn took them from the Genome Analysis Toolkit
 (<https://github.com/broadinstitute/gatk>, Apache-2.0/BSD).
 
