@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AlignedPairsWithRef::nm` and `md` count a read `=` under `M` as a match**, as `samtools calmd` does; with records now keeping `=`, they counted it as a mismatch. A reference ambiguity code still mismatches every read base, because `RefSeq` holds it as `N` (calmd matches it against the same code).
 - **`BamWriter::write_store_record` is lossless:** it wrote `N` for `=` and every ambiguity code. It now packs the stored codes, so a record read with `fetch_into` writes back with the SEQ it was read with.
 - The indexed CRAM reader reads a container header field by field, as the stream does: `fetch_into` failed with `CramError::Truncated` on a container of a few hundred slices, whose header did not fit the fixed 1 KiB it read.
 - A CRAM container header with a negative landmark count is `CramError::InvalidLength` (was `AllocationTooLarge`); a FASTA sequence shorter than the CRAM header's `LN` is `CramError::ReferenceTooShort` in the stream (was a FASTA out-of-bounds error).
