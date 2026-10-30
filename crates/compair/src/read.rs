@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    transitions::{Growth, MIN_GAP_OPEN_QUALITY, Transition},
+    transitions::{Growth, MIN_GAP_OPEN_QUALITY, Start, Transition},
     types::{ErrorTable, Observation},
 };
 use seqair_types::{Base, BaseQuality, QPos, Strand};
@@ -30,6 +30,9 @@ pub struct Read {
     transitions: Box<[Transition]>,
     /// [`Read::growth_bound`], taken once per read rather than once per pair.
     growth_bound: Option<Growth>,
+    /// Row 0 of every alignment of this read, from its first base's
+    /// transitions.
+    start: Start,
     strand: Strand,
 }
 
@@ -146,12 +149,14 @@ impl Read {
             .collect();
         let error_probabilities = base_quals.iter().map(|q| table.probability(*q)).collect();
         let growth_bound = steady_growth(&transitions, deletion_quals, gap_quals);
+        let start = Start::of(transitions.first());
         Ok(Self {
             bases,
             quals: quals.into_boxed_slice(),
             error_probabilities,
             transitions,
             growth_bound,
+            start,
             strand,
         })
     }
@@ -206,6 +211,11 @@ impl Read {
         self.transitions.get(index).copied()
     }
 
+    /// Row 0 of the recurrence for this read ([`Start`]).
+    pub(crate) fn start(&self) -> Start {
+        self.start
+    }
+
     /// What the recurrence can grow a value by over this read's rows: one
     /// pass over them, which is why it is not taken for every pair.
     pub(crate) fn growth(&self) -> Growth {
@@ -255,7 +265,7 @@ fn steady_growth(
     }
     let table = ErrorTable::get();
     let open = |q: u8| table.probability(BaseQuality::from_byte(q.max(MIN_GAP_OPEN_QUALITY)));
-    Some(Growth::steady(transitions.len(), open(low), open(high), first.indel_to_match))
+    Some(Growth::steady(transitions.len(), open(low), open(high), first))
 }
 
 /// GATK's PCR indel model: a gap opens more easily inside a tandem repeat,

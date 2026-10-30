@@ -3,7 +3,8 @@
 //! The dynamic program is GATK's: match, insertion and deletion states, with
 //! the transitions out of a match derived from per-base insertion and deletion
 //! qualities and the transitions out of an indel from a gap-continuation
-//! penalty. What is pluggable is the match state's emission, and the reason is
+//! penalty. It departs from GATK's only at the two ends of a read, which it
+//! scores alike ([below](#where-compair-differs-from-gatk)). What is pluggable is the match state's emission, and the reason is
 //! conversion chemistry: under TAPS a methylated cytosine reads as `T`, so
 //! scoring a `T` against a `C` as a plain mismatch loses a real alignment while
 //! scoring it as a free match loses every real `C>T` variant. `TapsEmission`
@@ -115,6 +116,75 @@
 //! count as Q6, as GATK raises them. It does not need a cell to be a
 //! probability, which it is not where a read's gap qualities change from
 //! row to row: GATK's recurrence takes a cell's transitions from two rows.
+//!
+//! # Where compair differs from GATK
+//!
+//! At the two ends of a read, and nowhere else.
+//!
+//! **What GATK does.** Its pair-HMM starts every read in the deletion row
+//! (`D[0][j] = 1 / |H|`, the match and insertion rows zero) and sums the last
+//! row's match *and* insertion cells. So a read's first base must be matched,
+//! but its last base may be an insertion. GATK's own write-up of the model
+//! (David Benjamin, *Pair HMM probabilistic realignment in HaplotypeCaller and
+//! Mutect*, `docs/pair_hmm.pdf` in the GATK repository, footnote 4) notes that
+//! an alignment cannot start with an insertion though it may end with one,
+//! and that "this limitation is unnecessary and could be fixed".
+//!
+//! **Why it matters.** A base at either end of a read that disagrees with the
+//! haplotype is a mismatch, `eps / 3`; at the last base it can also be a
+//! one-base insertion, `match_to_insertion`. At Q40 bases and a Q44 gap open
+//! that is `3.3e-5` against `4.0e-5`, so a mismatch at a read's last base is
+//! about 2.2 times as likely as the same mismatch at its first base: `0.34`
+//! in log10 per read, against the haplotype that lacks the base. For a base
+//! the conversion-aware emission scores as converted the gap is smaller
+//! (`0.015` at a conversion rate of `1.1e-3`). Nothing in the chemistry
+//! favours one end in reference orientation: the pair-HMM sees a forward
+//! read's 3' end on the right and a reverse read's on the left. rastair found
+//! this because a scenario and its reverse complement, every read on the
+//! other strand, were genotyped with different likelihoods: in the mirror the
+//! reads that had ended on a variant began on it.
+//!
+//! **What compair does instead.**
+//!
+//! - *A read may begin with an insertion*, opened at its first base's
+//!   insertion quality, as it may end with one. The free start goes to the
+//!   first match at `indel_to_match` per column, as in GATK, and to an
+//!   insertion of the first base at `match_to_insertion`. This is the begin
+//!   state of the pair-HMM of Durbin et al. (*Biological Sequence Analysis*,
+//!   ch. 4), which may enter any state, made to mirror GATK's end.
+//! - *An insertion lies between two haplotype bases*, at the end as at the
+//!   start: the insertion cell of the last haplotype column is left out of
+//!   the total, as no read can insert before the first column. So a read must
+//!   lie within its haplotype, as GATK assumes of its haplotypes; a read that
+//!   runs past the haplotype's end, which GATK scores as an insertion of the
+//!   overhang, is impossible here, as a read that starts before it already is
+//!   in both.
+//!
+//! With these the model is mirror-symmetric: scoring a read and a haplotype
+//! gives what scoring their reverse complements gives, wherever the read's gap
+//! qualities are the same at every base. Where they vary along the read (as a
+//! tandem-repeat gap model makes them) it is not and cannot be, since GATK's
+//! recurrence charges a gap's opening and closing to one of the two rows it
+//! joins.
+//!
+//! **When the numbers differ from GATK's.** Every read picks up the paths that
+//! begin with an insertion, about `match_to_insertion` of its likelihood
+//! (`1.7e-5` in log10 at Q44) when its first base fits the haplotype. GATK's
+//! 104 published vectors (Q40 insertion qualities) move by `4e-5` to
+//! `1.1e-4`, and agree with GATK to `1e-5` once the paths that begin with an
+//! insertion are added to its numbers, which `tests/gatk_vectors.rs` does
+//! independently of the kernels. The difference is large only
+//! where a read's first base disagrees with the haplotype, which now scores
+//! as a mismatch at the last base always did, and where a read runs to the
+//! haplotype's last base and its last base disagrees, which now scores as a
+//! mismatch at the first base always did.
+//!
+//! **Why GATK keeps it**, as far as we can tell: the effect is confined to
+//! the last one or two bases of a read (a two-base insertion costs another
+//! `gap_continuation`, `0.1`), GATK caps each read's likelihood with a global
+//! mismapping rate and clips low-quality read tails, and its recurrence is
+//! reproduced bit for bit by the Java code, Intel's vectorised native kernels,
+//! FPGA and GPU ports, all of which a change would have to follow.
 
 mod banded;
 mod batch;
