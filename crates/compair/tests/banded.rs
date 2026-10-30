@@ -337,13 +337,11 @@ fn a_band_that_misses_the_alignment_underestimates() {
 /// The transitions at row `i` are derived from read base `i - 1`, so a gap is
 /// charged the insertion or deletion quality of the base on one particular side
 /// of it. Reverse-complementing puts the other base there, and the two scores
-/// part company. With *uniform* indel qualities the effect all but vanishes
-/// (~1e-4, from the boundary alone: the free start is encoded in the deletion
-/// row and cannot begin in an insertion, while the free end is a plain sum over
-/// the match and insertion rows); it is the per-base indel qualities that make
-/// it large. So the OT/OB mirror is a property of the *emission*, tested exactly
-/// in `tests/emission.rs`, and the DP's only dependence on strand is that one
-/// call.
+/// part company. With *uniform* indel qualities the model is mirror-symmetric
+/// (`tests/symmetry.rs`), since a read may begin with an insertion as it may
+/// end with one; it is the per-base indel qualities alone that break it here.
+/// The OT/OB mirror of the emission is tested exactly in `tests/emission.rs`,
+/// and the DP's only dependence on strand is that one call.
 #[test]
 #[allow(
     clippy::cast_possible_truncation,
