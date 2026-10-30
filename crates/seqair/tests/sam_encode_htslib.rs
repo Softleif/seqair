@@ -1,4 +1,4 @@
-//! `SamRecordEncoder` against htslib (samtools 1.24's `sam_parse1` +
+//! `SamRecordEncoder` against htslib (samtools 1.25's `sam_parse1` +
 //! `bam_write1`, and rust-htslib's bundled htslib) and noodles.
 #![allow(
     clippy::unwrap_used,
