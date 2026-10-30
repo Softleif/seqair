@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cast of a stored base to `u8` (`rec.base_at(q) as u8`) still compiles but now gives the 4-bit code, not the ASCII letter: use `to_ascii()` or `to_base()`.
 - `FaiEntry`'s `linebases`/`linewidth` fields are replaced by `layout: fasta::LineLayout`, which only a valid pair constructs (`LineLayout::new(linebases, linewidth)`: nonzero `linebases`, a terminator of 0, 1 or 2 bytes as `fasta::LineTerminator`). `FaiEntryError::{ZeroLinebases, LinewidthTooSmall, LineTerminatorTooLong}` become `FaiEntryError::InvalidLineLayout { name, kind: fasta::LineLayoutError }`.
 
+### Removed
+
+- `bam::seq::encode_bases_into` (`&[Base]` to packed SEQ) and its SIMD kernel: nothing packs `Base`s any more. Use `encode_iupac_bases_into` with `IupacBase::from`.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added
