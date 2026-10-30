@@ -33,7 +33,10 @@ use compair::{
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
-use support::{Case, any_conversion, any_probability, arbitrary_case, derived_case, length};
+use support::{
+    Case, any_base, any_conversion, any_probability, any_strand, arbitrary_case, derived_case,
+    length,
+};
 
 /// `|Δ log10|` the GPU may differ from the strip kernel by: the GATK vectors'
 /// tolerance. Measured: 6e-7 at worst on the 10s pairs.
@@ -177,6 +180,78 @@ fn the_kernel_algorithm_is_the_strip_kernel(tc: TestCase) {
     let uniform = tc.draw(any_probability());
     for_each_emission(&cases, conversion, uniform, |name, pairs, strips, rescue| {
         assert_eq!(bits(&rescue(&pairs.emulate(Subnormals::Kept))), bits(&strips), "{}", name);
+    });
+}
+
+/// A read cut from its haplotype, flush with the last column half the time,
+/// then given a mismatching first base, an inserted one, or neither, under a
+/// band anchored at its start: the ends where row 0's three cells and the
+/// last column's insertion decide the score. Insertion qualities range widely,
+/// so that an insertion opens both more and less easily than it continues.
+#[hegel::composite]
+fn ends_case_inner(tc: &TestCase) -> (Case, Band) {
+    let h = tc.draw_silent(length(2, 40));
+    let bases = tc.draw_silent(gs::vecs(any_base()).min_size(h).max_size(h));
+    let n = tc.draw_silent(length(1, h));
+    let start =
+        if tc.draw_silent(gs::booleans()) { h - n } else { tc.draw_silent(length(0, h - n)) };
+    let mut read: Vec<Base> = bases.get(start..start + n).unwrap_or_default().to_vec();
+    match tc.draw_silent(length(0, 2)) {
+        1 => {
+            let order = [Base::A, Base::C, Base::G, Base::T];
+            if let Some(first) = read.first_mut() {
+                let at = order.iter().position(|base| base == first).unwrap_or(0);
+                let shift = tc.draw_silent(length(1, 3));
+                *first = order.get((at + shift) % 4).copied().unwrap_or(Base::A);
+            }
+        }
+        2 => read.insert(0, tc.draw_silent(any_base())),
+        _ => {}
+    }
+    let quality = |lo: u8| {
+        BaseQuality::from_byte(tc.draw_silent(gs::integers::<u8>().min_value(lo).max_value(45)))
+    };
+    let base_quals: Vec<BaseQuality> = read.iter().map(|_| quality(10)).collect();
+    let strand = tc.draw_silent(any_strand());
+    let Ok(read) = Read::uniform(read, &base_quals, quality(5), quality(5), quality(1), strand)
+    else {
+        tc.reject()
+    };
+    let betas = tc.draw_silent(gs::vecs(any_probability()).min_size(h).max_size(h));
+    let offset = i32::try_from(start).unwrap_or(0);
+    let width = tc.draw_silent(gs::integers::<u32>().min_value(2).max_value(48));
+    let Ok(band) = Band::new(width, offset) else { tc.reject() };
+    (Case { haplotype: Haplotype::new(bases), read, offset, betas }, band)
+}
+
+fn ends_case() -> impl PrintableGenerator<(Case, Band)> {
+    ends_case_inner().print_as_debug()
+}
+
+/// The transcription is the strip kernel bit for bit, and the device is the
+/// transcription, on reads that begin with a mismatch or an insertion and end
+/// at the haplotype's last column.
+#[hegel::test(test_cases = pinned::cases(256))]
+fn reads_at_the_haplotype_ends_are_the_strip_kernel(tc: TestCase) {
+    let count = tc.draw(length(1, 12));
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(ends_case())).collect();
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let context = context();
+    let mut aligner = context.map(GpuAligner::new);
+    for_each_emission(&cases, conversion, uniform, |name, pairs, strips, rescue| {
+        assert_eq!(bits(&rescue(&pairs.emulate(Subnormals::Kept))), bits(&strips), "{}", name);
+        let Some(aligner) = aligner.as_mut() else { return };
+        let gpu = bits(&raw(&aligner.align(pairs).expect("the launch runs")));
+        let flushed = bits(&raw(&pairs.emulate(Subnormals::Flushed)));
+        let kept = bits(&raw(&pairs.emulate(Subnormals::Kept)));
+        for (index, &score) in gpu.iter().enumerate() {
+            assert!(
+                Some(&score) == flushed.get(index) || Some(&score) == kept.get(index),
+                "{name}: pair {index} scored {} on the GPU",
+                f64::from_bits(score),
+            );
+        }
     });
 }
 

@@ -19,7 +19,7 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     reference::pair_floor,
-    transitions::{Growth, Transition},
+    transitions::{Growth, Start, Transition},
     types::ErrorTable,
 };
 
@@ -43,9 +43,9 @@ pub(crate) struct PairRecord {
     pub(crate) hap_len: u32,
     pub(crate) offset: i32,
     pub(crate) half_width: u32,
-    /// `1 / h`, the read's free start, divided in `f32` as the CPU kernels do.
-    pub(crate) init: f32,
-    pub(crate) pad: u32,
+    /// Row 0's match, insertion and deletion cells: `Start::cells_f32` of
+    /// `1 / h`, so the bits are the CPU kernels'.
+    pub(crate) start: [f32; 3],
 }
 
 /// One read row as the shader reads it, twelve bytes.
@@ -134,6 +134,7 @@ struct ReadEntry {
     strand: Strand,
     /// `Read::growth_bound` and `Read::growth`, for each pair's trust floor.
     growth: (Option<Growth>, Growth),
+    start: Start,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -345,7 +346,8 @@ impl GpuPairs {
             });
         }
         let growth = (read.growth_bound(), read.growth());
-        self.reads.push(ReadEntry { first_row, len, strand: read.strand(), growth });
+        let start = read.start();
+        self.reads.push(ReadEntry { first_row, len, strand: read.strand(), growth, start });
         Ok(slot)
     }
 
@@ -424,6 +426,7 @@ impl GpuPairs {
             reason = "a haplotype is at most a few thousand bases"
         )]
         let init = if h == 0 { 0.0 } else { 1.0 / h as f32 };
+        let start = read_entry.start.cells_f32(init);
         let record = PairRecord {
             rows: read_entry.first_row,
             read_len: read_entry.len,
@@ -431,8 +434,7 @@ impl GpuPairs {
             hap_len: hap.len,
             offset: band.offset(),
             half_width,
-            init,
-            pad: 0,
+            start,
         };
         // A pair that never runs is `IMPOSSIBLE` on the CPU too, unchecked.
         let floor = match class {
