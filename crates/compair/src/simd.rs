@@ -286,8 +286,9 @@ fn strip_kernel_simd<S: Simd>(
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,
+    start: Start,
 ) -> Log10Likelihood {
-    strip_kernel::<f32x8<S>>(simd, plan, rows, shape, band)
+    strip_kernel::<f32x8<S>>(simd, plan, rows, shape, band, start)
 }
 
 #[simd]
@@ -329,8 +330,9 @@ pub(crate) fn strip_kernel_at(
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,
+    start: Start,
 ) -> Log10Likelihood {
-    dispatch!(level, simd => strip_kernel_simd(simd, plan, rows, shape, band))
+    dispatch!(level, simd => strip_kernel_simd(simd, plan, rows, shape, band, start))
 }
 
 /// The batch kernel at `level`.

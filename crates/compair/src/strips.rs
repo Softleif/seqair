@@ -49,6 +49,7 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     reference::trusted,
+    transitions::Start,
     types::Log10Likelihood,
 };
 
@@ -124,8 +125,14 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let score =
-            crate::simd::strip_kernel_at(level, self.plan.view(), &mut self.rows, shape, band);
+        let score = crate::simd::strip_kernel_at(
+            level,
+            self.plan.view(),
+            &mut self.rows,
+            shape,
+            band,
+            read.start(),
+        );
         trusted(score, haplotype, read, emission, band)
     }
 
@@ -139,7 +146,8 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let score = strip_kernel::<L>((), self.plan.view(), &mut self.rows, shape, band);
+        let score =
+            strip_kernel::<L>((), self.plan.view(), &mut self.rows, shape, band, read.start());
         trusted(score, haplotype, read, emission, band)
     }
 }
@@ -421,17 +429,21 @@ impl<'a> Buffers<'a> {
 /// lanewise maximum of every lane at every step, of which only the last lane
 /// was ever read.
 struct Totals<L: Lane> {
-    /// `m + i` of the read's last row, accumulated in that row's lane.
+    /// `m + i` of the read's last row, accumulated in that row's lane, but
+    /// for the insertion cell of the haplotype's last column.
     total: L,
     /// That lane, as a mask, in the strip that holds the last row.
     summed: Option<L::Mask>,
+    /// The step at which that lane holds column `h`.
+    last_column: usize,
 }
 
 impl<L: Lane> Totals<L> {
     #[inline(always)]
-    fn absorb(&mut self, (m, i, _): (L, L, L)) {
+    fn absorb(&mut self, (m, i, _): (L, L, L), step: usize) {
         if let Some(keep) = self.summed {
-            self.total = self.total + L::masked(keep, m + i);
+            let cell = if step == self.last_column { m } else { m + i };
+            self.total = self.total + L::masked(keep, cell);
         }
     }
 }
@@ -582,13 +594,13 @@ fn phase<L: Lane, const MASKED: bool>(
         else {
             return false;
         };
-        totals.absorb(cells);
+        totals.absorb(cells, d);
         let Some(cells) =
             step(strip, buffers, state, d + 1 - first, phase_mask::<L, MASKED>(&mut clock))
         else {
             return false;
         };
-        totals.absorb(cells);
+        totals.absorb(cells, d + 1);
         d += 2;
     }
     if d == to {
@@ -597,7 +609,7 @@ fn phase<L: Lane, const MASKED: bool>(
         else {
             return false;
         };
-        totals.absorb(cells);
+        totals.absorb(cells, d);
     }
     true
 }
@@ -625,22 +637,28 @@ pub(crate) fn strip_kernel<L: Lane>(
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,
+    start: Start,
 ) -> Log10Likelihood {
     let Shape { haplotype: h, read: r } = shape;
     // Columns `0..=h` behind the front pad, and one window past `h` for the
     // lanes that run past the haplotype.
     rows.reset(FRONT + h + 1 + LANE_MAX);
 
-    // The read's free start: row 0 holds `1 / h` in the deletion matrix at
-    // every column the band contains.
-    let init = 1.0 / h as f32;
+    // The read's free start (`Start`): row 0 holds its three cells at every
+    // column the band contains.
+    let [start_m, start_i, start_d] = start.cells_f32(1.0 / h as f32);
+    let crossing_start = start_m.max(start_i).max(start_d);
     let mut crossing_max = 0.0f32;
     for column in 0..=h {
         if (column as i64 - band.offset).abs() <= band.half_width
-            && let Some(cell) = rows.d.get_mut(FRONT + column)
+            && let (Some(m), Some(i), Some(d)) = (
+                rows.m.get_mut(FRONT + column),
+                rows.i.get_mut(FRONT + column),
+                rows.d.get_mut(FRONT + column),
+            )
         {
-            *cell = init;
-            crossing_max = init;
+            (*m, *i, *d) = (start_m, start_i, start_d);
+            crossing_max = crossing_start;
         }
     }
 
@@ -772,6 +790,7 @@ pub(crate) fn strip_kernel<L: Lane>(
             } else {
                 None
             },
+            last_column: h + r.saturating_sub(r0),
         };
         let edges = sweep.edges.lanes::<L>(token);
 
@@ -829,7 +848,7 @@ pub(crate) fn strip_kernel<L: Lane>(
         // Column 0 belongs to the free start alone: every row below row 0 is
         // zero there. The eight-lane strip's last lane stores it, as a
         // masked zero, on the way past; the scalar strip's stores begin at
-        // its first live column, which is 1, and would leave row 0's `init`
+        // its first live column, which is 1, and would leave row 0's start
         // for the next row's diagonal prime to read.
         if s == 0 {
             for buffer in [&mut *buffers.m, &mut *buffers.i, &mut *buffers.d] {
