@@ -16,5 +16,7 @@ mod reader;
 mod strip;
 
 pub use gzi::{BlockLocation, GziError, GziIndex};
-pub use index::{FaiEntry, FaiEntryError, FaiError, FastaIndex};
+pub use index::{
+    FaiEntry, FaiEntryError, FaiError, FastaIndex, LineLayout, LineLayoutError, LineTerminator,
+};
 pub use reader::{FastaError, IndexedFastaReader};

@@ -34,7 +34,9 @@ use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
-use seqair::fasta::{FaiEntry, FaiEntryError, FaiError, FastaIndex, IndexedFastaReader};
+use seqair::fasta::{
+    FaiEntry, FaiEntryError, FaiError, FastaIndex, IndexedFastaReader, LineLayout,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -307,8 +309,7 @@ fn qual_byte_offset_is_none_for_a_fasta_index() {
         name: "s".into(),
         length: 100,
         offset: 10,
-        linebases: 50,
-        linewidth: 51,
+        layout: LineLayout::new(50, 51).unwrap(),
         qual_offset: None,
     };
     assert_eq!(e.qual_byte_offset(0), None);

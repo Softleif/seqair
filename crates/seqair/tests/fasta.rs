@@ -18,7 +18,7 @@ use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
-use seqair::fasta::{FaiEntry, IndexedFastaReader};
+use seqair::fasta::{FaiEntry, IndexedFastaReader, LineLayout, LineTerminator};
 use std::{io::Write, path::Path};
 use tempfile::TempDir;
 
@@ -73,8 +73,7 @@ fn byte_offset_indexes_correct_character_in_fasta(tc: TestCase) {
         name: "test".into(),
         length: n_bases,
         offset: 0,
-        linebases,
-        linewidth,
+        layout: LineLayout::new(linebases, linewidth).unwrap(),
         qual_offset: None,
     };
 
@@ -452,12 +451,15 @@ fn absurd_line_width_is_rejected_at_open() {
             err,
             seqair::fasta::FastaError::Fai {
                 source: seqair::fasta::FaiError::InvalidEntry {
-                    kind: seqair::fasta::FaiEntryError::LineTerminatorTooLong { .. },
+                    kind: seqair::fasta::FaiEntryError::InvalidLineLayout {
+                        kind: seqair::fasta::LineLayoutError::TerminatorTooLong { .. },
+                        ..
+                    },
                     ..
                 }
             }
         ),
-        "expected LineTerminatorTooLong, got {err:?}"
+        "expected TerminatorTooLong, got {err:?}"
     );
 }
 
@@ -655,4 +657,64 @@ fn fetch_into_matches_fetch_at_random_positions(tc: TestCase) {
     assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
     let hts = htslib_fetch("bacteriophage_lambda_CpG", start, stop);
     assert_eq!(alloc, hts, "seqair vs htslib mismatch at {}-{}", start, stop);
+}
+
+// r[verify fasta.fetch.line_stride]
+// r[verify fasta.fetch.newline_stripping]
+// r[verify fasta.bgzf.decompress]
+/// Plain and BGZF, LF and CRLF, soft-masked IUPAC bases, and files the `.fai`
+/// misdescribes — a stray `\r`, a terminator overwritten by a base, a
+/// terminator moved one byte: a fetch is the span's bytes with every `\n` and
+/// `\r` dropped, uppercased, whichever way the reader strips them.
+#[hegel::test(test_cases = crate::pinned::cases(64))]
+fn fetch_is_the_stripped_span_whether_or_not_the_index_fits(tc: TestCase) {
+    let terminator =
+        if tc.draw(gs::booleans()) { LineTerminator::CrLf } else { LineTerminator::Lf };
+    let linebases = tc.draw(gs::integers::<usize>().min_value(1).max_value(120));
+    let len = tc.draw(gs::integers::<usize>().min_value(1).max_value(2000));
+    let bases =
+        tc.draw(gs::vecs(gs::sampled_from(b"ACGTNRYacgtnry".to_vec())).min_size(len).max_size(len));
+    let mut file = b">seq1\n".to_vec();
+    for line in bases.chunks(linebases) {
+        file.extend_from_slice(line);
+        file.extend_from_slice(terminator.bytes());
+    }
+    let layout = LineLayout::new(linebases as u64, linebases as u64 + terminator.width()).unwrap();
+    let entry =
+        FaiEntry { name: "seq1".into(), length: len as u64, offset: 6, layout, qual_offset: None };
+    let at = tc.draw(gs::integers::<usize>().min_value(7).max_value(file.len() - 1));
+    match tc.draw(gs::integers::<u8>().max_value(3)) {
+        0 => {}
+        1 => file[at] = b'\r',
+        2 => file[at] = b'a',
+        _ => file.swap(at - 1, at),
+    }
+    let first = tc.draw(gs::integers::<u64>().max_value(len as u64 - 1));
+    let last = tc.draw(gs::integers::<u64>().min_value(first).max_value(len as u64 - 1));
+    let raw = &file
+        [entry.byte_offset(first).unwrap() as usize..=entry.byte_offset(last).unwrap() as usize];
+    let expected: Vec<u8> =
+        raw.iter().filter(|&&b| b != b'\n' && b != b'\r').map(u8::to_ascii_uppercase).collect();
+
+    let dir = TempDir::new().unwrap();
+    let fai = format!("seq1\t{len}\t6\t{linebases}\t{}\n", layout.linewidth());
+    let plain = dir.path().join("t.fa");
+    std::fs::write(&plain, &file).unwrap();
+    std::fs::write(dir.path().join("t.fa.fai"), &fai).unwrap();
+    let bgzf = dir.path().join("t.fa.gz");
+    let mut writer = seqair::io::BgzfWriter::new(std::fs::File::create(&bgzf).unwrap());
+    writer.write_all(&file).unwrap();
+    writer.finish().unwrap();
+    std::fs::write(dir.path().join("t.fa.gz.fai"), &fai).unwrap();
+    // One block: the file is far below 64 KiB, so the GZI has no entries.
+    std::fs::write(dir.path().join("t.fa.gz.gzi"), make_gzi_data(&[])).unwrap();
+
+    let request = RangeInclusive {
+        start: Pos0::try_from(first).unwrap(),
+        last: Pos0::try_from(last).unwrap(),
+    };
+    for path in [&plain, &bgzf] {
+        let fetched = IndexedFastaReader::open(path).unwrap().fetch_seq("seq1", request).unwrap();
+        assert_eq!(fetched, expected, "{}", path.display());
+    }
 }
