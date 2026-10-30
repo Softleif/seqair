@@ -61,12 +61,16 @@ const EMPTY_RECORD: [u8; FIXED_LEN + 2] = {
 /// `-1` or non-negative, and a mapped record's CIGAR covers its sequence. So
 /// no accessor can fail or panic.
 ///
-/// What is *not* checked, as htslib does not check it on read: the aux block
-/// (htslib passes a malformed one through untouched and only fails when it
-/// formats it; [`Aux::iter_checked`] and [`validate_aux`](super::aux::validate_aux)
-/// report it), and the stored `bin`, which is kept as the file has it (htslib
-/// recomputes it on read, so `samtools view -b` may rewrite it). A read name
-/// without its NUL terminator is rejected, where htslib repairs it.
+/// Two things are *not* checked, because htslib does not check them on read:
+///
+/// - The aux block. htslib passes a malformed one through untouched and fails
+///   only when formatting it. [`Aux::iter_checked`] and [`validate_aux`]
+///   report the problem.
+/// - The stored `bin`, kept as the file has it. htslib recomputes it on read,
+///   so `samtools view -b` may rewrite it.
+///
+/// One check is stricter than htslib: a read name without its NUL terminator
+/// is rejected, where htslib repairs it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RawBamRecord {
     payload: Vec<u8>,
