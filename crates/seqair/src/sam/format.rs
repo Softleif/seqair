@@ -317,7 +317,7 @@ fn put_decimal(out: &mut Vec<u8>, int: &[u8], frac: &[u8]) {
 /// digits, fixed notation for decimal exponents −4 to 5 and `d.ddddde±XX`
 /// otherwise, trailing zeros dropped. NaN prints `nan`, or `-nan` with its sign
 /// bit set (glibc and musl; macOS's libc prints `nan` for both).
-pub fn format_g(value: f64, out: &mut Vec<u8>) {
+pub(crate) fn format_g(value: f64, out: &mut Vec<u8>) {
     if value.is_sign_negative() {
         out.push(b'-');
     }
@@ -367,7 +367,7 @@ fn write_g_digits(digits: &[u8; 6], exp: i32, out: &mut Vec<u8>) {
 /// except that magnitudes in `[0.0001, 999999]` are scaled to a six-digit
 /// integer with round-half-even on the scaled `f64`, which can round
 /// differently from `%g`'s exact rounding.
-pub fn format_kputd(value: f64, out: &mut Vec<u8>) {
+pub(crate) fn format_kputd(value: f64, out: &mut Vec<u8>) {
     if value == 0.0 {
         out.extend_from_slice(if value.is_sign_negative() { b"-0" } else { b"0" });
         return;
@@ -482,5 +482,108 @@ mod kernel_tests {
         for level in crate::simd_levels::levels() {
             assert_eq!(run(level), expected, "{level:?}");
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/float_oracles.rs"]
+mod float_oracles;
+
+/// The float printers against their C originals: `format_g` against libc's
+/// `snprintf("%g")`, `format_kputd` against htslib's `kputd`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test code")]
+mod float_tests {
+    use super::float_oracles::{arb_f32, arb_f64, expect_from_libc, htslib_kputd, libc_g};
+    use super::{format_g, format_kputd};
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    fn ours(f: fn(f64, &mut Vec<u8>), value: f64) -> Vec<u8> {
+        // Something already in `out` must stay there.
+        let mut out = b"x".to_vec();
+        f(value, &mut out);
+        assert_eq!(out[0], b'x');
+        out.split_off(1)
+    }
+
+    // r[verify sam.format.float_g]
+    #[hegel::test]
+    fn format_g_matches_libc_for_doubles(tc: TestCase) {
+        let value = arb_f64(&tc, true);
+        let libc = expect_from_libc(value, libc_g(value));
+        assert_eq!(
+            ours(format_g, value).escape_ascii().to_string(),
+            libc.escape_ascii().to_string(),
+            "{value:e}"
+        );
+    }
+
+    // r[verify sam.format.float_g]
+    #[hegel::test]
+    fn format_g_matches_libc_for_floats(tc: TestCase) {
+        let value = f64::from(arb_f32(&tc, true));
+        let libc = expect_from_libc(value, libc_g(value));
+        assert_eq!(
+            ours(format_g, value).escape_ascii().to_string(),
+            libc.escape_ascii().to_string(),
+            "{value:e}"
+        );
+    }
+
+    // r[verify sam.format.float_kputd]
+    #[hegel::test]
+    fn format_kputd_matches_htslib(tc: TestCase) {
+        // `B:f` elements are f32, but kputd takes any double.
+        let value = if tc.draw(gs::booleans()) {
+            f64::from(arb_f32(&tc, true))
+        } else {
+            arb_f64(&tc, true)
+        };
+        let hts = expect_from_libc(value, htslib_kputd(value));
+        assert_eq!(
+            ours(format_kputd, value).escape_ascii().to_string(),
+            hts.escape_ascii().to_string(),
+            "{value:e}"
+        );
+    }
+
+    // r[verify sam.format.float_g]
+    // r[verify sam.format.float_kputd]
+    #[test]
+    fn float_printers_on_known_values() {
+        let g = |v| String::from_utf8(ours(format_g, v)).unwrap();
+        let k = |v| String::from_utf8(ours(format_kputd, v)).unwrap();
+        for (value, expected) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1.0, "1"),
+            (0.5, "0.5"),
+            (1e-5, "1e-05"),
+            (0.0001, "0.0001"),
+            (123_456.0, "123456"),
+            (1_234_567.0, "1.23457e+06"),
+            (1_234_565.0, "1.23456e+06"),
+            (9.999_995, "10"),
+            (1e100, "1e+100"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            (f64::NAN, "nan"),
+            (-f64::NAN, "-nan"),
+            (f64::from_bits(1), "4.94066e-324"),
+        ] {
+            assert_eq!(g(value), expected, "%g of {value:e}");
+        }
+        // kputd agrees with %g except where its scaled rounding differs.
+        // On doubles near a tie the scaled product rounds the other way (never on
+        // an f32, which is all `B:f` holds: every f32 in kputd's range agrees).
+        assert_eq!((g(1.000_005), k(1.000_005)), ("1.00001".into(), "1".into()));
+        assert_eq!((g(1000.015), k(1000.015)), ("1000.01".into(), "1000.02".into()));
+        assert_eq!((g(1.000_045), k(1.000_045)), ("1.00005".into(), "1.00004".into()));
+        assert_eq!(k(999_999.0), "999999");
+        assert_eq!(k(999_999.5), "1e+06");
+        assert_eq!(k(-0.0), "-0");
+        assert_eq!(k(-f64::NAN), "-nan");
+        assert_eq!(k(f64::NEG_INFINITY), "-inf");
     }
 }

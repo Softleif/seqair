@@ -4,9 +4,7 @@
 //! to a BAM file with `BamWriter::write_raw`, and read back by htslib, which
 //! formats each one through `sam_format1` over FFI; seqair streams the same
 //! file with `BamStreamReader` and formats each record. The two lines must be
-//! identical. The float printers are pinned to their C originals the same way:
-//! `format_g` to libc's `snprintf("%g")`, `format_kputd` to htslib's `kputd`.
-//! `samtools view` and the htslib SAM test corpus are the end-to-end checks.
+//! identical. `samtools view` and the htslib SAM test corpus are the end-to-end checks.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -26,62 +24,17 @@ mod raw_record_gen;
 
 use hegel::TestCase;
 use hegel::generators as gs;
-use raw_record_gen::{GenRecord, HTSLIB, arb_f32, arb_f64, arb_record};
+use raw_record_gen::float_oracles::{kstring_bytes, strip_mantissa_zeros};
+use raw_record_gen::{GenRecord, HTSLIB, arb_record};
 use rust_htslib::bam::{self as htsbam, Read as _};
 use rust_htslib::htslib;
 use seqair::bam::aux::AuxLayoutError;
 use seqair::bam::stream::BamStreamReader;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{BamHeader, RawBamRecord};
-use seqair::sam::format::{
-    ReferenceField, SamFormatError, format_g, format_kputd, format_sam_header, format_sam_record,
-};
+use seqair::sam::format::{ReferenceField, SamFormatError, format_sam_header, format_sam_record};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-// ---- float printers ------------------------------------------------------
-
-fn libc_g(value: f64) -> Vec<u8> {
-    let mut buf = [0u8; 64];
-    // SAFETY: `buf` is writable for its length and the format takes one double.
-    let n = unsafe { libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%g".as_ptr(), value) };
-    buf[..usize::try_from(n).unwrap()].to_vec()
-}
-
-/// `%g` output with the trailing zeros of an exponent form's mantissa
-/// removed, as the C standard requires. macOS's libc keeps them when the value
-/// is an exact tie rounded down (`1000005` prints `1.00000e+06`, glibc `1e+06`).
-fn strip_mantissa_zeros(g: &[u8]) -> Vec<u8> {
-    let Some(e) = g.iter().position(|&b| b == b'e') else { return g.to_vec() };
-    let (mantissa, exponent) = g.split_at(e);
-    if !mantissa.contains(&b'.') {
-        return g.to_vec();
-    }
-    let mut out = mantissa.to_vec();
-    while out.last() == Some(&b'0') {
-        out.pop();
-    }
-    if out.last() == Some(&b'.') {
-        out.pop();
-    }
-    out.extend_from_slice(exponent);
-    out
-}
-
-/// What `format_g` must print, given libc's output for `value`: the same,
-/// except where macOS's libc departs from glibc and musl, which seqair
-/// follows: a negative NaN prints `nan` there (`-nan` here), and the exact-tie
-/// trailing zeros of [`strip_mantissa_zeros`].
-fn expect_from_libc(value: f64, libc: Vec<u8>) -> Vec<u8> {
-    if !cfg!(target_os = "macos") {
-        return libc;
-    }
-    if value.is_nan() && value.is_sign_negative() {
-        assert_eq!(libc, b"nan");
-        return b"-nan".to_vec();
-    }
-    strip_mantissa_zeros(&libc)
-}
 
 /// A SAM line with macOS's `%g` trailing zeros removed from its `f`, `d` and
 /// `B:f` values (see [`strip_mantissa_zeros`]); the line itself elsewhere.
@@ -109,112 +62,6 @@ fn normalise_floats(line: &[u8]) -> Vec<u8> {
         })
         .collect();
     fields.join(&b'\t')
-}
-
-fn kstring_bytes(ks: &mut htslib::kstring_t) -> Vec<u8> {
-    let out = if ks.s.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: htslib wrote `l` bytes at `s`.
-        unsafe { std::slice::from_raw_parts(ks.s.cast::<u8>(), ks.l) }.to_vec()
-    };
-    // SAFETY: htslib allocates kstrings with malloc.
-    unsafe { libc::free(ks.s.cast()) };
-    ks.s = std::ptr::null_mut();
-    out
-}
-
-fn htslib_kputd(value: f64) -> Vec<u8> {
-    let mut ks = htslib::kstring_t { l: 0, m: 0, s: std::ptr::null_mut() };
-    // SAFETY: an empty kstring is valid input; kputd grows it.
-    let r = unsafe { htslib::kputd(value, &mut ks) };
-    assert!(r >= 0, "kputd failed");
-    kstring_bytes(&mut ks)
-}
-
-fn ours(f: fn(f64, &mut Vec<u8>), value: f64) -> Vec<u8> {
-    // Something already in `out` must stay there.
-    let mut out = b"x".to_vec();
-    f(value, &mut out);
-    assert_eq!(out[0], b'x');
-    out.split_off(1)
-}
-
-// r[verify sam.format.float_g]
-#[hegel::test]
-fn format_g_matches_libc_for_doubles(tc: TestCase) {
-    let value = arb_f64(&tc, true);
-    let libc = expect_from_libc(value, libc_g(value));
-    assert_eq!(
-        ours(format_g, value).escape_ascii().to_string(),
-        libc.escape_ascii().to_string(),
-        "{value:e}"
-    );
-}
-
-// r[verify sam.format.float_g]
-#[hegel::test]
-fn format_g_matches_libc_for_floats(tc: TestCase) {
-    let value = f64::from(arb_f32(&tc, true));
-    let libc = expect_from_libc(value, libc_g(value));
-    assert_eq!(
-        ours(format_g, value).escape_ascii().to_string(),
-        libc.escape_ascii().to_string(),
-        "{value:e}"
-    );
-}
-
-// r[verify sam.format.float_kputd]
-#[hegel::test]
-fn format_kputd_matches_htslib(tc: TestCase) {
-    // `B:f` elements are f32, but kputd takes any double.
-    let value =
-        if tc.draw(gs::booleans()) { f64::from(arb_f32(&tc, true)) } else { arb_f64(&tc, true) };
-    let hts = expect_from_libc(value, htslib_kputd(value));
-    assert_eq!(
-        ours(format_kputd, value).escape_ascii().to_string(),
-        hts.escape_ascii().to_string(),
-        "{value:e}"
-    );
-}
-
-// r[verify sam.format.float_g]
-// r[verify sam.format.float_kputd]
-#[test]
-fn float_printers_on_known_values() {
-    let g = |v| String::from_utf8(ours(format_g, v)).unwrap();
-    let k = |v| String::from_utf8(ours(format_kputd, v)).unwrap();
-    for (value, expected) in [
-        (0.0, "0"),
-        (-0.0, "-0"),
-        (1.0, "1"),
-        (0.5, "0.5"),
-        (1e-5, "1e-05"),
-        (0.0001, "0.0001"),
-        (123_456.0, "123456"),
-        (1_234_567.0, "1.23457e+06"),
-        (1_234_565.0, "1.23456e+06"),
-        (9.999_995, "10"),
-        (1e100, "1e+100"),
-        (f64::INFINITY, "inf"),
-        (f64::NEG_INFINITY, "-inf"),
-        (f64::NAN, "nan"),
-        (-f64::NAN, "-nan"),
-        (f64::from_bits(1), "4.94066e-324"),
-    ] {
-        assert_eq!(g(value), expected, "%g of {value:e}");
-    }
-    // kputd agrees with %g except where its scaled rounding differs.
-    // On doubles near a tie the scaled product rounds the other way (never on
-    // an f32, which is all `B:f` holds: every f32 in kputd's range agrees).
-    assert_eq!((g(1.000_005), k(1.000_005)), ("1.00001".into(), "1".into()));
-    assert_eq!((g(1000.015), k(1000.015)), ("1000.01".into(), "1000.02".into()));
-    assert_eq!((g(1.000_045), k(1.000_045)), ("1.00005".into(), "1.00004".into()));
-    assert_eq!(k(999_999.0), "999999");
-    assert_eq!(k(999_999.5), "1e+06");
-    assert_eq!(k(-0.0), "-0");
-    assert_eq!(k(-f64::NAN), "-nan");
-    assert_eq!(k(f64::NEG_INFINITY), "-inf");
 }
 
 // ---- records -------------------------------------------------------------

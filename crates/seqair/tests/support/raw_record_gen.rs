@@ -25,6 +25,10 @@ use hegel::generators as gs;
 use seqair::bam::BamHeader;
 use std::fmt::Write as _;
 
+#[path = "float_oracles.rs"]
+pub mod float_oracles;
+pub use float_oracles::{arb_f32, arb_f64};
+
 /// The targets of [`header`]: one long enough for any position BAM can hold.
 pub const TARGETS: [(&str, u32); 3] = [("chr1", i32::MAX as u32), ("chr2", 1000), ("chrM", 16569)];
 
@@ -212,82 +216,6 @@ fn any_cigar(tc: &TestCase, profile: Profile, seq_len: u32) -> Vec<u32> {
         ops.push(op(len, code));
     }
     ops
-}
-
-fn special_f64() -> Vec<f64> {
-    vec![
-        0.0,
-        -0.0,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NAN,
-        -f64::NAN,
-        f64::MIN_POSITIVE,
-        f64::from_bits(1),
-        f64::MAX,
-        f64::MIN,
-        f64::EPSILON,
-        1e-5,
-        0.0001,
-        0.000_099_999_99,
-        0.001,
-        0.009_999_999,
-        0.099_999_95,
-        0.999_999_5,
-        1.0,
-        9.999_995,
-        99_999.95,
-        99_999.97,
-        123_456.5,
-        999_998.5,
-        999_999.0,
-        999_999.4,
-        999_999.5,
-        1e6,
-        1_234_565.0,
-        1e15,
-        1e16,
-        1e100,
-        1e-100,
-        0.5,
-        0.25,
-        2.5e-5,
-        -123.456,
-        f64::from(f32::MAX),
-        f64::from(f32::MIN_POSITIVE),
-        f64::from(f32::from_bits(1)),
-    ]
-}
-
-/// A double from every corner: raw bit patterns, the special list, and
-/// decimals with seven significant digits (near-ties for six-digit rounding).
-pub fn arb_f64(tc: &TestCase, negative_nan: bool) -> f64 {
-    let v = match tc.draw_silent(n(0u8, 3)) {
-        0 => f64::from_bits(tc.draw_silent(gs::integers::<u64>())),
-        1 => tc.draw_silent(gs::sampled_from(special_f64())),
-        2 => {
-            let mantissa = tc.draw_silent(n(-10_000_000i64, 10_000_000));
-            let exp = tc.draw_silent(n(-15i32, 15));
-            mantissa as f64 * 10f64.powi(exp)
-        }
-        _ => tc.draw_silent(gs::floats::<f64>()),
-    };
-    if v.is_nan() && !negative_nan { f64::from_bits(v.to_bits() & !(1 << 63)) } else { v }
-}
-
-/// A float from the same corners, in `f32`.
-pub fn arb_f32(tc: &TestCase, negative_nan: bool) -> f32 {
-    let v = match tc.draw_silent(n(0u8, 3)) {
-        0 => f32::from_bits(tc.draw_silent(gs::integers::<u32>())),
-        1 => tc.draw_silent(gs::sampled_from(special_f64())) as f32,
-        2 => {
-            let mantissa = tc.draw_silent(n(-10_000_000i64, 10_000_000));
-            let exp = tc.draw_silent(n(-15i32, 15));
-            (mantissa as f64 * 10f64.powi(exp)) as f32
-        }
-        _ => tc.draw_silent(gs::floats::<f32>()),
-    };
-    if v.is_nan() && !negative_nan { f32::from_bits(v.to_bits() & !(1 << 31)) } else { v }
 }
 
 /// A float for a tag: finite unless `exotic`.
