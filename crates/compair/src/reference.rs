@@ -28,14 +28,43 @@ use crate::{
 /// Rows are renormalised by a power of two after each step, which is exact, so
 /// the result is the unscaled recurrence's to the last bit and cannot underflow
 /// on a long read against a haplotype it does not fit.
-#[allow(
-    clippy::indexing_slicing,
-    reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
-)]
 pub fn align_full<E: Emission>(
     haplotype: &Haplotype,
     read: &Read,
     emission: &E,
+) -> Log10Likelihood {
+    full(haplotype, read, emission, Ends::Symmetric)
+}
+
+/// [`align_full`] with GATK's ends: no read begins with an insertion, and an
+/// insertion after the haplotype's last base counts. For the tests that
+/// compare the recurrence with GATK's published numbers and with rust-bio,
+/// which share those ends; no kernel scores them.
+#[doc(hidden)]
+pub fn align_full_gatk<E: Emission>(
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+) -> Log10Likelihood {
+    full(haplotype, read, emission, Ends::Gatk)
+}
+
+/// How [`full`] starts and ends a read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ends {
+    Symmetric,
+    Gatk,
+}
+
+#[allow(
+    clippy::indexing_slicing,
+    reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
+)]
+fn full<E: Emission>(
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    ends: Ends,
 ) -> Log10Likelihood {
     let (h, r) = (haplotype.len(), read.len());
     if h == 0 || r == 0 {
@@ -45,7 +74,11 @@ pub fn align_full<E: Emission>(
         clippy::cast_precision_loss,
         reason = "a haplotype long enough to lose precision here does not exist"
     )]
-    let [start_m, start_i, start_d] = read.start().cells_f64(1.0 / h as f64);
+    let init = 1.0 / h as f64;
+    let [start_m, start_i, start_d] = match ends {
+        Ends::Symmetric => read.start().cells_f64(init),
+        Ends::Gatk => [0.0, 0.0, init],
+    };
     let mut prev_m = vec![start_m; h + 1];
     let mut prev_i = vec![start_i; h + 1];
     let mut prev_d = vec![start_d; h + 1];
@@ -85,7 +118,10 @@ pub fn align_full<E: Emission>(
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
 
-    let total = last_row_total(&prev_m, &prev_i);
+    let total = match ends {
+        Ends::Symmetric => last_row_total(&prev_m, &prev_i),
+        Ends::Gatk => prev_m.iter().zip(&prev_i).skip(1).map(|(m, i)| m + i).sum(),
+    };
     if total <= 0.0 {
         return Log10Likelihood::IMPOSSIBLE;
     }

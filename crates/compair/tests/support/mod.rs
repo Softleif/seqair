@@ -1,5 +1,6 @@
 use compair::{
-    Base, BaseQuality, Error, HapSite, Haplotype, Observation, Read, Strand, error_probability,
+    Base, BaseQuality, Error, HapSite, Haplotype, Observation, Read, StandardEmission, Strand,
+    align_full, error_probability,
 };
 
 /// The strand a mirrored case reports.
@@ -8,6 +9,48 @@ pub fn mirror_strand(strand: Strand) -> Strand {
         Strand::OT => Strand::OB,
         Strand::OB => Strand::OT,
     }
+}
+
+/// `align_full` with the plain emission, without the paths that begin with an
+/// insertion: GATK's likelihood, which does not allow them (the crate docs,
+/// *Where compair differs from GATK*), for a read that lies well inside its
+/// haplotype.
+///
+/// Those paths insert the read's first `k` bases and align the rest from a
+/// match, so they sum to `match_to_insertion(1) * S_2` with `S_k = G_k +
+/// gap_continuation(k) * S_(k + 1)`, `G_k` the likelihood without them of the
+/// read from base `k` on. compair's likelihood of that suffix is `C_k = G_k +
+/// match_to_insertion(k) * S_(k + 1)`, so `S_k = C_k + (gap_continuation(k) -
+/// match_to_insertion(k)) * S_(k + 1)`, summed from the read's end. The sums
+/// are kept relative to the whole read's likelihood, so nothing underflows.
+///
+/// It is exact but for the haplotype's two ends, which make it an
+/// approximation for a read whose paths reach them: an inserted start cannot
+/// lead into the first column, where `G_k` may begin, and compair leaves the
+/// insertion after the last column out of `C_k`. For a read that can sit
+/// anywhere (an all-`N` haplotype) and prefers insertions (Q2 bases) it is
+/// off by `0.08`.
+pub fn without_leading_insertions(haplotype: &Haplotype, read: &Read) -> f64 {
+    let score = |read: &Read| align_full(haplotype, read, &StandardEmission::default()).get();
+    let probability = |q: BaseQuality| 10f64.powf(-f64::from(q.as_byte()) / 10.0);
+    // GATK raises a gap-open quality below Q6 to Q6, and so does compair.
+    let opens = |q: BaseQuality| probability(BaseQuality::from_byte(q.as_byte().max(6)));
+    let whole = score(read);
+    let mut suffixes = 0.0f64;
+    for k in (1..read.len()).rev() {
+        let suffix = Read::new(
+            read.bases()[k..].to_vec(),
+            &read.base_quals()[k..],
+            &read.insertion_quals()[k..],
+            &read.deletion_quals()[k..],
+            &read.gap_quals()[k..],
+            read.strand(),
+        )
+        .expect("a suffix of a valid read");
+        let continues = probability(read.gap_quals()[k]) - opens(read.insertion_quals()[k]);
+        suffixes = 10f64.powf(score(&suffix) - whole) + continues * suffixes;
+    }
+    whole + (1.0 - opens(read.insertion_quals()[0]) * suffixes).log10()
 }
 
 /// One row of GATK's published pair-HMM test data.
