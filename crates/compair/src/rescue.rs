@@ -23,7 +23,8 @@
 //! reference stores.
 //!
 //! A row is never multiplied in place, so each buffer holds one row unscaled
-//! and is zero outside its span, as the reference's are.
+//! and is zero outside its span, as the reference's are. The start row holds
+//! `Start`'s cells in all three matrices.
 
 use fearless_simd::{Level, Select, Simd, SimdBase, dispatch};
 use fearless_simd_macros::simd;
@@ -200,8 +201,8 @@ fn score<E: Emission + ?Sized>(
     for rows in [&mut *above, &mut *below, &mut *a] {
         rows.prepare(width);
     }
-    // The start row: zero everywhere the first row reads it, but for the
-    // free start in its deletions.
+    // The start row: zero everywhere the first row reads it, but for the free
+    // start (`Start`).
     for buffer in [&mut above.m, &mut above.i, &mut above.d] {
         if let Some(cells) = buffer.get_mut(..(start.1 + PAD).min(width)) {
             cells.fill(0.0);
@@ -212,14 +213,18 @@ fn score<E: Emission + ?Sized>(
         reason = "a haplotype long enough to lose precision here does not exist"
     )]
     let init = 1.0 / h as f64;
-    if let Some(cells) = above.d.get_mut(start.0..=start.1) {
-        cells.fill(init);
+    let cells = read.start().cells_f64(init);
+    for (buffer, cell) in [&mut above.m, &mut above.i, &mut above.d].into_iter().zip(cells) {
+        if let Some(cells) = buffer.get_mut(start.0..=start.1) {
+            cells.fill(cell);
+        }
     }
     let tracks = Tracks { hits, misses };
     // The start row is stored unscaled and read at the row scale, as every
     // row is.
     let start = (start, row_shift_f64(init));
-    dispatch!(level, simd => kernel_simd(simd, plans, tracks, start, [above, below, a]))
+    let last_column = h + PAD;
+    dispatch!(level, simd => kernel_simd(simd, plans, tracks, start, last_column, [above, below, a]))
 }
 
 /// Zero columns either side of `0..=h` in every buffer, so a vector may read
@@ -370,9 +375,10 @@ fn kernel_simd<S: Simd>(
     plans: &[RowPlan],
     tracks: Tracks<'_>,
     start: ((usize, usize), i32),
+    last_column: usize,
     rows: [&mut Rows; 3],
 ) -> Log10Likelihood {
-    kernel(simd, plans, tracks, start, rows)
+    kernel(simd, plans, tracks, start, last_column, rows)
 }
 
 /// The rows two at a time: [`prepass`] for the first row's match and
@@ -384,6 +390,7 @@ fn kernel<S: Simd>(
     plans: &[RowPlan],
     tracks: Tracks<'_>,
     (start, start_shift): ((usize, usize), i32),
+    last_column: usize,
     [above, below, a]: [&mut Rows; 3],
 ) -> Log10Likelihood {
     // `above` holds the start row.
@@ -400,9 +407,11 @@ fn kernel<S: Simd>(
         };
         let max_a = prepass(simd, above, above_scale, pa, tracks, a);
         // Nothing reads `above` again but at column 0, where only the
-        // start row has a cell.
-        if let Some(cell) = above.d.get_mut(PAD) {
-            *cell = 0.0;
+        // start row has cells.
+        for buffer in [&mut above.m, &mut above.i, &mut above.d] {
+            if let Some(cell) = buffer.get_mut(PAD) {
+                *cell = 0.0;
+            }
         }
         let guess = row_shift_f64(max_a);
         let Some(pb) = pb else {
@@ -442,7 +451,11 @@ fn kernel<S: Simd>(
         .into_iter()
         .flatten()
         .zip(i.into_iter().flatten())
-        .map(|(m, i)| m * above_scale + i * above_scale)
+        .zip(above_span.0..)
+        // An insertion after the haplotype's last base does not count.
+        .map(|((m, i), column)| {
+            if column == last_column { m * above_scale } else { m * above_scale + i * above_scale }
+        })
         .sum();
     if total <= 0.0 {
         return Log10Likelihood::IMPOSSIBLE;

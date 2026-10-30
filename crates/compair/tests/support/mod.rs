@@ -414,7 +414,7 @@ pub fn forward_with(
     let init = 1.0 / h as f64;
     let mut prev_m = vec![0.0f64; h + 1];
     let mut prev_i = vec![0.0f64; h + 1];
-    let mut prev_d = vec![init; h + 1];
+    let mut prev_d = vec![0.0f64; h + 1];
     let (mut cur_m, mut cur_i, mut cur_d) =
         (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
 
@@ -431,6 +431,14 @@ pub fn forward_with(
         for j in 1..=h {
             let site = haplotype.site(j - 1)?;
             let p = prior(site, observation);
+            if i == 1 {
+                // The begin state: a free start at any column, into a match
+                // (paid for with `indel_to_match`) or an insertion.
+                cur_m[j] = p * init * i2m;
+                cur_i[j] = init * p_ins;
+                cur_d[j] = cur_m[j - 1] * p_del + cur_d[j - 1] * gap;
+                continue;
+            }
             cur_m[j] = p * (prev_m[j - 1] * m2m + prev_i[j - 1] * i2m + prev_d[j - 1] * i2m);
             cur_i[j] = prev_m[j] * p_ins + prev_i[j] * gap;
             cur_d[j] = cur_m[j - 1] * p_del + cur_d[j - 1] * gap;
@@ -439,7 +447,14 @@ pub fn forward_with(
         core::mem::swap(&mut prev_i, &mut cur_i);
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
-    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
+    // An insertion after the haplotype's last base does not count.
+    let total: f64 = prev_m
+        .iter()
+        .zip(prev_i.iter())
+        .enumerate()
+        .skip(1)
+        .map(|(j, (m, i))| if j == h { *m } else { m + i })
+        .sum();
     (total > 0.0).then(|| total.log10())
 }
 
