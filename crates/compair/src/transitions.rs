@@ -56,6 +56,71 @@ impl Transition {
     }
 }
 
+/// The free start: what row 0 of the recurrence holds in its match,
+/// insertion and deletion cells, as fractions of `1 / h`.
+///
+/// A read begins with its first base matched, at `indel_to_match(1)` per
+/// column as in GATK, or inserted, at `match_to_insertion(1)` per column,
+/// which GATK does not allow (why: the crate docs, *Where compair differs
+/// from GATK*). Row 1 is then `M[1][j + 1] = prior * indel_to_match(1) / h`
+/// and `I[1][j] = match_to_insertion(1) / h`. Every kernel computes row 1 from
+/// row 0 like any other row, so the start is written into row 0 as the cells
+/// that produce exactly that row 1 ([`Start::of`]), and no kernel needs a row
+/// of its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Start {
+    pub(crate) matched: f64,
+    pub(crate) inserted: f64,
+    pub(crate) deleted: f64,
+}
+
+impl Start {
+    /// GATK's start, for an empty read, which no kernel scores.
+    const DELETION_ONLY: Self = Self { matched: 0.0, inserted: 0.0, deleted: 1.0 };
+
+    /// The row 0 that gives row 1 its two starts for a read whose first base
+    /// has `first`'s transitions.
+    ///
+    /// Row 1 is `M = prior * (m * match_to_match + (i + d) * indel_to_match)`
+    /// and `I = m * match_to_insertion + i * gap_continuation`, so the wanted
+    /// row 1 is `i + d = 1` with `i * gap_continuation = match_to_insertion`
+    /// where an insertion opens no more easily than it continues, the usual
+    /// case; elsewhere `m = 1` gives the insertion and `d` makes up the match.
+    /// Neither leaves a cell negative.
+    pub(crate) fn of(first: Option<&Transition>) -> Self {
+        let Some(t) = first else { return Self::DELETION_ONLY };
+        if t.match_to_insertion <= t.gap_continuation {
+            let inserted = t.match_to_insertion / t.gap_continuation;
+            Self { matched: 0.0, inserted, deleted: 1.0 - inserted }
+        } else {
+            // `match_to_insertion > gap_continuation` makes `match_to_match <
+            // indel_to_match`, and `indel_to_match` positive.
+            let deleted = 1.0 - t.match_to_match / t.indel_to_match;
+            Self { matched: 1.0, inserted: 0.0, deleted }
+        }
+    }
+
+    /// Row 0's cells, match, insertion and deletion, for a haplotype whose
+    /// free start is `init = 1 / h`: the one product every `f64` kernel takes.
+    pub(crate) fn cells_f64(self, init: f64) -> [f64; 3] {
+        [init * self.matched, init * self.inserted, init * self.deleted]
+    }
+
+    /// [`Start::cells_f64`] for the `f32` kernels, which must all round the
+    /// same way to stay bit-identical.
+    #[allow(clippy::cast_possible_truncation, reason = "the f32 kernels' precision")]
+    pub(crate) fn cells_f32(self, init: f32) -> [f32; 3] {
+        [init * self.matched as f32, init * self.inserted as f32, init * self.deleted as f32]
+    }
+
+    /// What row 1 holds per column over `1 / h`, at most: the bound's
+    /// crossing out of row 0. Above one only where an insertion opens more
+    /// easily than it continues.
+    fn growth(first: &Transition) -> f64 {
+        (first.indel_to_match + first.match_to_insertion).max(1.0)
+    }
+}
+
 /// How much more than it received GATK's recurrence can hand on, over a read.
 ///
 /// The transitions out of one state sum to one, but the recurrence does not
@@ -95,7 +160,8 @@ impl Transition {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Growth {
     /// `log10` of the product of `gamma` over every row crossing of the
-    /// read, `1..r`: what the floors add.
+    /// read, `1..r`, and of the free start's crossing into row 1
+    /// ([`Start`]): what the floors add.
     pub(crate) log10_total: f64,
     /// The largest product of `gamma` over the crossings out of rows `R +
     /// 1..R + 8`, for `R = 0, 8, 16, ..`: from a row the strip kernels
@@ -128,7 +194,8 @@ impl Growth {
     /// The factors for a read whose row `i` has `transitions[i - 1]`.
     pub(crate) fn of(transitions: &[Transition]) -> Self {
         let mut growth = Self { log10_total: 0.0, window: 1.0, spill: 0.0, carry: 1.0 };
-        let (mut total, mut window) = (1.0f64, 1.0f64);
+        let mut total = transitions.first().map_or(1.0, Start::growth);
+        let mut window = 1.0f64;
         let mut previous: Option<(&Transition, f64)> = None;
         for (row, t) in (1usize..).zip(transitions) {
             // A read whose gap-continuation quality holds still divides once.
@@ -171,13 +238,15 @@ impl Growth {
     /// match_to_deletion(i + 1))`, at most `exp` of that. Over a stretch of
     /// crossings the product is at most `exp` of how far `match_to_deletion`
     /// falls along it, which is at most `high - low` in each of the at most
-    /// `ceil(n / 2)` separate descents that `n` crossings hold.
+    /// `ceil(n / 2)` separate descents that `n` crossings hold. The free
+    /// start's crossing is `first`'s, exactly.
     #[allow(clippy::cast_precision_loss, reason = "a count of rows, far below 2^52")]
-    pub(crate) fn steady(rows: usize, high: f64, low: f64, indel_to_match: f64) -> Self {
+    pub(crate) fn steady(rows: usize, high: f64, low: f64, first: &Transition) -> Self {
+        let indel_to_match = first.indel_to_match;
         let fall = |crossings: usize| (high - low) * crossings.div_ceil(2) as f64;
         let (total, window) = (fall(rows.saturating_sub(1)), fall(WINDOW - 1));
         Self {
-            log10_total: total * core::f64::consts::LOG10_E,
+            log10_total: total * core::f64::consts::LOG10_E + Start::growth(first).log10(),
             window: total.min(window).exp(),
             spill: high * run(indel_to_match),
             carry: 1.0,

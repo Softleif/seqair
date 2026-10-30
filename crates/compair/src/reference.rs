@@ -13,12 +13,17 @@ use crate::{
 /// The full `(read + 1) x (haplotype + 1)` dynamic program in `f64`, with no
 /// band.
 ///
-/// This is the crate's oracle: it reproduces GATK's `PairHMM` semantics, which
-/// are worth stating because two of them are easy to get wrong. The read may
-/// begin anywhere on the haplotype, encoded as `D[0][j] = 1 / haplotype_len`
-/// for every `j`, so the free start is paid for with one `indel_to_match`
-/// factor. And the total is the final row of the match and insertion matrices
-/// only: the deletion matrix is excluded, so a read may not end inside a gap.
+/// This is the crate's oracle. Its recurrence is GATK's `PairHMM`, and so are
+/// two conventions that are easy to get wrong: the read may begin anywhere on
+/// the haplotype, a `1 / haplotype_len` start in every column that is paid for
+/// with one `indel_to_match` factor, and the deletion matrix is left out of
+/// the total, so a read may not end inside a gap.
+///
+/// It differs from GATK at the two ends of the read, so that they are scored
+/// alike: a read may begin with an insertion, and an insertion after the
+/// haplotype's last base does not count. The crate docs, [*Where compair
+/// differs from GATK*](crate#where-compair-differs-from-gatk), say why and by
+/// how much.
 ///
 /// Rows are renormalised by a power of two after each step, which is exact, so
 /// the result is the unscaled recurrence's to the last bit and cannot underflow
@@ -36,13 +41,14 @@ pub fn align_full<E: Emission>(
     if h == 0 || r == 0 {
         return Log10Likelihood::IMPOSSIBLE;
     }
-    let mut prev_m = vec![0.0f64; h + 1];
-    let mut prev_i = vec![0.0f64; h + 1];
     #[allow(
         clippy::cast_precision_loss,
         reason = "a haplotype long enough to lose precision here does not exist"
     )]
-    let mut prev_d = vec![1.0 / h as f64; h + 1];
+    let [start_m, start_i, start_d] = read.start().cells_f64(1.0 / h as f64);
+    let mut prev_m = vec![start_m; h + 1];
+    let mut prev_i = vec![start_i; h + 1];
+    let mut prev_d = vec![start_d; h + 1];
     let mut exponent = 0i32;
     rescale_row(&mut prev_m, &mut prev_i, &mut prev_d, &mut exponent);
 
@@ -79,11 +85,18 @@ pub fn align_full<E: Emission>(
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
 
-    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
+    let total = last_row_total(&prev_m, &prev_i);
     if total <= 0.0 {
         return Log10Likelihood::IMPOSSIBLE;
     }
     Log10Likelihood::new(total.log10() - f64::from(exponent) * core::f64::consts::LOG10_2)
+}
+
+/// The total over the last row's columns `1..=h`: every match cell, and the
+/// insertion cells but the last column's, an insertion after the haplotype.
+fn last_row_total(m: &[f64], i: &[f64]) -> f64 {
+    let last = m.len().saturating_sub(1);
+    m.iter().zip(i).enumerate().skip(1).map(|(j, (m, i))| if j == last { *m } else { m + i }).sum()
 }
 
 fn rescale_row(m: &mut [f64], i: &mut [f64], d: &mut [f64], exponent: &mut i32) {
@@ -144,7 +157,10 @@ pub fn align_banded_f64_rows<E: Emission + ?Sized>(
     let init = 1.0 / h as f64;
     // The start row at the row scale too, like every row after it.
     let mut exponent = row_shift_f64(init);
-    prev_d[prev_span.0..=prev_span.1].fill(init * exp2_f64(exponent));
+    let start = read.start().cells_f64(init * exp2_f64(exponent));
+    for (buffer, cell) in [&mut prev_m, &mut prev_i, &mut prev_d].into_iter().zip(start) {
+        buffer[prev_span.0..=prev_span.1].fill(cell);
+    }
     let (mut cur_m, mut cur_i, mut cur_d) =
         (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
     // What the `cur` buffers still hold from two rows up.
@@ -215,7 +231,7 @@ pub fn align_banded_f64_rows<E: Emission + ?Sized>(
         prev_span = (low, high);
     }
 
-    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
+    let total = last_row_total(&prev_m, &prev_i);
     if total <= 0.0 {
         return Log10Likelihood::IMPOSSIBLE;
     }
@@ -285,8 +301,10 @@ fn banded_row(
 /// there. What the flushes can lose, with `spill` and `carry` the read's
 /// `Growth` and `total = 10^log10_total`:
 ///
-/// - *The scale.* The free start puts `1 / h` into each row-0 column that
-///   feeds row 1, `rho` in all. So a match or insertion cell of the
+/// - *The scale.* The free start puts at most `max(1, indel_to_match +
+///   match_to_insertion) / h` into row 1 per row-0 column that feeds it
+///   (`Start`), the first factor of `Growth::total`, and `rho` is `1 / h`
+///   times the count of those columns. So a match or insertion cell of the
 ///   recurrence is at most `rho * total`, any cell at most `max(1, spill)`
 ///   times that, and the power of two `2^e` a renormalised row is stored at
 ///   has `2^-e <= max(1, spill) * rho * total * 2^-STRIP_SCALE`. Where the
@@ -420,11 +438,12 @@ fn row_columns(band: Band, limit: usize) -> usize {
     width.saturating_add(1).min(limit)
 }
 
-/// The row-0 columns inside the band that feed row 1, `0..h`: the cells the
-/// free start's `1 / h` goes into.
+/// The row-0 columns inside the band that feed row 1, `0..=h`: the cells the
+/// free start goes into. Columns `0..h` feed row 1's match cells and `1..=h`
+/// its insertion cells, so this counts one column more than either.
 #[allow(clippy::cast_sign_loss, reason = "clamped at zero")]
 fn free_starts(band: Band, h: usize) -> usize {
-    let last = i64::try_from(h).unwrap_or(i64::MAX).saturating_sub(1);
+    let last = i64::try_from(h).unwrap_or(i64::MAX);
     let low = band.offset.saturating_sub(band.half_width).max(0);
     let high = band.offset.saturating_add(band.half_width).min(last);
     high.saturating_sub(low).saturating_add(1).max(0) as usize
