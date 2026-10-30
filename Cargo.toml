@@ -9,7 +9,7 @@ tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
 thiserror = "2.0.21"
 bytemuck = { version = "1.25", features = ["derive"] }
 insta = { version = "1.49.0", features = ["filters"] }
-hegeltest = "0.50.2"
+hegeltest = "0.51.0"
 rust-htslib = { version = "1.0.0", default-features = false }
 fearless_simd = "1.1.0"
 fearless_simd_macros = "0.1.0"
