@@ -168,16 +168,15 @@
 //! as [`PcrIndelModel`] makes them, GATK's recurrence charges each gap to one
 //! of the two rows it joins, and the orientation shows again:
 //!
-//! - *Deletions*: GATK's PCR model gives the gap after a base the quality of
-//!   the repeat that ends at the base or starts after it, so the gap just
-//!   before a repeat is cheap and the one just after it is not.
-//!   [`Read::with_pcr_indel_model`] gives a deletion between two bases the
-//!   higher of their qualities: cheap only inside a repeat, where a slipped
-//!   unit can always be deleted. Otherwise a mismatch beside a run scores up to
-//!   two in log10 apart in the two orientations, as the deletion of the base
-//!   next to the run is cheap in one and not in the other. What is left is
-//!   GATK's `match_to_match`, which takes the deletion quality of the gap after
-//!   the step's second base: bounded, and below `0.01` in log10 there.
+//! - *Deletions* are left as GATK has them, charged to the base before the
+//!   gap at that base's quality, so a deletion just after a run is as cheap
+//!   as one inside it and the same deletion just before the run is not. A
+//!   mismatch beside a run can score up to two in log10 apart in the two
+//!   orientations. Charging a deletion the higher of the two bases' qualities
+//!   is symmetric (up to GATK's `match_to_match`, below `0.01` in log10), but
+//!   on NA12878 chr12 at 26x it called about a hundred more false 1 bp
+//!   deletions in long homopolymers and lost deletion F1, so GATK's charge
+//!   stays until a calibrated repeat model replaces it.
 //! - *Insertions* are left as GATK has them, charged at their first inserted
 //!   base. A single inserted base is charged its own quality in either
 //!   orientation, but a longer insertion that runs out of a repeat is not: at a
