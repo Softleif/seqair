@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **Both ends of a read are scored alike, which GATK's pair-HMM does not do.** GATK starts every
+  read in the deletion row but sums the last row's match and insertion cells, so a read may end
+  with an insertion but not begin with one, and a mismatch at a read's last base is about twice
+  as likely as the same mismatch at its first (`0.34` in log10 at Q40 bases and a Q44 gap open).
+  Mirroring a read swaps its ends, so a scenario and its reverse complement were scored with
+  different likelihoods. Now a read may also begin with an insertion, opened at its first base's
+  insertion quality, and an insertion after the haplotype's last base no longer counts, as none
+  before its first ever did. The model is then mirror-symmetric wherever a read's gap qualities
+  are the same at every base (`tests/symmetry.rs`). Every likelihood moves, by about
+  `match_to_insertion` of itself (`1.7e-5` in log10 at Q44) where the read's first base fits,
+  and by `log10(1 + match_to_insertion / (eps / 3))` where it does not (`0.34` at Q40 and Q44),
+  which is what a mismatched last base always got; a read that runs past its haplotype's end is
+  now impossible. GATK's own write-up of its model calls the limitation unnecessary. The crate
+  docs' *Where compair differs from GATK* says why, how, and how far the numbers move;
+  `align_full_gatk` (doc-hidden) keeps GATK's ends for the tests that compare with GATK and
+  rust-bio.
+
 ## v0.3.0 (2026-10-27)
 
 ### Breaking
