@@ -540,8 +540,7 @@ fn align_masked<E: compair::Emission>(
     let init = Wide::of(1.0 / h as f64);
     let mut prev_m = vec![Wide::ZERO; h + 1];
     let mut prev_i = vec![Wide::ZERO; h + 1];
-    let mut prev_d: Vec<Wide> =
-        (0..=h).map(|j| if live(0, j) { init } else { Wide::ZERO }).collect();
+    let mut prev_d = vec![Wide::ZERO; h + 1];
     let (mut cur_m, mut cur_i, mut cur_d) =
         (vec![Wide::ZERO; h + 1], vec![Wide::ZERO; h + 1], vec![Wide::ZERO; h + 1]);
 
@@ -565,6 +564,14 @@ fn align_masked<E: compair::Emission>(
             }
             let Some(site) = haplotype.site(j - 1) else { return f64::NEG_INFINITY };
             let prior = Wide::of(emission.match_probability(site, observation));
+            if i == 1 {
+                // The begin state: a free start at any live column, into a
+                // match (paid for with `indel_to_match`) or an insertion.
+                cur_m[j] = if live(0, j - 1) { prior.mul(init).mul(i2m) } else { Wide::ZERO };
+                cur_i[j] = if live(0, j) { init.mul(p_ins) } else { Wide::ZERO };
+                cur_d[j] = cur_m[j - 1].mul(p_del).add(cur_d[j - 1].mul(gap));
+                continue;
+            }
             let into_match =
                 prev_m[j - 1].mul(m2m).add(prev_i[j - 1].mul(i2m)).add(prev_d[j - 1].mul(i2m));
             cur_m[j] = prior.mul(into_match);
@@ -575,8 +582,13 @@ fn align_masked<E: compair::Emission>(
         core::mem::swap(&mut prev_i, &mut cur_i);
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
-    let total =
-        prev_m.iter().zip(&prev_i).skip(1).fold(Wide::ZERO, |sum, (m, i)| sum.add(m.add(*i)));
+    // An insertion after the haplotype's last base does not count.
+    let total = prev_m
+        .iter()
+        .zip(&prev_i)
+        .enumerate()
+        .skip(1)
+        .fold(Wide::ZERO, |sum, (j, (m, i))| sum.add(if j == h { *m } else { m.add(*i) }));
     total.log10()
 }
 
@@ -601,7 +613,7 @@ fn a_path_far_below_its_row_is_kept_until_it_wins() {
     let band = Band::new(70, 0).expect("width");
     let emission = StandardEmission::default();
     let want = align_masked(&haplotype, &read, &emission, band);
-    assert!((want - -352.37).abs() < 0.01, "the oracle: {want}");
+    assert!((want - -352.13).abs() < 0.01, "the oracle: {want}");
     let rows = align_banded_f64_rows(&haplotype, &read, &emission, band).get();
     assert!((rows - want).abs() < 1e-9 * want.abs(), "rows: {rows} against {want}");
     for (level_name, level) in support::levels() {
@@ -752,8 +764,60 @@ fn a_strip_flush_below_the_strip_floor_is_rescored() {
     let band = Band::new(27, case.offset).expect("width");
     let emission = StandardEmission::default();
     let want = align_masked(&case.haplotype, &case.read, &emission, band);
-    assert!((want - -69.2579).abs() < 1e-3, "{want}");
+    assert!((want - -68.9587).abs() < 1e-3, "{want}");
     for (kernel, got) in every_entry_point(&case, &emission, band) {
+        assert!((got - want).abs() < 1e-4 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
+    }
+}
+
+/// **A read may begin with an insertion and may not end with one past the
+/// haplotype.** A read cut from the end of its haplotype, so that it runs to
+/// the last column, with its first and last base flipped about half the time:
+/// the cases where the begin state's insertion and the last column's excluded
+/// insertion decide the score. The `f64` rescue and both diagonal kernels
+/// against the independent masked oracle, and the rescue against `align_full`.
+#[hegel::test(test_cases = pinned::cases(256))]
+fn a_read_at_the_haplotypes_end_scores_its_first_and_last_base_as_the_oracle_does(tc: TestCase) {
+    let h = tc.draw(length(2, 40));
+    let hap: Vec<Base> = (0..h).map(|_| tc.draw_silent(any_base_or_n())).collect();
+    let r = tc.draw(length(1, h));
+    let mut read_bases = hap.get(h - r..).unwrap_or_default().to_vec();
+    let other = |base: Base| if base == Base::A { Base::C } else { Base::A };
+    if tc.draw(gs::booleans())
+        && let Some(base) = read_bases.first_mut()
+    {
+        *base = other(*base);
+    }
+    if tc.draw(gs::booleans())
+        && let Some(base) = read_bases.last_mut()
+    {
+        *base = other(*base);
+    }
+    let quality = BaseQuality::from_byte(tc.draw(gs::integers::<u8>().min_value(5).max_value(60)));
+    let insertion =
+        BaseQuality::from_byte(tc.draw(gs::integers::<u8>().min_value(6).max_value(45)));
+    let read = Read::uniform(
+        read_bases,
+        &vec![quality; r],
+        insertion,
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        Strand::OT,
+    )
+    .expect("valid");
+    let haplotype = Haplotype::new(hap);
+    let width = u32::try_from(2 * h + 2).expect("a short haplotype");
+    let band = Band::new(width, 0).expect("width at least two");
+    let emission = StandardEmission::default();
+    let want = align_masked(&haplotype, &read, &emission, band);
+    let full = align_full(&haplotype, &read, &emission).get();
+    let rescue = compair::align_banded_f64(&haplotype, &read, &emission, band).get();
+    assert!((rescue - full).abs() < 1e-9 * (1.0 + full.abs()), "f64: {rescue} against {full}");
+    for (kernel, got) in [
+        ("f64", rescue),
+        ("diagonals", align_banded(&haplotype, &read, &emission, band).get()),
+        ("diagonals/simd", align_banded_simd(&haplotype, &read, &emission, band).get()),
+    ] {
         assert!((got - want).abs() < 1e-4 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
     }
 }
@@ -796,7 +860,8 @@ fn a_read_with_no_information_scores_every_haplotype_alike(tc: TestCase) {
     }
     let (x, y) =
         (align_full(&one, &read, &emission).get(), align_full(&other, &read, &emission).get());
-    assert!((x - y).abs() <= 1e-12 * (1.0 + x.abs()), "full: {x} against {y}");
+    // A read longer than a one-column haplotype has no path now.
+    assert!(x == y || (x - y).abs() <= 1e-12 * (1.0 + x.abs()), "full: {x} against {y}");
 }
 
 /// A cell of GATK's recurrence is not a probability: the transitions out of
@@ -857,7 +922,7 @@ fn the_widest_band_keeps_its_total_below_f32_max() {
     let band = Band::new(Band::MAX_WIDTH, case.offset).expect("width");
     let emission = StandardEmission::default();
     let want = align_masked(&case.haplotype, &case.read, &emission, band);
-    assert!((want - -0.7228).abs() < 1e-3, "{want}");
+    assert!((want - -0.3761).abs() < 1e-3, "{want}");
     for (kernel, got) in every_entry_point(&case, &emission, band) {
         assert!((got - want).abs() < 1e-4 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
     }
@@ -1284,8 +1349,9 @@ fn the_degenerate_corners_are_impossible_not_a_panic() {
         }
     }
 
-    // A gap-continuation quality of zero is a gap that never closes, and the
-    // read's free start is a gap: no path reaches row one.
+    // A gap-continuation quality of zero is a gap that never closes, so the
+    // deletion start cannot reach row one. The read can still begin with an
+    // insertion, and then only insertions follow, up to the last row.
     let certain = Read::uniform(
         haplotype.bases().to_vec(),
         &[BaseQuality::from_byte(0); 4],
@@ -1295,10 +1361,12 @@ fn the_degenerate_corners_are_impossible_not_a_panic() {
         Strand::OT,
     )
     .expect("valid");
-    assert_eq!(
-        align_full(&haplotype, &certain, &StandardEmission::default()),
-        compair::Log10Likelihood::IMPOSSIBLE
-    );
+    // The insertion opens at Q6 (gap open is squashed to Q6) in one of the
+    // three columns that have a column after them, each of the four columns
+    // having `1/4` of the free start, and never closes.
+    let want = (0.75 * 10f64.powf(-0.6)).log10();
+    let got = align_full(&haplotype, &certain, &StandardEmission::default()).get();
+    assert!((got - want).abs() < 1e-9, "{got} against {want}");
 }
 
 /// `Band::new` rejects a width under two and **truncates** every other odd one:
@@ -1628,7 +1696,7 @@ fn a_collapsing_diagonal_maximum_does_not_overflow_the_lift() {
     .expect("valid");
     let emission = StandardEmission::default();
     let full = align_full(&haplotype, &read, &emission).get();
-    assert!((full - -1.8201).abs() < 1e-3, "the reference scores this pair at -1.82, got {full}");
+    assert!((full - -1.8183).abs() < 1e-3, "the reference scores this pair at -1.82, got {full}");
     // The path ends at columns 41 and 42, so a band at offset 0 needs a
     // half-width of at least 39 to hold it at all; at 40 it holds the path
     // but not everything around it, and scores a little under the reference.

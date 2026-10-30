@@ -37,6 +37,7 @@ use crate::{
     pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
     scaling::STRIP_SCALE,
     strips::{RowBuffer, strip_kernel},
+    transitions::Start,
     types::Log10Likelihood,
 };
 
@@ -315,9 +316,10 @@ fn banded_kernel_simd<S: Simd>(
     plan: &Plan,
     ring: &mut Ring,
     shape: Shape,
+    start: Start,
     band: Band,
 ) -> Log10Likelihood {
-    banded_kernel::<f32x8<S>>(simd, plan, ring, shape, band)
+    banded_kernel::<f32x8<S>>(simd, plan, ring, shape, start, band)
 }
 
 /// The strip kernel at `level`.
@@ -357,9 +359,10 @@ pub(crate) fn banded_kernel_at(
     plan: &Plan,
     ring: &mut Ring,
     shape: Shape,
+    start: Start,
     band: Band,
 ) -> Log10Likelihood {
-    dispatch!(level, simd => banded_kernel_simd(simd, plan, ring, shape, band))
+    dispatch!(level, simd => banded_kernel_simd(simd, plan, ring, shape, start, band))
 }
 
 /// The level `dispatch!` picks on this CPU, by name.

@@ -7,6 +7,7 @@ use crate::{
     read::Read,
     reference::trusted,
     scaling::{exp2_f32, exp2_f64, strip_shift_f32},
+    transitions::Start,
     types::Log10Likelihood,
 };
 use seqair_types::{Base, Strand};
@@ -384,7 +385,14 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let score = crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band);
+        let score = crate::simd::banded_kernel_at(
+            level,
+            &self.plan,
+            &mut self.ring,
+            shape,
+            read.start(),
+            band,
+        );
         trusted(score, haplotype, read, emission, band)
     }
 
@@ -398,7 +406,7 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let score = banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band);
+        let score = banded_kernel::<L>((), &self.plan, &mut self.ring, shape, read.start(), band);
         trusted(score, haplotype, read, emission, band)
     }
 
@@ -1138,6 +1146,7 @@ pub(crate) fn banded_kernel<L: Lane>(
     plan: &Plan,
     ring: &mut Ring,
     shape: Shape,
+    start: Start,
     band: Band,
 ) -> Log10Likelihood {
     let Shape { haplotype: h, read: r } = shape;
@@ -1280,15 +1289,24 @@ pub(crate) fn banded_kernel<L: Lane>(
             }
         }
 
-        // The read's free start. It replaces a cell that computed to exactly
-        // zero in all three matrices -- read row 0 carries no base, so its
-        // prior is zero, and its five transitions are zero too -- which is also
-        // why the running maximum above could be taken before this write.
+        // The read's free start (`Start`). It replaces a cell that computed to
+        // exactly zero in all three matrices -- read row 0 carries no base, so
+        // its prior is zero, and its five transitions are zero too -- which is
+        // also why the running maxima above could be taken before this write.
         if len > 0 && lo_in_band == 0 {
-            if let Some(start) = sink.d.track.first_mut() {
-                *start = init_scaled;
+            let [start_m, start_i, start_d] = start.cells_f32(init_scaled);
+            if let Some(cell) = sink.m.track.first_mut() {
+                *cell = start_m;
             }
-            running_d = running_d.vmax(L::splat(token, init_scaled));
+            if let Some(cell) = sink.i.track.first_mut() {
+                *cell = start_i;
+            }
+            if let Some(cell) = sink.d.track.first_mut() {
+                *cell = start_d;
+            }
+            running_m = running_m.vmax(L::splat(token, start_m));
+            running_i = running_i.vmax(L::splat(token, start_i));
+            running_d = running_d.vmax(L::splat(token, start_d));
         }
 
         // The shift for the next diagonal's scale, not for this one's cells:
@@ -1303,7 +1321,9 @@ pub(crate) fn banded_kernel<L: Lane>(
 
         if len > 0 && lo + len - 1 == r {
             let slot = r - lo;
-            let value = f64::from(get(sink.m.track, slot) + get(sink.i.track, slot));
+            // An insertion after the haplotype's last base does not count.
+            let insertion = if k == r + h { 0.0 } else { get(sink.i.track, slot) };
+            let value = f64::from(get(sink.m.track, slot) + insertion);
             let base = *reference_exponent.get_or_insert(exponent);
             accumulator += value * exp2_f64(base - exponent);
         }

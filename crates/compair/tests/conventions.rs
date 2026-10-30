@@ -51,7 +51,6 @@ fn expected_act_vs_ac(q: [u8; 2], ins: [u8; 2], del: [u8; 2], gcp: [u8; 2]) -> f
     // (`i13`, an insertion after the last column, can reach nothing summed.)
     let m11 = (1.0 - e1) * init * im1;
     let m12 = (e1 / 3.0) * init * im1;
-    let m13 = (e1 / 3.0) * init * im1;
     let (i11, i12) = (init * pi1, init * pi1);
     let d12 = m11 * pd1;
 
