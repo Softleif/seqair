@@ -152,7 +152,7 @@ r[bam_writer.reuse_buffers]
 The writer MUST reuse a single `Vec<u8>` serialization buffer across `write()` calls. The buffer is cleared (not deallocated) before each record to avoid per-record allocation. `OwnedBamRecord::to_bam_bytes()` appends into this buffer (see `r[bam.owned_record.to_bam_bytes]`).
 
 r[bam_writer.multithreaded_compression]
-`BamWriterBuilder::compression_threads(n)` MUST configure `n` background BGZF compression workers; `n = 0` (the default) compresses synchronously in the calling thread. This matches htslib's `hts_set_threads` — rastair's `set_threads(3)` is `compression_threads(3)`. The BAM and the co-produced BAI MUST be byte-identical to the single-threaded writer's at the same level (see `r[bgzf.writer.parallel]`).
+`BamWriterBuilder::compression_threads(n)` MUST configure `n` background BGZF compression workers; `n = 0` (the default) compresses synchronously in the calling thread. This matches htslib's `hts_set_threads`. The BAM and the co-produced BAI MUST be byte-identical to the single-threaded writer's at the same level (see `r[bgzf.writer.parallel]`).
 
 ## Testing
 

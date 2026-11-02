@@ -284,9 +284,10 @@ impl<W: Write> BamWriter<W> {
     /// intermediate [`OwnedBamRecord`].
     ///
     /// Serializes the record's BAM binary representation into the writer's
-    /// reusable buffer, re-encoding the sequence from `Base` to 4-bit packed
-    /// format. CIGAR, quality, and aux data are already in BAM wire format
-    /// in the store's slabs and are copied directly.
+    /// reusable buffer, packing the stored 4-bit codes back into SEQ, so the
+    /// sequence is the one that was read, `=` and ambiguity codes included.
+    /// CIGAR, quality, and aux data are already in BAM wire format in the
+    /// store's slabs and are copied directly.
     pub fn write_store_record(
         &mut self,
         store: &RecordStore,
@@ -488,7 +489,7 @@ impl<'a, T> BamWriterBuilder<'a, T> {
     /// The calling thread keeps serializing records and writes the compressed
     /// blocks in order, so the output — BAM and co-produced BAI — is
     /// byte-identical to the single-threaded writer's at the same level. This
-    /// is htslib's `hts_set_threads`: rastair's `set_threads(3)` is `3` here.
+    /// is htslib's `hts_set_threads`.
     #[must_use]
     pub fn compression_threads(mut self, threads: usize) -> Self {
         self.compression_threads = threads;
