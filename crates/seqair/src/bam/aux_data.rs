@@ -4,6 +4,7 @@
 //! reading, adding, replacing, and removing tags. Used by [`OwnedBamRecord`](super::owned_record::OwnedBamRecord).
 
 use super::aux::{self, AuxValue};
+use crate::sam::encode::Escaped;
 use thiserror::Error;
 
 // r[impl bam.owned_record.aux_data]
@@ -34,17 +35,18 @@ pub enum AuxDataError {
     /// (0x20..=0x7E). A NUL would end the string early and corrupt the tags
     /// after it.
     #[error(
-        "invalid Z-type byte {value:#04x} at {index}: SAM grammar requires printable ASCII [ !-~]"
+        "Z tag {} has byte {value:#04x} at {index}, outside SAM's printable ASCII [ !-~]",
+        Escaped(tag)
     )]
-    InvalidStringByte { value: u8, index: usize },
+    InvalidStringByte { tag: [u8; 2], value: u8, index: usize },
 
     /// `set_hex` received a byte outside the SAM H-type grammar `[0-9A-F]`.
-    #[error("invalid H-type byte {value:#04x} at {index}: SAM grammar requires [0-9A-F]")]
-    InvalidHexByte { value: u8, index: usize },
+    #[error("H tag {} has byte {value:#04x} at {index}, outside SAM's [0-9A-F]", Escaped(tag))]
+    InvalidHexByte { tag: [u8; 2], value: u8, index: usize },
 
     /// `set_hex` received an odd number of hex digits; SAM's H type is whole bytes.
-    #[error("H-type value has {len} hex digits; SAM requires an even number")]
-    OddHexLength { len: usize },
+    #[error("H tag {} has {len} hex digits; SAM requires an even number", Escaped(tag))]
+    OddHexLength { tag: [u8; 2], len: usize },
 }
 
 impl AuxData {
@@ -90,7 +92,7 @@ impl AuxData {
         if let Some((index, &value)) =
             value.iter().enumerate().find(|(_, b)| !matches!(b, 0x20..=0x7E))
         {
-            return Err(AuxDataError::InvalidStringByte { value, index });
+            return Err(AuxDataError::InvalidStringByte { tag, value, index });
         }
         self.remove(tag);
         self.data.extend_from_slice(&tag);
@@ -129,10 +131,10 @@ impl AuxData {
         if let Some((index, &value)) =
             value.iter().enumerate().find(|(_, b)| !matches!(b, b'0'..=b'9' | b'A'..=b'F'))
         {
-            return Err(AuxDataError::InvalidHexByte { value, index });
+            return Err(AuxDataError::InvalidHexByte { tag, value, index });
         }
         if !value.len().is_multiple_of(2) {
-            return Err(AuxDataError::OddHexLength { len: value.len() });
+            return Err(AuxDataError::OddHexLength { tag, len: value.len() });
         }
         self.remove(tag);
         self.data.extend_from_slice(&tag);
@@ -785,8 +787,8 @@ mod tests {
                 assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"grp")));
                 assert!(aux::validate_aux(aux.as_bytes()).is_ok());
             }
-            Err(AuxDataError::InvalidStringByte { value: bad, .. }) => {
-                assert_eq!(bad, byte);
+            Err(AuxDataError::InvalidStringByte { tag, value: bad, .. }) => {
+                assert_eq!((tag, bad), (*b"XZ", byte));
                 assert!(!matches!(byte, 0x20..=0x7E), "refused byte {byte:#04x}");
                 assert_eq!(aux.as_bytes(), before.as_slice());
             }
@@ -816,11 +818,12 @@ mod tests {
             }
             Err(error) => {
                 match error {
-                    AuxDataError::InvalidHexByte { value: bad, .. } => {
-                        assert_eq!(bad, byte);
+                    AuxDataError::InvalidHexByte { tag, value: bad, .. } => {
+                        assert_eq!((tag, bad), (*b"XH", byte));
                         assert!(!is_digit);
                     }
-                    AuxDataError::OddHexLength { len } => {
+                    AuxDataError::OddHexLength { tag, len } => {
+                        assert_eq!(tag, *b"XH");
                         assert!(is_digit && !len.is_multiple_of(2));
                     }
                     other => panic!("unexpected error {other:?}"),
@@ -828,6 +831,19 @@ mod tests {
                 assert_eq!(aux.as_bytes(), before.as_slice());
             }
         }
+    }
+
+    /// The messages name the tag, so a caller setting many can tell which.
+    #[test]
+    fn grammar_errors_name_the_tag() {
+        let mut aux = AuxData::new();
+        let err = aux.set_string(*b"XZ", "caf\u{e9}".as_bytes()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Z tag XZ has byte 0xc3 at 3, outside SAM's printable ASCII [ !-~]"
+        );
+        let err = aux.set_hex(*b"XH", b"ABC").unwrap_err();
+        assert_eq!(err.to_string(), "H tag XH has 3 hex digits; SAM requires an even number");
     }
 
     /// A two-letter upper-case tag name.
