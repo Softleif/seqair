@@ -1,6 +1,24 @@
-//! Parse and query CIGAR strings. [`CigarMapping`] maps reference positions to query positions
-//! (linear fast-path for clip+match CIGARs, `SmallVec` fallback for complex ones);
-//! [`CigarPosInfo`] describes what occupies a given reference position.
+//! CIGAR operations and what they say about an alignment.
+//!
+//! [`CigarOp`] is one operation in BAM's packed form (`len << 4 | code`) and
+//! [`CigarOpType`] its kind. A CIGAR comes either decoded, as a `&[CigarOp]`
+//! (how [`OwnedBamRecord`](super::OwnedBamRecord) and the record store keep
+//! it), or packed as BAM stores it, four little-endian bytes per op, which
+//! [`CigarOp::iter_bam_bytes`] decodes on the fly. The functions that measure
+//! a CIGAR take either:
+//!
+//! - [`ref_len`] and [`query_len`]: the reference bases it spans and the read
+//!   bases it accounts for;
+//! - [`compute_end_pos`]: the last reference position it covers (inclusive,
+//!   seqair's `end_pos` convention);
+//! - [`calc_matches_indels`] and [`soft_clips`] take a decoded slice.
+//!
+//! [`CigarStr`] prints a CIGAR as SAM text, and
+//! [`CigarOpType::to_sam_char`]/[`from_sam_char`](CigarOpType::from_sam_char)
+//! convert one op's letter. For the pileup, [`CigarMapping`] maps reference
+//! positions to query positions (a fast path for clip + match CIGARs, a
+//! `SmallVec` of ops otherwise) and [`CigarPosInfo`] says what a read has at a
+//! reference position.
 
 use crate::utils::{TraceErr, TraceOk};
 use seqair_types::{Pos0, QPos, SmallVec};
@@ -8,17 +26,27 @@ use std::borrow::Borrow;
 
 // r[impl cigar.operations]
 // r[impl io.named_constants]
+/// M(0): alignment match; the base may equal the reference or not.
 pub const CIGAR_M: u8 = 0;
+/// I(1): insertion to the reference.
 pub const CIGAR_I: u8 = 1;
+/// D(2): deletion from the reference.
 pub const CIGAR_D: u8 = 2;
+/// N(3): skipped reference region, e.g. an intron.
 pub const CIGAR_N: u8 = 3;
+/// S(4): soft clip; the bases are in SEQ but not aligned.
 pub const CIGAR_S: u8 = 4;
+/// H(5): hard clip; the bases are not in SEQ.
 pub const CIGAR_H: u8 = 5;
+/// P(6): padding, a silent deletion from a padded reference.
 pub const CIGAR_P: u8 = 6;
+/// =(7): sequence match.
 pub const CIGAR_EQ: u8 = 7;
+/// X(8): sequence mismatch.
 pub const CIGAR_X: u8 = 8;
-/// B(9): htslib's "back" op, in no current SAM spec; it has no
-/// [`CigarOpType`] variant of its own.
+/// B(9): htslib's "back" op, which no current SAM spec defines. It has no
+/// [`CigarOpType`] variant of its own: it reads as `CigarOpType::Unknown(9)`
+/// and prints as `B`.
 pub const CIGAR_B: u8 = 9;
 
 // r[impl io.typed_cigar_ops]
@@ -132,6 +160,7 @@ impl CigarOpType {
         })
     }
 
+    /// Whether the op advances along the reference: M, D, N, = and X.
     pub const fn consumes_ref(self) -> bool {
         matches!(
             self,
@@ -139,6 +168,8 @@ impl CigarOpType {
         )
     }
 
+    /// Whether the op advances along the read, i.e. its bases are in SEQ:
+    /// M, I, S, = and X.
     pub const fn consumes_query(self) -> bool {
         matches!(
             self,
@@ -191,10 +222,14 @@ impl CigarOp {
         CigarOpType::from_bam(self.op_code())
     }
 
+    /// Whether the op advances along the reference, as
+    /// [`CigarOpType::consumes_ref`].
     pub const fn consumes_ref(self) -> bool {
         self.op_type().consumes_ref()
     }
 
+    /// Whether the op advances along the read, as
+    /// [`CigarOpType::consumes_query`].
     pub const fn consumes_query(self) -> bool {
         self.op_type().consumes_query()
     }
