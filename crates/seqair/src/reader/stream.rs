@@ -385,7 +385,7 @@ impl AlignmentStream {
     /// ends the stream is the last item. For a reused buffer, loop over
     /// [`Self::read_record`] instead.
     pub fn records(&mut self) -> Records<'_> {
-        Records { stream: self }
+        Records { stream: self, done: false }
     }
 
     /// Whether an error ended the stream.
@@ -403,23 +403,30 @@ impl AlignmentStream {
 #[derive(Debug)]
 pub struct Records<'a> {
     stream: &'a mut AlignmentStream,
+    /// `None` was returned; the readers do not promise to keep returning it.
+    done: bool,
 }
 
 impl Iterator for Records<'_> {
     type Item = Result<RawBamRecord, AlignmentStreamError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.stream.is_failed() {
+        if self.done || self.stream.is_failed() {
             return None;
         }
         let mut record = RawBamRecord::default();
         match self.stream.read_record(&mut record) {
             Ok(true) => Some(Ok(record)),
-            Ok(false) => None,
+            Ok(false) => {
+                self.done = true;
+                None
+            }
             Err(e) => Some(Err(e)),
         }
     }
 }
+
+impl std::iter::FusedIterator for Records<'_> {}
 
 /// Append bytes from `inner` to `buf` until it holds `len` or the input ends.
 fn read_up_to(
