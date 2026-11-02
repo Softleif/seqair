@@ -362,7 +362,14 @@ fn arb_opts(tc: &TestCase) -> Opts {
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
         reference,
         seqs_per_slice: tc.draw_silent(gs::sampled_from(&[1u32, 2, 5, 10_000])),
-        slices_per_container: tc.draw_silent(gs::sampled_from(&[1u32, 2])),
+        // htslib 1.25 embeds the container's *last* slice consensus for every
+        // slice (`cram_encode_slice`), reading out of bounds for earlier ones:
+        // samtools then can't read its own file back. Related: samtools/htslib#503.
+        slices_per_container: if matches!(reference, Reference::Consensus) {
+            1
+        } else {
+            tc.draw_silent(gs::sampled_from(&[1u32, 2]))
+        },
         multi_seq: tc.draw_silent(gs::sampled_from(&[None, Some(false), Some(true)])),
         lossy_names: tc.draw_silent(gs::booleans()),
     }
