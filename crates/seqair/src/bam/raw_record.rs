@@ -420,6 +420,18 @@ impl RawBamRecord {
         })
     }
 
+    // r[impl bam.raw_record.base_at]
+    /// The base at `qpos`, its 4-bit code kept; `None` past the end of the
+    /// sequence.
+    pub fn base_at(&self, qpos: QPos) -> Option<IupacBase> {
+        let i = qpos.as_usize();
+        if i >= self.seq_len() {
+            return None;
+        }
+        let byte = *self.packed_seq().get(i / 2)?;
+        Some(IupacBase::from_nibble(if i.is_multiple_of(2) { byte >> 4 } else { byte }))
+    }
+
     // r[impl seq.iupac_bulk+3]
     /// Append the sequence to `out`, one [`IupacBase`] per base, every 4-bit
     /// code kept: [`Self::iupac_bases`] into a caller's buffer.
@@ -678,6 +690,32 @@ mod tests {
             matches!(err, RawRecordEditError::RecordTooLarge { len } if len == record::MAX_RECORD_SIZE + 1)
         );
         assert_eq!(record.as_payload(), before);
+    }
+
+    // r[verify bam.raw_record.base_at]
+    // r[verify bam.raw_record.edit_seq]
+    /// `base_at` reads the code stored at each position, `None` past the
+    /// end, and gives back what `set_base` wrote.
+    #[hegel::test]
+    fn base_at_reads_each_stored_code(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let len = tc.draw(gs::integers::<usize>().max_value(21));
+        let codes: Vec<u8> =
+            (0..len).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(15))).collect();
+        let mut record =
+            RawBamRecord::from_payload(payload(false, 4, &[], &codes, &[]), &header()).unwrap();
+        for i in 0..len + 3 {
+            let qpos = QPos::new(u32::try_from(i).unwrap());
+            assert_eq!(record.base_at(qpos), codes.get(i).map(|&c| IupacBase::from_nibble(c)));
+        }
+        if len > 0 {
+            let at = QPos::new(
+                u32::try_from(tc.draw(gs::integers::<usize>().max_value(len - 1))).unwrap(),
+            );
+            let base = IupacBase::from_nibble(tc.draw(gs::integers::<u8>().max_value(15)));
+            record.set_base(at, base).unwrap();
+            assert_eq!(record.base_at(at), Some(base));
+        }
     }
 
     // r[verify bam.raw_record.iupac_bases]
