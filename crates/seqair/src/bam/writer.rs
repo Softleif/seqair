@@ -159,8 +159,9 @@ impl<W: Write> BamWriter<W> {
         record.to_bam_bytes(&mut self.buf)?;
 
         let beg = record.pos.map(seqair_types::Pos0::as_u64).unwrap_or(0);
-        let end_pos = record.end_pos().map(|p| p.as_u64()).unwrap_or(beg);
-        self.finalize_record(record.tid, record.flags.is_unmapped(), beg, end_pos)
+        // `end_pos` is the last covered base; the index wants the exclusive end.
+        let end = record.end_pos().map_or(beg, |p| p.as_u64().saturating_add(1));
+        self.finalize_record(record.tid, record.flags.is_unmapped(), beg, end)
     }
 
     // r[impl bam_writer.record_size_limit]

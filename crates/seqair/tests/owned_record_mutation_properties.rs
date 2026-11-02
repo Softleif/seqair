@@ -705,7 +705,8 @@ fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
         assert_eq!(rec.pos.unwrap().as_u32(), plan.after.pos, "pos after set_alignment");
         assert_eq!(
             rec.end_pos().unwrap().as_u32(),
-            plan.after.pos + plan.after.ref_span(),
+            // The last covered base; a CIGAR without reference ops covers `pos`.
+            plan.after.pos + plan.after.ref_span().max(1) - 1,
             "end_pos must be recomputed from the new CIGAR"
         );
         assert!(rec.bin() <= MAX_BAI_BIN, "bin {} exceeds the BAI maximum", rec.bin());

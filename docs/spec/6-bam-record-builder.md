@@ -81,8 +81,8 @@ A mutation method that returns an error MUST leave the record exactly as it was.
 
 **`OwnedBamRecord::aligned_pairs()`** is the owned-record counterpart to `SlimRecord::aligned_pairs(store)`. Both return the typed `AlignedPairs` iterator from [CIGAR Operations](./1-3-cigar.md). See `r[cigar.aligned_pairs.owned_record]` for the integration contract and `r[cigar.aligned_pairs.types]` for the variant set. For unmapped reads (empty CIGAR), the iterator is empty.
 
-r[bam.owned_record.end_pos]
-`OwnedBamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]`, but MUST be recomputed from the current CIGAR state (not cached from a stale value).
+r[bam.owned_record.end_pos+1]
+`OwnedBamRecord` MUST provide `end_pos() -> Option<Pos0>`: the last reference position the alignment covers (`r[interval.end_pos_inclusive]`), from `pos` and the CIGAR's reference-consuming operations exactly as `r[bam.record.end_pos]` and `r[bam.record.zero_refspan]` compute it, so it equals `RawBamRecord::end_pos` for the same record. It MUST be recomputed from the current CIGAR state (not cached from a stale value), MUST be `None` for a record without a position, and MUST clamp a span past `Pos0::MAX` to `Pos0::MAX`. Callers that need htslib's exclusive end (the bin, the index) add one.
 
 r[bam.owned_record.bin]
 `OwnedBamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. This method is specific to the BAI binning scheme (min_shift=14, depth=5), where the maximum non-pseudo bin ID is 37449 — well within u16 range. CSI indexes with larger depths can produce bin IDs exceeding u16; those are handled by the IndexBuilder directly and do not flow through `OwnedBamRecord::bin()`. In the serialized 32-byte header, this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.

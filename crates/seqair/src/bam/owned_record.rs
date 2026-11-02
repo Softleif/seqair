@@ -200,20 +200,15 @@ impl OwnedBamRecord {
         self.flags.is_reverse()
     }
 
-    // r[impl bam.owned_record.end_pos]
-    /// Compute the 0-based exclusive end position from pos + reference-consuming CIGAR ops.
-    /// Returns `None` if the record is unmapped (`pos.is_none()`).
+    // r[impl bam.owned_record.end_pos+1]
+    /// The last reference position the alignment covers, from the current
+    /// CIGAR, as [`RawBamRecord::end_pos`](super::RawBamRecord::end_pos) and
+    /// the store give it (`r[interval.end_pos_inclusive]`): `pos` itself for a
+    /// CIGAR that consumes no reference, and [`Pos0::MAX`] for a span past it.
+    /// `None` for a record without a position.
     pub fn end_pos(&self) -> Option<Pos0> {
         let pos = self.pos?;
-        let ref_len: u64 =
-            self.cigar.iter().filter(|op| op.consumes_ref()).map(|op| u64::from(op.len())).sum();
-        let end = pos.as_u64().saturating_add(ref_len);
-        let clamped = end.min(Pos0::MAX.as_u64());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "clamped <= i32::MAX < u32::MAX; fits in u32"
-        )]
-        Pos0::new(clamped as u32)
+        Some(cigar::compute_end_pos(pos, &self.cigar).unwrap_or(Pos0::MAX))
     }
 
     // r[impl bam.owned_record.bin]
@@ -221,10 +216,8 @@ impl OwnedBamRecord {
     /// For unmapped records (`pos.is_none()`), returns the unmapped bin (`reg2bin(0, 1, ...)`).
     pub fn bin(&self) -> u16 {
         let beg = self.pos.map(Pos0::as_u64).unwrap_or(0);
-        let end = self.end_pos().map_or(beg.saturating_add(1), |p| {
-            let v = p.as_u64();
-            if v <= beg { beg.saturating_add(1) } else { v }
-        });
+        // The bin takes the exclusive end; `end_pos` is the last covered base.
+        let end = self.end_pos().map_or(beg, Pos0::as_u64).saturating_add(1);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "BAI bin numbers with min_shift=14, depth=5 are bounded by 37449, fits in u16"
@@ -497,11 +490,47 @@ mod tests {
         assert_eq!(serialized_bin, bin_after, "serialized bin must match current bin()");
     }
 
-    // r[verify bam.owned_record.end_pos]
+    // r[verify bam.owned_record.end_pos+1]
+    /// The owned record's `end_pos` is the one the same record has once
+    /// serialized and read back as a `RawBamRecord`, for any CIGAR, a CIGAR
+    /// without reference ops included.
+    #[hegel::test]
+    fn end_pos_is_the_raw_records(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let n = tc.draw(gs::integers::<usize>().max_value(6));
+        let ops: Vec<CigarOp> = (0..n)
+            .map(|_| {
+                let kind = tc.draw_silent(gs::sampled_from(vec![
+                    CigarOpType::Match,
+                    CigarOpType::Insertion,
+                    CigarOpType::Deletion,
+                    CigarOpType::RefSkip,
+                    CigarOpType::SoftClip,
+                    CigarOpType::HardClip,
+                    CigarOpType::SeqMatch,
+                    CigarOpType::SeqMismatch,
+                ]));
+                CigarOp::new(kind, tc.draw_silent(gs::integers::<u32>().max_value(300)))
+            })
+            .collect();
+        let qlen = usize::try_from(cigar::query_len(&ops)).unwrap();
+        let pos = Pos0::new(tc.draw(gs::integers::<u32>().max_value(1_000_000))).unwrap();
+        let rec = OwnedBamRecord::builder(Some(tid(0)), Some(pos), b"r".to_vec())
+            .cigar(ops)
+            .seq(vec![IupacBase::A; qlen])
+            .build()
+            .unwrap();
+        let mut payload = Vec::new();
+        rec.to_bam_bytes(&mut payload).unwrap();
+        let raw = crate::bam::RawBamRecord::from_payload(payload, crate::bam::test_util::header())
+            .unwrap();
+        assert_eq!(rec.end_pos(), raw.end_pos());
+    }
+
     #[test]
     fn end_pos_simple() {
         let rec = simple_record();
-        assert_eq!(rec.end_pos(), Some(Pos0::new(105).unwrap())); // pos=100 + 5M
+        assert_eq!(rec.end_pos(), Some(Pos0::new(104).unwrap())); // pos=100, 5M: 100..=104
     }
 
     #[test]
@@ -518,7 +547,7 @@ mod tests {
                 .build()
                 .unwrap();
         // Only M ops consume ref: 3 + 3 = 6
-        assert_eq!(rec.end_pos(), Some(Pos0::new(106).unwrap()));
+        assert_eq!(rec.end_pos(), Some(Pos0::new(105).unwrap()));
     }
 
     // r[verify bam.owned_record.qname_limit]
@@ -557,7 +586,7 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(rec.pos, Some(Pos0::new(200).unwrap()));
-        assert_eq!(rec.end_pos(), Some(Pos0::new(205).unwrap()));
+        assert_eq!(rec.end_pos(), Some(Pos0::new(204).unwrap()));
     }
 
     #[test]
