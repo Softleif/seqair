@@ -352,6 +352,11 @@ impl AlignmentStream {
     /// # Errors
     /// The underlying reader's error; see [`BamStreamReader::read_record`] and
     /// [`SamStreamReader::read_record`] for which ones leave the stream usable.
+    /// For CRAM, an error reading a container ends the stream
+    /// ([`CramStreamReader::next_container`]), but a container that fails to
+    /// decode (a reference sequence the FASTA lacks, a corrupt slice) is one
+    /// error for the whole container: none of its records are returned, and
+    /// the next call continues with the following container.
     pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, AlignmentStreamError> {
         Ok(match &mut self.inner {
             Inner::Bam(r) => r.read_record(record)?,
@@ -381,8 +386,12 @@ impl AlignmentStream {
     }
 
     // r[impl unified.stream.iter]
-    /// Iterate over the remaining records, one allocation each. An error that
-    /// ends the stream is the last item. For a reused buffer, loop over
+    /// Iterate over the remaining records, one allocation each, as
+    /// `Result<RawBamRecord, AlignmentStreamError>`. An error the stream can
+    /// continue past is an item and iteration goes on: an invalid record, or
+    /// for CRAM a container that fails to decode, which skips that
+    /// container's records (see [`Self::read_record`]). An error that ends the
+    /// stream is the last item. For a reused buffer, loop over
     /// [`Self::read_record`] instead.
     pub fn records(&mut self) -> Records<'_> {
         Records { stream: self, done: false }

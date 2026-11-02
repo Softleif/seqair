@@ -438,15 +438,8 @@ fn bad_container_lengths_are_typed() {
 #[test]
 fn a_short_reference_is_named() {
     let cram = data("cram-stream/fidelity_v31.cram");
-    let full = std::fs::read_to_string(data("cram-stream/fidelity.fa")).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let fasta = dir.path().join("short.fa");
-    // chr1 cut to 100 bases; chr2 as it is.
-    let mut lines = full.lines();
-    let (h1, s1, rest): (&str, &str, Vec<&str>) =
-        (lines.next().unwrap(), lines.next().unwrap(), lines.collect());
-    std::fs::write(&fasta, format!("{h1}\n{}\n{}\n", &s1[..100], rest.join("\n"))).unwrap();
-    assert!(Command::new("samtools").arg("faidx").arg(&fasta).status().unwrap().success());
+    let fasta = short_chr1(dir.path());
     let mut reader = CramStreamReader::new(std::fs::File::open(&cram).unwrap()).unwrap();
     let mut decoder = reader.decoder(&fasta).unwrap();
     let mut out = Vec::new();
@@ -461,6 +454,52 @@ fn a_short_reference_is_named() {
         ),
         "{err:?}"
     );
+}
+
+/// `fidelity.fa` with chr1 cut to 100 bases and chr2 as it is, indexed.
+fn short_chr1(dir: &Path) -> PathBuf {
+    let full = std::fs::read_to_string(data("cram-stream/fidelity.fa")).unwrap();
+    let fasta = dir.join("short.fa");
+    let mut lines = full.lines();
+    let (h1, s1, rest): (&str, &str, Vec<&str>) =
+        (lines.next().unwrap(), lines.next().unwrap(), lines.collect());
+    std::fs::write(&fasta, format!("{h1}\n{}\n{}\n", &s1[..100], rest.join("\n"))).unwrap();
+    assert!(Command::new("samtools").arg("faidx").arg(&fasta).status().unwrap().success());
+    fasta
+}
+
+// r[verify unified.stream.iter]
+/// A container that fails to decode is one error item with none of its
+/// records, and the containers after it still give theirs.
+#[test]
+fn records_continue_past_a_container_that_fails_to_decode() {
+    let cram = data("cram-stream/fidelity_v31.cram");
+    let dir = tempfile::tempdir().unwrap();
+    let short = short_chr1(dir.path());
+    // Per container: one error if the short FASTA fails it, else its records
+    // as the full FASTA decodes them.
+    let mut want: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut reader = CramStreamReader::new(std::fs::File::open(&cram).unwrap()).unwrap();
+    let mut full = reader.decoder(&data("cram-stream/fidelity.fa")).unwrap();
+    let mut cut = reader.decoder(&short).unwrap();
+    while let Some(container) = reader.next_container().unwrap() {
+        let mut out = Vec::new();
+        if cut.decode(&container, &mut out).is_err() {
+            want.push(None);
+            continue;
+        }
+        out.clear();
+        full.decode(&container, &mut out).unwrap();
+        want.extend(out.into_iter().map(|r| Some(r.into_payload())));
+    }
+    let first_error = want.iter().position(Option::is_none).expect("a container needs chr1");
+    assert!(want[first_error..].iter().any(Option::is_some), "no container after the error");
+
+    let mut stream = AlignmentStream::open_path(&cram).unwrap().reference(&short).build().unwrap();
+    let got: Vec<Option<Vec<u8>>> =
+        stream.records().map(|r| r.ok().map(RawBamRecord::into_payload)).collect();
+    assert_eq!(got, want);
+    assert!(stream.records().next().is_none());
 }
 
 // r[verify cram.file.eof+2]
