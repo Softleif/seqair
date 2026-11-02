@@ -122,6 +122,9 @@ A block MUST hold at most 65280 (`0xff00`) uncompressed bytes — htslib's `BGZF
 r[bgzf.writer.compression]
 Compression MUST use the `libdeflater` crate (matching the reader's decompression backend) with configurable compression level. The default compression level SHOULD be 6 (matching htslib's default).
 
+r[bgzf.writer.compression_level]
+A compression level MUST be a `CompressionLevel`, one variant per level libdeflate accepts (0, stored, through 12), so a writer cannot be handed a level it would quietly replace with another. `CompressionLevel::try_from(i32)` MUST accept exactly 0..=12 and fail with `BgzfError::InvalidCompressionLevel { level }` otherwise; `get()` MUST give the number back. The default MUST be level 6.
+
 r[bgzf.writer.single_write]
 Each block SHOULD be assembled contiguously — header, DEFLATE payload, footer — in one buffer that is allocated once, at the largest size a block can compress to, and never zero-filled again, and it SHOULD reach the inner stream as a single `write_all`. The payload is compressed straight into its place after the header. An unbuffered sink (rastair hands the VCF writer a `Box<dyn Write>` over a file) otherwise pays four `write` calls per block, and a per-block zero fill of the compressed buffer is 64 KiB of memset that the compressor overwrites anyway.
 

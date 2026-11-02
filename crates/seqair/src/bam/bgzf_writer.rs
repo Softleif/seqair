@@ -10,6 +10,67 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tracing::warn;
 
+// r[impl bgzf.writer.compression_level]
+/// A BGZF compression level: libdeflate's 0 (stored, no compression) through
+/// 12 (smallest output, slowest). The default is 6, as in htslib; 1 is the
+/// usual choice for intermediate files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum CompressionLevel {
+    /// Stored: no compression.
+    Level0 = 0,
+    Level1 = 1,
+    Level2 = 2,
+    Level3 = 3,
+    Level4 = 4,
+    Level5 = 5,
+    #[default]
+    Level6 = 6,
+    Level7 = 7,
+    Level8 = 8,
+    Level9 = 9,
+    Level10 = 10,
+    Level11 = 11,
+    Level12 = 12,
+}
+
+impl CompressionLevel {
+    /// The level as a number, 0 through 12.
+    pub const fn get(self) -> u8 {
+        self as u8
+    }
+
+    fn libdeflate(self) -> libdeflater::CompressionLvl {
+        // Every level is one libdeflate accepts, so the fallback is never taken.
+        libdeflater::CompressionLvl::new(i32::from(self.get())).unwrap_or_default()
+    }
+}
+
+impl TryFrom<i32> for CompressionLevel {
+    type Error = BgzfError;
+
+    /// # Errors
+    /// [`BgzfError::InvalidCompressionLevel`] outside 0..=12.
+    fn try_from(level: i32) -> Result<Self, Self::Error> {
+        Ok(match level {
+            0 => Self::Level0,
+            1 => Self::Level1,
+            2 => Self::Level2,
+            3 => Self::Level3,
+            4 => Self::Level4,
+            5 => Self::Level5,
+            6 => Self::Level6,
+            7 => Self::Level7,
+            8 => Self::Level8,
+            9 => Self::Level9,
+            10 => Self::Level10,
+            11 => Self::Level11,
+            12 => Self::Level12,
+            _ => return Err(BgzfError::InvalidCompressionLevel { level }),
+        })
+    }
+}
+
 // r[impl bgzf.writer.block_size]
 /// Maximum uncompressed data per BGZF block: htslib's `BGZF_BLOCK_SIZE`.
 ///
@@ -140,16 +201,14 @@ pub struct BgzfWriter<W: Write> {
 }
 
 impl<W: Write> BgzfWriter<W> {
-    /// Create a new BGZF writer with default compression level (6).
+    /// Create a new BGZF writer at the default compression level (6).
     pub fn new(inner: W) -> Self {
-        Self::with_compression_level(inner, 6)
+        Self::with_compression_level(inner, CompressionLevel::default())
     }
 
-    /// Create a new BGZF writer with the specified compression level (0-12).
-    pub fn with_compression_level(inner: W, level: i32) -> Self {
-        let mut compressor = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(level).unwrap_or_default(),
-        );
+    /// Create a new BGZF writer at `level`.
+    pub fn with_compression_level(inner: W, level: CompressionLevel) -> Self {
+        let mut compressor = libdeflater::Compressor::new(level.libdeflate());
         let block_len = max_block_len(&mut compressor);
         Self {
             inner: Some(inner),
@@ -344,9 +403,13 @@ pub(crate) struct ParallelBgzfWriter<W: Write> {
 
 impl<W: Write> ParallelBgzfWriter<W> {
     /// Start `threads` (≥ 1) compression workers at `level`.
-    pub(crate) fn new(inner: W, level: i32, threads: usize) -> Result<Self, BgzfError> {
+    pub(crate) fn new(
+        inner: W,
+        level: CompressionLevel,
+        threads: usize,
+    ) -> Result<Self, BgzfError> {
         let threads = threads.max(1);
-        let lvl = libdeflater::CompressionLvl::new(level).unwrap_or_default();
+        let lvl = level.libdeflate();
         let block_len = max_block_len(&mut libdeflater::Compressor::new(lvl));
         // Enough blocks queued that no worker waits while the writer thread
         // is busy writing, without holding more than a few MiB.
@@ -608,7 +671,11 @@ pub(crate) enum BgzfSink<W: Write> {
 
 impl<W: Write> BgzfSink<W> {
     /// Serial for `threads == 0`, else a pool of `threads` workers.
-    pub(crate) fn new(inner: W, level: i32, threads: usize) -> Result<Self, BgzfError> {
+    pub(crate) fn new(
+        inner: W,
+        level: CompressionLevel,
+        threads: usize,
+    ) -> Result<Self, BgzfError> {
         if threads == 0 {
             Ok(Self::Serial(BgzfWriter::with_compression_level(inner, level)))
         } else {
@@ -618,7 +685,11 @@ impl<W: Write> BgzfSink<W> {
 
     /// The same stream at `level` with `threads` workers, before anything is
     /// written.
-    pub(crate) fn with_compression(self, level: i32, threads: usize) -> Result<Self, BgzfError> {
+    pub(crate) fn with_compression(
+        self,
+        level: CompressionLevel,
+        threads: usize,
+    ) -> Result<Self, BgzfError> {
         let inner = match self {
             Self::Serial(w) => w.into_unwritten_inner()?,
             Self::Parallel(w) => w.into_unwritten_inner()?,
@@ -904,12 +975,12 @@ mod tests {
         let repeated: Vec<u8> = data.iter().copied().cycle().take(10_000).collect();
 
         let mut out1 = Vec::new();
-        let mut w1 = BgzfWriter::with_compression_level(&mut out1, 1);
+        let mut w1 = BgzfWriter::with_compression_level(&mut out1, CompressionLevel::Level1);
         w1.write_all(&repeated).unwrap();
         w1.finish().unwrap();
 
         let mut out9 = Vec::new();
-        let mut w9 = BgzfWriter::with_compression_level(&mut out9, 9);
+        let mut w9 = BgzfWriter::with_compression_level(&mut out9, CompressionLevel::Level9);
         w9.write_all(&repeated).unwrap();
         w9.finish().unwrap();
 
@@ -970,12 +1041,12 @@ mod tests {
                 (x >> 24) as u8
             })
             .collect();
-        for level in [0, 6] {
+        for level in [CompressionLevel::Level0, CompressionLevel::Level6] {
             let mut out = Vec::new();
             let mut writer = BgzfWriter::with_compression_level(&mut out, level);
             writer.write_all(&data).unwrap();
             writer.finish().unwrap();
-            assert_eq!(read_all(&out), data, "level {level}");
+            assert_eq!(read_all(&out), data, "level {level:?}");
             for &start in uncompressed_offsets_of_blocks(&out).keys() {
                 let bsize =
                     u16::from_le_bytes([out[start as usize + 16], out[start as usize + 17]]);
@@ -1031,11 +1102,34 @@ mod tests {
     /// The parallel writer produces the serial writer's bytes, and every index
     /// offset it handed out resolves to the virtual offset the serial writer
     /// reported at the same point of the stream.
+    // r[verify bgzf.writer.compression_level]
+    /// `try_from` takes exactly libdeflate's 0..=12 and `get` gives it back.
+    #[hegel::test]
+    fn compression_level_is_exactly_zero_to_twelve(tc: TestCase) {
+        let level = tc.draw(gs::one_of(vec![
+            gs::integers::<i32>().min_value(-2).max_value(14).boxed(),
+            gs::integers::<i32>().boxed(),
+        ]));
+        match CompressionLevel::try_from(level) {
+            Ok(parsed) => assert_eq!(i32::from(parsed.get()), level),
+            Err(BgzfError::InvalidCompressionLevel { level: bad }) => {
+                assert_eq!(bad, level);
+                assert!(!(0..=12).contains(&level));
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+        assert_eq!(CompressionLevel::default(), CompressionLevel::Level6);
+    }
+
     #[hegel::test(test_cases = crate::pinned::cases(60))]
     fn parallel_writer_matches_serial(tc: TestCase) {
         let steps = tc.draw(gs::vecs(arb_step()).max_size(60));
         let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
-        let level = tc.draw(gs::sampled_from(&[0, 1, 6]));
+        let level = tc.draw(gs::sampled_from(&[
+            CompressionLevel::Level0,
+            CompressionLevel::Level1,
+            CompressionLevel::Level6,
+        ]));
 
         let mut serial = BgzfWriter::with_compression_level(Vec::new(), level);
         let mut parallel = ParallelBgzfWriter::new(Vec::new(), level, threads).unwrap();
@@ -1077,7 +1171,8 @@ mod tests {
 
         let mut sink = Vec::new();
         {
-            let mut parallel = ParallelBgzfWriter::new(&mut sink, 6, 3).unwrap();
+            let mut parallel =
+                ParallelBgzfWriter::new(&mut sink, CompressionLevel::Level6, 3).unwrap();
             parallel.write_all(&data).unwrap();
         }
         assert_eq!(sink, expected);
@@ -1101,7 +1196,8 @@ mod tests {
     #[test]
     fn parallel_writer_fails_fast_after_an_error() {
         let data = vec![7u8; 1_000_000];
-        let mut parallel = ParallelBgzfWriter::new(BrokenSink, 6, 2).unwrap();
+        let mut parallel =
+            ParallelBgzfWriter::new(BrokenSink, CompressionLevel::Level6, 2).unwrap();
         let first = parallel.write_all(&data).and_then(|()| parallel.flush_block());
         let err = first.and_then(|()| parallel.pump(true));
         assert!(matches!(err, Err(BgzfError::WriteFailed { .. })), "{err:?}");

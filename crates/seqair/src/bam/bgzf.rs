@@ -55,6 +55,9 @@ pub enum BgzfError {
     #[error("BGZF block data is truncated")]
     TruncatedBlock,
 
+    #[error("BGZF compression level {level} is outside 0..=12")]
+    InvalidCompressionLevel { level: i32 },
+
     #[error("BGZF header arithmetic overflow (corrupt data)")]
     CorruptHeader,
 

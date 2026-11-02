@@ -9,7 +9,7 @@ use super::owned_record::{OwnedBamRecord, OwnedRecordError};
 use super::raw_record::RawBamRecord;
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
-use crate::io::{BgzfError, IndexBuilder, IndexError};
+use crate::io::{BgzfError, CompressionLevel, IndexBuilder, IndexError};
 use crate::reader::Tid;
 use seqair_types::Pos0;
 use std::fs::File;
@@ -424,7 +424,7 @@ pub struct BamWriterBuilder<'a, T> {
     target: T,
     header: &'a BamHeader,
     write_index: bool,
-    compression_level: i32,
+    compression_level: CompressionLevel,
     compression_threads: usize,
 }
 
@@ -451,7 +451,13 @@ impl<'a, W: Write> BamWriterBuilder<'a, ToWriter<W>> {
 
 impl<'a, T> BamWriterBuilder<'a, T> {
     fn with_target(target: T, header: &'a BamHeader) -> Self {
-        Self { target, header, write_index: false, compression_level: 6, compression_threads: 0 }
+        Self {
+            target,
+            header,
+            write_index: false,
+            compression_level: CompressionLevel::Level6,
+            compression_threads: 0,
+        }
     }
 
     /// Co-produce a BAI index during writing. Defaults to `false`.
@@ -466,10 +472,11 @@ impl<'a, T> BamWriterBuilder<'a, T> {
     }
 
     // r[impl bam_writer.compression_level]
-    /// Override the BGZF compression level. Defaults to `6` (htslib default).
-    /// Level `1` is commonly used in pipelines that re-compress downstream.
+    /// Override the BGZF compression level. Defaults to
+    /// [`CompressionLevel::Level6`] (htslib's default). Level 1 is commonly
+    /// used in pipelines that re-compress downstream.
     #[must_use]
-    pub fn compression_level(mut self, level: i32) -> Self {
+    pub fn compression_level(mut self, level: CompressionLevel) -> Self {
         self.compression_level = level;
         self
     }

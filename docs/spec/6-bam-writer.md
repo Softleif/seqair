@@ -60,7 +60,7 @@ r[bam_writer.finish]
 `finish()` MUST flush any buffered BGZF data. If index co-production is enabled, it MUST call `index.finish(final_virtual_offset)` after flushing all record data (see `r[bam_writer.index_finish]`). It MUST then write the BGZF EOF marker block (as specified by `r[bgzf.writer.eof_marker]`). The method MUST return `Result<(W, Option<IndexBuilder>), BamWriteError>` — the inner writer `W` (matching the VCF writer's `r[vcf_writer.finish]` pattern) and the finished IndexBuilder if co-production was enabled. Dropping the writer without calling `finish()` SHOULD flush on a best-effort basis (see `r[bgzf.writer.finish]`).
 
 r[bam_writer.compression_level]
-The compression level MUST be configurable on the builder via `BamWriterBuilder::compression_level(level)` (taking effect when `build()` is called, before the header is written). The default SHOULD be level 6 (matching htslib). Level 1 (fastest) is commonly used in pipelines where downstream tools re-compress. Setting the level after `build()` is not supported, since the header's BGZF blocks would already have been emitted at the previous level.
+The compression level MUST be configurable on the builder via `BamWriterBuilder::compression_level(level)`, a `CompressionLevel` (`r[bgzf.writer.compression_level]`) (taking effect when `build()` is called, before the header is written). The default SHOULD be level 6 (matching htslib). Level 1 (fastest) is commonly used in pipelines where downstream tools re-compress. Setting the level after `build()` is not supported, since the header's BGZF blocks would already have been emitted at the previous level.
 
 ## BGZF block management
 
