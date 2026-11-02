@@ -49,10 +49,6 @@ pub enum SamFormatError {
     MalformedHeaderLine { line: usize },
 }
 
-/// SAM's CIGAR letters by BAM op code, `?` for the reserved codes 10–15
-/// (htslib's `BAM_CIGAR_STR "??????"`).
-const CIGAR_CHARS: &[u8; 16] = b"MIDNSHP=XB??????";
-
 // r[impl sam.format]
 /// Append `record` to `out` as one SAM line, without a trailing newline,
 /// exactly as htslib's `sam_format1` prints it after reading the record from a
@@ -126,7 +122,7 @@ fn write_record(
     }
     for op in crate::bam::cigar::CigarOp::iter_bam_bytes(cigar) {
         out.extend_from_slice(int.format(op.len()).as_bytes());
-        out.push(CIGAR_CHARS.get(usize::from(op.op_code())).copied().unwrap_or(b'?'));
+        out.push(op.op_type().to_sam_char());
     }
     out.push(b'\t');
 
