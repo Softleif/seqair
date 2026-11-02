@@ -101,6 +101,17 @@ pub enum BamHeaderError {
     #[error("BAM header field `{field}` value {value} exceeds limit {limit} — data may be corrupt")]
     FieldTooLarge { field: &'static str, value: usize, limit: usize },
 
+    #[error("a @PG line needs a non-empty ID")]
+    EmptyPgId,
+
+    #[error(
+        "@PG {tag} contains the control character {value:?}, which would break the header line"
+    )]
+    InvalidPgField { tag: &'static str, value: char },
+
+    #[error("@PG PP:{pp} names no @PG line of the header")]
+    UnknownPgPrevious { pp: SmolStr },
+
     #[error("BGZF error reading BAM header")]
     Bgzf {
         #[from]
@@ -371,14 +382,53 @@ impl BamHeader {
     }
 
     // r[impl bam_writer.header_add_pg]
-    /// Append a `@PG` header record. If `pg.pp` is `None`, it is auto-set to the ID of the
-    /// last existing `@PG` line (forming a provenance chain per SAM1 §1.3).
-    pub fn add_pg(&mut self, pg: PgRecord) {
+    /// Append a `@PG` header record and return the ID it got: `pg.id`, or if
+    /// a `@PG` line already has that ID, the first free `<id>.1`, `<id>.2`, …
+    /// (as htslib names a program's second run). If `pg.pp` is `None`, it is
+    /// set to the ID of the last existing `@PG` line (forming a provenance
+    /// chain per SAM1 §1.3).
+    ///
+    /// # Errors
+    /// The header is unchanged on [`BamHeaderError::EmptyPgId`],
+    /// [`BamHeaderError::InvalidPgField`] (a tab, newline or other control
+    /// character in a field) and [`BamHeaderError::UnknownPgPrevious`] (a `PP`
+    /// no `@PG` line has as its ID).
+    pub fn add_pg(&mut self, pg: PgRecord) -> Result<SmolStr, BamHeaderError> {
+        if pg.id.is_empty() {
+            return Err(BamHeaderError::EmptyPgId);
+        }
+        let fields = [
+            ("ID", Some(&pg.id)),
+            ("PN", pg.pn.as_ref()),
+            ("VN", pg.vn.as_ref()),
+            ("CL", pg.cl.as_ref()),
+            ("DS", pg.ds.as_ref()),
+            ("PP", pg.pp.as_ref()),
+        ];
+        for (tag, value) in fields {
+            if let Some(value) = value.and_then(|v| v.chars().find(|c| c.is_control())) {
+                return Err(BamHeaderError::InvalidPgField { tag, value });
+            }
+        }
+        let taken: std::collections::HashSet<&str> = self.pg_ids().collect();
+        if let Some(pp) = &pg.pp
+            && !taken.contains(pp.as_str())
+        {
+            return Err(BamHeaderError::UnknownPgPrevious { pp: pp.clone() });
+        }
+        let id = if taken.contains(pg.id.as_str()) {
+            (1_u64..)
+                .map(|n| SmolStr::new(format!("{}.{n}", pg.id)))
+                .find(|id| !taken.contains(id.as_str()))
+                .unwrap_or_else(|| pg.id.clone())
+        } else {
+            pg.id.clone()
+        };
         let pp = pg.pp.or_else(|| self.last_pg_id());
 
         let line = &mut self.header_text;
         line.push_str("@PG\tID:");
-        line.push_str(&pg.id);
+        line.push_str(&id);
 
         if let Some(pn) = &pg.pn {
             line.push_str("\tPN:");
@@ -401,15 +451,20 @@ impl BamHeader {
             line.push_str(pp_id);
         }
         line.push('\n');
+        Ok(id)
     }
 
-    /// Find the ID of the last `@PG` line in the header text.
-    fn last_pg_id(&self) -> Option<SmolStr> {
+    /// The IDs of the header's `@PG` lines, in order.
+    fn pg_ids(&self) -> impl Iterator<Item = &str> {
         self.header_text
             .lines()
-            .rev()
-            .find(|l| l.starts_with("@PG"))
-            .and_then(|line| line.split('\t').find_map(|f| f.strip_prefix("ID:")).map(SmolStr::new))
+            .filter(|l| l.starts_with("@PG"))
+            .filter_map(|line| line.split('\t').find_map(|f| f.strip_prefix("ID:")))
+    }
+
+    /// The ID of the last `@PG` line in the header text.
+    fn last_pg_id(&self) -> Option<SmolStr> {
+        self.pg_ids().last().map(SmolStr::new)
     }
 
     // r[impl unified.sort_order]
@@ -436,6 +491,8 @@ impl BamHeader {
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
 
     fn make_bgzf_block(data: &[u8]) -> Vec<u8> {
         let mut compressor =
@@ -643,14 +700,16 @@ mod tests {
     fn add_pg_appends_line() {
         let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n";
         let mut header = BamHeader::from_sam_text(text).unwrap();
-        header.add_pg(PgRecord {
-            id: SmolStr::new("seqair"),
-            pn: Some(SmolStr::new("seqair")),
-            vn: Some(SmolStr::new("0.1.0")),
-            cl: None,
-            ds: None,
-            pp: None,
-        });
+        header
+            .add_pg(PgRecord {
+                id: SmolStr::new("seqair"),
+                pn: Some(SmolStr::new("seqair")),
+                vn: Some(SmolStr::new("0.1.0")),
+                cl: None,
+                ds: None,
+                pp: None,
+            })
+            .unwrap();
 
         let text = header.header_text();
         assert!(text.contains("@PG\tID:seqair\tPN:seqair\tVN:0.1.0\n"));
@@ -660,14 +719,16 @@ mod tests {
     fn add_pg_auto_chains_pp() {
         let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\tPN:bwa\n";
         let mut header = BamHeader::from_sam_text(text).unwrap();
-        header.add_pg(PgRecord {
-            id: SmolStr::new("seqair"),
-            pn: Some(SmolStr::new("seqair")),
-            vn: None,
-            cl: None,
-            ds: None,
-            pp: None, // should auto-set to "bwa"
-        });
+        header
+            .add_pg(PgRecord {
+                id: SmolStr::new("seqair"),
+                pn: Some(SmolStr::new("seqair")),
+                vn: None,
+                cl: None,
+                ds: None,
+                pp: None, // should auto-set to "bwa"
+            })
+            .unwrap();
 
         let text = header.header_text();
         assert!(text.contains("PP:bwa"), "PP should be auto-set to last PG ID: {text}");
@@ -675,19 +736,93 @@ mod tests {
 
     #[test]
     fn add_pg_explicit_pp_overrides_auto() {
-        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\tPN:bwa\n";
+        let text =
+            "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\tPN:bwa\n@PG\tID:dedup\tPP:bwa\n";
         let mut header = BamHeader::from_sam_text(text).unwrap();
-        header.add_pg(PgRecord {
-            id: SmolStr::new("seqair"),
+        header.add_pg(pg("seqair", Some("bwa"))).unwrap();
+
+        let text = header.header_text();
+        assert!(text.ends_with("@PG\tID:seqair\tPP:bwa\n"), "explicit PP overrides auto: {text}");
+    }
+
+    fn pg(id: &str, pp: Option<&str>) -> PgRecord {
+        PgRecord {
+            id: SmolStr::new(id),
             pn: None,
             vn: None,
             cl: None,
             ds: None,
-            pp: Some(SmolStr::new("custom")),
-        });
+            pp: pp.map(SmolStr::new),
+        }
+    }
 
-        let text = header.header_text();
-        assert!(text.contains("PP:custom"), "explicit PP should override auto: {text}");
+    // r[verify bam_writer.header_add_pg]
+    /// The ID a `@PG` gets is the one asked for, or the first free `<id>.N`,
+    /// and `PP` chains to the last `@PG` line.
+    #[hegel::test]
+    fn add_pg_takes_a_free_id_and_chains_to_the_last(tc: TestCase) {
+        let names = ["a", "a.1", "a.2", "a.4", "b", "b.1"];
+        let existing = tc.draw(gs::vecs(gs::sampled_from(names.to_vec())).max_size(6));
+        let requested = tc.draw(gs::sampled_from(vec!["a", "b", "c"]));
+        let mut text = String::from("@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n");
+        for id in &existing {
+            text.push_str("@PG\tID:");
+            text.push_str(id);
+            text.push('\n');
+        }
+        let mut header = BamHeader::from_sam_text(&text).unwrap();
+
+        let id = header.add_pg(pg(requested, None)).unwrap();
+
+        let expected = std::iter::once(requested.to_owned())
+            .chain((1..).map(|n| format!("{requested}.{n}")))
+            .find(|id| !existing.contains(&id.as_str()))
+            .unwrap();
+        assert_eq!(id.as_str(), expected);
+        let line = match existing.last() {
+            Some(last) => format!("@PG\tID:{expected}\tPP:{last}\n"),
+            None => format!("@PG\tID:{expected}\n"),
+        };
+        assert_eq!(header.header_text(), format!("{text}{line}"));
+    }
+
+    // r[verify bam_writer.header_add_pg]
+    /// A control character in any field, an empty ID, or a `PP` naming no
+    /// `@PG` line is refused, and the header is left as it was.
+    #[hegel::test]
+    fn add_pg_refuses_what_would_break_the_header(tc: TestCase) {
+        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\n";
+        let mut header = BamHeader::from_sam_text(text).unwrap();
+        let field = tc.draw(gs::integers::<usize>().max_value(5));
+        let control = tc.draw(gs::sampled_from(vec!['\t', '\n', '\r', '\0', '\u{7f}']));
+        let mut record = PgRecord {
+            id: SmolStr::new("rastair"),
+            pn: Some(SmolStr::new("rastair")),
+            vn: Some(SmolStr::new("1.0")),
+            cl: Some(SmolStr::new("rastair bam -o out.bam in.bam")),
+            ds: Some(SmolStr::new("ünïcode is fine")),
+            pp: Some(SmolStr::new("bwa")),
+        };
+        let slot = match field {
+            0 => &mut record.id,
+            1 => record.pn.as_mut().unwrap(),
+            2 => record.vn.as_mut().unwrap(),
+            3 => record.cl.as_mut().unwrap(),
+            4 => record.ds.as_mut().unwrap(),
+            _ => record.pp.as_mut().unwrap(),
+        };
+        *slot = SmolStr::new(format!("{slot}{control}x"));
+
+        assert!(matches!(
+            header.add_pg(record),
+            Err(BamHeaderError::InvalidPgField { value, .. }) if value == control
+        ));
+        assert!(matches!(header.add_pg(pg("", None)), Err(BamHeaderError::EmptyPgId)));
+        assert!(matches!(
+            header.add_pg(pg("x", Some("nope"))),
+            Err(BamHeaderError::UnknownPgPrevious { .. })
+        ));
+        assert_eq!(header.header_text(), text);
     }
 
     #[test]
