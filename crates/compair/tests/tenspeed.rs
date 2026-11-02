@@ -15,6 +15,8 @@
 //! - on x86_64, agreement with gkl -- an independent Rust port of the kernel
 //!   GATK calls through JNI, on exactly the bytes gkl's own harness would get.
 
+#[cfg(target_arch = "x86_64")]
+use compair::align_full_gatk;
 use compair::{
     Band, Haplotype, Pair, Read, StandardEmission, Workspace, align_banded_simd, align_full,
     align_strips_simd,
@@ -166,7 +168,8 @@ fn the_pairs_kernel_is_the_strip_kernel_on_every_pair() {
 /// An independent implementation of the same recurrence, on the same bytes.
 /// gkl is a port of Intel's GKL, which is what GATK actually calls, so
 /// agreement here is agreement with the production kernel rather than with our
-/// own reading of the spec.
+/// own reading of the spec. gkl has GATK's ends (no read begins with an
+/// insertion), so the oracle here is `align_full_gatk`, not `align_full`.
 ///
 /// Run this twice to cover both implementations. gkl's `c-avx` feature
 /// *replaces* its Rust AVX kernels with Intel's original C++, so the vector
@@ -193,8 +196,10 @@ fn the_reference_agrees_with_gkl() {
     );
 
     let standard = StandardEmission::default();
-    let ours: Vec<f64> =
-        pairs.iter().map(|pair| align_full(&pair.haplotype, &pair.read, &standard).get()).collect();
+    let ours: Vec<f64> = pairs
+        .iter()
+        .map(|pair| align_full_gatk(&pair.haplotype, &pair.read, &standard).get())
+        .collect();
 
     // `f64` kernels should agree with our `f64` matrix to rounding; the `f32`
     // ones carry their own error and only have to be close.
