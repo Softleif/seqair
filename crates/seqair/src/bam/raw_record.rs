@@ -317,7 +317,7 @@ impl RawBamRecord {
     }
 
     /// The real CIGAR in BAM's packed form: the long one, else the stored one.
-    fn cigar_packed(&self) -> &[u8] {
+    pub(crate) fn cigar_packed(&self) -> &[u8] {
         self.long_cigar().unwrap_or(self.stored_cigar_bytes())
     }
 
@@ -757,6 +757,57 @@ mod tests {
         aux: &[u8],
     ) -> Result<RawBamRecord, DecodeError> {
         RawBamRecord::from_payload(payload(placed, flags, cigar, &[1, 2, 4, 8], aux), &header())
+    }
+
+    // r[verify cigar.aligned_pairs.raw_record]
+    /// Walking the packed CIGAR yields what walking the decoded ops does, a
+    /// long CIGAR's real ops included; an unplaced record with a CIGAR is
+    /// refused.
+    #[hegel::test]
+    fn aligned_pairs_walk_the_packed_cigar_as_the_decoded_one(tc: hegel::TestCase) {
+        use super::super::aligned_pairs::{AlignedPairs, AlignedPairsError};
+        use hegel::generators as gs;
+        let n = tc.draw(gs::integers::<usize>().max_value(6));
+        let real: Vec<u32> = (0..n)
+            .map(|_| {
+                let code = tc.draw_silent(gs::sampled_from(vec![0u32, 1, 2, 3, 4, 7, 8]));
+                op(tc.draw_silent(gs::integers::<u32>().max_value(4)), code)
+            })
+            .collect();
+        let decode = |ops: &[u32]| -> Vec<CigarOp> {
+            ops.iter().map(|&op| CigarOp::from_bam_u32(op)).collect()
+        };
+        let real_ops = decode(&real);
+        let qlen: u32 = real_ops.iter().filter(|o| o.consumes_query()).map(|o| o.len()).sum();
+        let rlen: u32 = real_ops.iter().filter(|o| o.consumes_ref()).map(|o| o.len()).sum();
+        let placed = tc.draw(gs::booleans());
+        let long = placed && qlen > 0 && tc.draw(gs::booleans());
+        let (stored, aux) = if long {
+            (vec![op(qlen, 4), op(rlen, 3)], cg(b'I', &real))
+        } else {
+            (real.clone(), vec![])
+        };
+        let codes = vec![1u8; qlen as usize];
+        let flags = if placed { 0 } else { 4 };
+        let record =
+            RawBamRecord::from_payload(payload(placed, flags, &stored, &codes, &aux), &header())
+                .unwrap();
+        // htslib takes a CG tag as the real CIGAR only under its own rules
+        // (`r[bam.raw_record.long_cigar]`), which a short real CIGAR fails.
+        let walked = decode(if record.has_cg_placeholder() { &real } else { &stored });
+
+        match record.aligned_pairs() {
+            Ok(pairs) => {
+                assert!(placed || walked.is_empty());
+                let expected: Vec<_> = AlignedPairs::new(Pos0::ZERO, &walked).full().collect();
+                assert_eq!(pairs.full().collect::<Vec<_>>(), expected);
+            }
+            Err(AlignedPairsError::UnmappedWithCigar { cigar_ops }) => {
+                assert!(!placed && !walked.is_empty());
+                assert_eq!(cigar_ops, walked.len());
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
     }
 
     // r[verify bam.raw_record.long_cigar]
