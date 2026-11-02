@@ -150,11 +150,8 @@ impl CigarOp {
 
     /// Reinterpret a slice of ops as their on-the-wire BAM bytes
     /// (LE u32 per op). Safe via `CigarOp: Pod` — `repr(transparent)` over
-    /// `u32` with every bit pattern a valid op.
-    ///
-    /// On big-endian hosts the bytes are still in native order, NOT BAM-on-disk
-    /// order. Callers that write to disk on a BE host would need to byte-swap
-    /// each op first; we don't, because seqair targets LE only.
+    /// `u32` with every bit pattern a valid op — and exact because seqair
+    /// builds for little-endian targets only (see `lib.rs`).
     #[inline]
     pub fn ops_as_bytes(ops: &[Self]) -> &[u8] {
         bytemuck::cast_slice(ops)
@@ -162,90 +159,47 @@ impl CigarOp {
 
     /// Append BAM-on-disk CIGAR bytes (LE u32 per op) into a typed `Vec<CigarOp>`.
     ///
-    /// Source bytes are unaligned; on LE hosts this is a single memcpy, on BE
-    /// it would byte-swap per op (we don't compile that path — seqair is LE only).
+    /// Source bytes are unaligned; this is a single memcpy.
     /// Caller must ensure `bytes.len()` is a multiple of 4 (true for valid BAM).
     #[inline]
     pub fn extend_from_bam_bytes(dst: &mut Vec<Self>, bytes: &[u8]) {
         debug_assert!(bytes.len().is_multiple_of(4), "BAM CIGAR bytes must be multiple of 4");
-        #[cfg(target_endian = "little")]
-        {
-            let n_ops = bytes.len() / 4;
-            let n_bytes = n_ops.checked_mul(4).expect("cigar byte length overflow");
-            let new_len = dst.len().checked_add(n_ops).expect("cigar slab len overflow");
-            dst.reserve(n_ops);
-            // SAFETY: CigarOp is repr(transparent) over u32 (4 bytes) with a
-            // compile-time size guard on line 107. Every bit pattern is a valid
-            // CigarOp (op codes 0..=15 all decodable, length field is unconstrained
-            // u28). On LE the in-memory u32 byte order matches BAM's LE on-disk
-            // order, so a bytewise memcpy of n_ops * 4 source bytes produces n_ops
-            // valid CigarOp values. dst has at least n_ops uninit slots after
-            // reserve(); we copy n_bytes into it, then bump len.
-            unsafe {
-                let dst_ptr = dst.as_mut_ptr().add(dst.len()).cast::<u8>();
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr, n_bytes);
-                dst.set_len(new_len);
-            }
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            for chunk in bytes.chunks_exact(4) {
-                let arr: [u8; 4] = chunk.try_into().expect("chunks_exact(4) yields 4 bytes");
-                dst.push(CigarOp::from_bam_u32(u32::from_le_bytes(arr)));
-            }
+        let n_ops = bytes.len() / 4;
+        let n_bytes = n_ops.checked_mul(4).expect("cigar byte length overflow");
+        let new_len = dst.len().checked_add(n_ops).expect("cigar slab len overflow");
+        dst.reserve(n_ops);
+        // SAFETY: CigarOp is repr(transparent) over u32 (4 bytes) with a
+        // compile-time size guard above. Every bit pattern is a valid
+        // CigarOp (op codes 0..=15 all decodable, length field is an
+        // unconstrained u28). seqair builds for little-endian targets only, so
+        // the in-memory u32 byte order is BAM's on-disk order, and a bytewise
+        // memcpy of n_ops * 4 source bytes produces n_ops valid CigarOp
+        // values. dst has at least n_ops uninit slots after reserve(); we copy
+        // n_bytes into it, then bump len.
+        unsafe {
+            let dst_ptr = dst.as_mut_ptr().add(dst.len()).cast::<u8>();
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr, n_bytes);
+            dst.set_len(new_len);
         }
     }
 
     /// View raw BAM CIGAR bytes as `&[CigarOp]` without copying.
     ///
-    /// Returns `None` if the length is not a multiple of 4, the pointer is
-    /// not 4-byte aligned, or the target is big-endian. On aligned LE input
-    /// this is a zero-cost transmute. BAM CIGAR data is **not** guaranteed
-    /// aligned — the read name length determines the start offset, and
-    /// samtools produces unaligned CIGAR data when `l_read_name` is not a
-    /// multiple of 4. Use [`extend_from_bam_bytes`](Self::extend_from_bam_bytes) if alignment cannot be
-    /// guaranteed (it's always correct, just requires a copy).
+    /// Returns `None` if the length is not a multiple of 4 or the pointer is
+    /// not 4-byte aligned; otherwise this is a zero-cost transmute. BAM CIGAR
+    /// data is **not** guaranteed aligned — the read name length determines
+    /// the start offset, and samtools produces unaligned CIGAR data when
+    /// `l_read_name` is not a multiple of 4. Use
+    /// [`extend_from_bam_bytes`](Self::extend_from_bam_bytes) if alignment
+    /// cannot be guaranteed (it's always correct, just requires a copy).
     // r[impl cigar.slice_from_bam_bytes]
     #[inline]
     pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
         if bytes.is_empty() {
+            // An empty `&[u8]`'s dangling pointer need not be 4-aligned.
             return Some(&[]);
         }
-        if !bytes.len().is_multiple_of(4) {
-            return None;
-        }
-        #[cfg(target_endian = "little")]
-        {
-            // BAM data is packed sequentially: 32-byte fixed header, then
-            // qname (l_read_name bytes, including NUL), then CIGAR. If
-            // l_read_name is not a multiple of 4, the CIGAR pointer is
-            // unaligned. from_raw_parts requires CigarOp alignment (4).
-            #[allow(
-                clippy::arithmetic_side_effects,
-                clippy::manual_is_multiple_of,
-                reason = "pointer-to-usize cast is defined on all supported targets; align_of is non-zero so % is safe"
-            )]
-            if bytes.as_ptr() as usize % align_of::<CigarOp>() != 0 {
-                return None;
-            }
-            let n = bytes.len() / 4;
-            // SAFETY:
-            // - Length: `n` is `bytes.len() / 4`, checked to be a multiple of
-            //   4 above. The pointer advance of `n * size_of::<CigarOp>()`
-            //   (== n * 4) stays within the allocation.
-            // - Alignment: checked via `is_aligned()` above.
-            // - Validity: every `u32` bit pattern is a valid `CigarOp` — the
-            //   op code field is 4 bits (0..=15, all decodable) and the length
-            //   field is an unconstrained 28-bit integer.
-            // - Endianness: guarded by `#[cfg(target_endian = "little")]`;
-            //   on LE hosts BAM's on-disk LE `u32` byte order matches native
-            //   in-memory layout.
-            Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const CigarOp, n) })
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            None
-        }
+        bytemuck::try_cast_slice(bytes).ok()
     }
 }
 

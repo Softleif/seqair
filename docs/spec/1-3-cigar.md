@@ -43,8 +43,8 @@ r[cigar.slice_from_bam_bytes]
 borrowed, zero-copy view of BAM-on-disk CIGAR bytes, and MUST return `None`
 rather than a view whenever that reinterpretation would be wrong: when
 `bytes.len()` is not a multiple of 4, when the pointer is not 4-byte aligned
-(`align_of::<CigarOp>()`), or on a big-endian target, where the in-memory u32
-byte order does not match BAM's little-endian on-disk order. Empty input MUST
+(`align_of::<CigarOp>()`). (seqair builds for little-endian targets only, so
+the in-memory u32 byte order is BAM's on-disk order.) Empty input MUST
 return `Some(&[])`. Callers that cannot guarantee alignment MUST use
 `extend_from_bam_bytes`, which copies and is always correct. Returning `None` is
 the whole contract: a caller that treats it as "no CIGAR" would silently drop
