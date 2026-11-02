@@ -713,11 +713,12 @@ impl super::raw_record::RawBamRecord {
     /// position whose CIGAR is not empty, as
     /// [`OwnedBamRecord::aligned_pairs`](super::owned_record::OwnedBamRecord::aligned_pairs).
     pub fn aligned_pairs(&self) -> Result<AlignedPairs<'_>, AlignedPairsError> {
-        let ops = Ops::Packed(self.cigar_packed().as_chunks::<4>().0);
+        let packed = self.cigar_packed().as_chunks::<4>().0;
+        let ops = Ops::Packed(packed);
         match self.pos() {
             Some(p) => Ok(AlignedPairs::over(p, ops)),
-            None if ops.is_empty() => Ok(AlignedPairs::over(Pos0::ZERO, ops)),
-            None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: self.cigar_len() }),
+            None if packed.is_empty() => Ok(AlignedPairs::over(Pos0::ZERO, ops)),
+            None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: packed.len() }),
         }
     }
 }
