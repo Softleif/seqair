@@ -142,11 +142,11 @@ impl CigarOp {
     }
 
     pub const fn consumes_ref(self) -> bool {
-        consumes_ref(self.op_code())
+        self.op_type().consumes_ref()
     }
 
     pub const fn consumes_query(self) -> bool {
-        consumes_query(self.op_code())
+        self.op_type().consumes_query()
     }
 
     /// One op from its on-disk BAM bytes (a little-endian `u32`).
@@ -267,16 +267,6 @@ impl std::fmt::Display for CigarStr<'_> {
     }
 }
 
-/// Whether a CIGAR op code consumes the reference.
-const fn consumes_ref(op: u8) -> bool {
-    matches!(op, CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X)
-}
-
-/// Whether a CIGAR op code consumes the query.
-const fn consumes_query(op: u8) -> bool {
-    matches!(op, CIGAR_M | CIGAR_I | CIGAR_S | CIGAR_EQ | CIGAR_X)
-}
-
 // r[impl cigar.ref_len]
 /// The reference length of `ops`: the summed lengths of M, D, N, = and X
 /// (htslib's `bam_cigar2rlen`). Takes decoded ops (`&[CigarOp]`) or packed
@@ -319,9 +309,11 @@ pub fn calc_matches_indels(ops: &[CigarOp]) -> (u32, u32) {
     let mut matches = 0u32;
     let mut indels = 0u32;
     for op in ops {
-        match op.op_code() {
-            CIGAR_M => matches = matches.saturating_add(op.len()),
-            CIGAR_I | CIGAR_D => indels = indels.saturating_add(op.len()),
+        match op.op_type() {
+            CigarOpType::Match => matches = matches.saturating_add(op.len()),
+            CigarOpType::Insertion | CigarOpType::Deletion => {
+                indels = indels.saturating_add(op.len());
+            }
             _ => {}
         }
     }
@@ -333,9 +325,9 @@ pub fn calc_matches_indels(ops: &[CigarOp]) -> (u32, u32) {
 /// past.
 pub fn soft_clips(ops: &[CigarOp]) -> (u32, u32) {
     fn at_end<'a>(ops: impl Iterator<Item = &'a CigarOp>) -> u32 {
-        ops.map_while(|op| match op.op_code() {
-            CIGAR_S => Some(op.len()),
-            CIGAR_H => Some(0),
+        ops.map_while(|op| match op.op_type() {
+            CigarOpType::SoftClip => Some(op.len()),
+            CigarOpType::HardClip => Some(0),
             _ => None,
         })
         .fold(0, u32::saturating_add)
@@ -435,10 +427,8 @@ pub struct CompactOp {
     /// cumulative leading clip length plus all preceding query-consuming
     /// op lengths.
     query_start: u32,
-    /// Packed: `len << 4 | op_code`. Same layout as BAM's on-disk CIGAR
-    /// encoding. Upper 28 bits = operation length, lower 4 bits = CIGAR
-    /// op code (0=M, 1=I, 2=D, 3=N, 4=S, 5=H, 6=P, 7==, 8=X).
-    len_op: u32,
+    /// The operation.
+    op: CigarOp,
 }
 
 impl CompactOp {
@@ -449,13 +439,22 @@ impl CompactOp {
         reason = "CIGAR ops don't have a meaningful 'empty' state"
     )]
     pub fn len(self) -> u32 {
-        self.len_op >> 4
+        self.op.len()
     }
-    /// BAM CIGAR op code (lower 4 bits). See module-level constants
-    /// `CIGAR_M` through `CIGAR_X`.
+    /// BAM CIGAR op code (lower 4 bits), as [`CigarOp::op_code`].
     #[inline]
-    pub fn op_type(self) -> u8 {
-        (self.len_op & 0xF) as u8
+    pub fn op_code(self) -> u8 {
+        self.op.op_code()
+    }
+
+    #[inline]
+    fn consumes_ref(self) -> bool {
+        self.op.consumes_ref()
+    }
+
+    #[inline]
+    fn consumes_query(self) -> bool {
+        self.op.consumes_query()
     }
 }
 
@@ -590,7 +589,7 @@ impl CigarMapping {
             Self::Complex(ops) => {
                 let pos: u32 = pos.as_u32();
                 for (i, op) in ops.iter().enumerate() {
-                    if !consumes_ref(op.op_type()) {
+                    if !op.consumes_ref() {
                         continue;
                     }
                     let ref_end = op.ref_start.saturating_add(op.len());
@@ -599,7 +598,7 @@ impl CigarMapping {
                     }
                     // A deletion can only follow a match block, and only from
                     // its last reference position.
-                    if matches!(op.op_type(), CIGAR_M | CIGAR_EQ | CIGAR_X)
+                    if matches!(op.op_code(), CIGAR_M | CIGAR_EQ | CIGAR_X)
                         && pos == ref_end.wrapping_sub(1)
                     {
                         return next_deletion_len(ops, i);
@@ -658,7 +657,7 @@ fn try_linear(ops: &[CigarOp]) -> Option<(u32, u32)> {
 fn clip_flanks(ops: &[CompactOp]) -> (Option<CompactOp>, Option<CompactOp>) {
     let mut lead = None;
     for op in ops {
-        match op.op_type() {
+        match op.op_code() {
             CIGAR_S => {
                 lead = Some(*op);
                 break;
@@ -669,7 +668,7 @@ fn clip_flanks(ops: &[CompactOp]) -> (Option<CompactOp>, Option<CompactOp>) {
     }
     let mut trail = None;
     for op in ops.iter().rev() {
-        match op.op_type() {
+        match op.op_code() {
             CIGAR_S => {
                 trail = Some(*op);
                 break;
@@ -688,18 +687,16 @@ fn build_compact_ops(rec_pos: Pos0, ops: &[CigarOp]) -> Option<SmallVec<CompactO
 
     for op in ops {
         let len = op.len();
-        let op_type = op.op_code();
 
         let ref_start_i64 = rec_pos.as_i64().wrapping_add(ref_off);
         // r[impl cigar.compact_op_position_invariant]
         let ref_start = u32::try_from(ref_start_i64).trace_ok("ref_start exceeds u32 range")?;
-        let len_op = op.to_bam_u32();
-        out.push(CompactOp { ref_start, query_start: query_off, len_op });
+        out.push(CompactOp { ref_start, query_start: query_off, op: *op });
 
-        if consumes_ref(op_type) {
+        if op.consumes_ref() {
             ref_off = ref_off.checked_add(i64::from(len)).trace_err("ref offset overflow")?;
         }
-        if consumes_query(op_type) {
+        if op.consumes_query() {
             query_off = query_off.saturating_add(len);
         }
     }
@@ -717,11 +714,11 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     let mut total = 0u32;
     let mut idx = op_idx.checked_add(1)?;
     while let Some(next) = ops.get(idx) {
-        if next.op_type() == CIGAR_P {
+        if next.op_code() == CIGAR_P {
             idx = idx.checked_add(1)?;
             continue;
         }
-        if next.op_type() != CIGAR_I {
+        if next.op_code() != CIGAR_I {
             break;
         }
         total = total.saturating_add(next.len());
@@ -736,7 +733,7 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
 fn next_deletion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     let mut idx = op_idx.checked_add(1)?;
     while let Some(next) = ops.get(idx) {
-        match next.op_type() {
+        match next.op_code() {
             CIGAR_P => idx = idx.checked_add(1)?,
             CIGAR_D => return Some(next.len()),
             _ => return None,
@@ -755,11 +752,11 @@ fn classify_op(
     pos: u32,
     ref_end: u32,
 ) -> Option<CigarPosInfo> {
-    if consumes_query(op.op_type()) {
+    if op.consumes_query() {
         debug_assert!(
-            matches!(op.op_type(), CIGAR_M | CIGAR_EQ | CIGAR_X),
+            matches!(op.op_code(), CIGAR_M | CIGAR_EQ | CIGAR_X),
             "classify_op reached query-consuming branch with unexpected op type {}",
-            op.op_type()
+            op.op_code()
         );
         let offset = pos.wrapping_sub(op.ref_start);
         let qpos = QPos::new(op.query_start.checked_add(offset).trace_err("qpos overflow")?);
@@ -769,7 +766,7 @@ fn classify_op(
             return Some(CigarPosInfo::Insertion { qpos, insert_len });
         }
         Some(CigarPosInfo::Match { qpos })
-    } else if op.op_type() == CIGAR_D {
+    } else if op.op_code() == CIGAR_D {
         if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
@@ -780,7 +777,7 @@ fn classify_op(
             });
         }
         Some(CigarPosInfo::Deletion { del_len: op.len() })
-    } else if op.op_type() == CIGAR_N {
+    } else if op.op_code() == CIGAR_N {
         if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
@@ -800,7 +797,7 @@ fn classify_op(
 fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
     let pos: u32 = pos.as_u32();
     for (i, op) in ops.iter().enumerate() {
-        if !consumes_ref(op.op_type()) {
+        if !op.consumes_ref() {
             continue;
         }
         let ref_end = op.ref_start.saturating_add(op.len());
@@ -822,7 +819,7 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
     }
     for i in idx.saturating_sub(2)..ops.len().min(idx.saturating_add(1)) {
         let Some(op) = ops.get(i) else { continue };
-        if !consumes_ref(op.op_type()) {
+        if !op.consumes_ref() {
             continue;
         }
         let ref_end = op.ref_start.saturating_add(op.len());
