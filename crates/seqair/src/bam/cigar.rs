@@ -86,17 +86,36 @@ impl CigarOpType {
     }
 
     // r[impl cigar.sam_letters]
-    /// The op's SAM letter by BAM code, as htslib's `BAM_CIGAR_STR` prints
-    /// it: `MIDNSHP=X`, `B` for code 9 (htslib's "back"), `?` for the reserved
-    /// codes 10–15.
+    /// The letter SAM text writes for this op, as htslib's `BAM_CIGAR_STR`
+    /// has it: `MIDNSHP=X` for codes 0–8, `B` for code 9 (htslib's "back"
+    /// op, which no current SAM spec defines) and `?` for the reserved codes
+    /// 10–15, which have no letter. [`Display`](std::fmt::Display) prints
+    /// the same.
+    ///
+    /// ```
+    /// use seqair::bam::cigar::CigarOpType;
+    ///
+    /// assert_eq!(CigarOpType::SeqMatch.to_sam_char(), b'=');
+    /// assert_eq!(CigarOpType::Unknown(9).to_sam_char(), b'B');
+    /// assert_eq!(CigarOpType::Unknown(12).to_sam_char(), b'?');
+    /// ```
     pub fn to_sam_char(self) -> u8 {
         const LETTERS: &[u8; 16] = b"MIDNSHP=XB??????";
         LETTERS.get(usize::from(self.to_bam_code() & 0xF)).copied().unwrap_or(b'?')
     }
 
-    /// The op a SAM CIGAR letter names: the inverse of
-    /// [`to_sam_char`](Self::to_sam_char) for its ten letters, `None` for any
-    /// other byte.
+    /// The op a SAM CIGAR letter names, as htslib's parser reads it: one of
+    /// `MIDNSHP=XB`, giving back what [`to_sam_char`](Self::to_sam_char)
+    /// printed. Any other byte, `?` included, is `None`: SAM text cannot
+    /// spell the reserved codes.
+    ///
+    /// ```
+    /// use seqair::bam::cigar::CigarOpType;
+    ///
+    /// assert_eq!(CigarOpType::from_sam_char(b'N'), Some(CigarOpType::RefSkip));
+    /// assert_eq!(CigarOpType::from_sam_char(b'B'), Some(CigarOpType::Unknown(9)));
+    /// assert_eq!(CigarOpType::from_sam_char(b'm'), None);
+    /// ```
     pub const fn from_sam_char(letter: u8) -> Option<Self> {
         Some(match letter {
             b'M' => Self::Match,
