@@ -647,7 +647,19 @@ impl Iterator for Segments {
             SegmentsInner::Precomputed(it) => it.next(),
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = match &self.inner {
+            SegmentsInner::Planned(p) => p.len(),
+            SegmentsInner::Precomputed(it) => it.len(),
+        };
+        (n, Some(n))
+    }
 }
+
+impl ExactSizeIterator for Segments {}
+
+impl std::iter::FusedIterator for Segments {}
 
 /// Lazy positional tiler: walks `ResolvedRange`s and emits `max_len`-core
 /// tiles. The byte budget in [`SegmentOptions`] is **not** applied here — that
@@ -669,6 +681,20 @@ impl PlannedSegments {
         let current = iter.next();
         let next_core_start = current.as_ref().map_or(Pos0::ZERO, |r| r.start);
         Self { ranges: iter, current, next_core_start, opts }
+    }
+
+    /// The tiles left: the cores still to come in the current range, then
+    /// every core of the ranges after it. Cores start at a range's start and
+    /// every `max_len` after, so a span holds `(last - first) / max_len + 1`.
+    fn len(&self) -> usize {
+        let max_len = NonZeroU64::from(self.opts.max_len);
+        let cores = |first: Pos0, last: Pos0| {
+            last.as_u64().checked_sub(first.as_u64()).map_or(0, |d| (d / max_len).saturating_add(1))
+        };
+        let current = self.current.as_ref().map_or(0, |r| cores(self.next_core_start, r.end));
+        let rest = self.ranges.as_slice().iter().map(|r| cores(r.start, r.end));
+        let n = rest.fold(current, u64::saturating_add);
+        usize::try_from(n).unwrap_or(usize::MAX)
     }
 
     fn advance_to_next_range(&mut self) {
@@ -1388,6 +1414,33 @@ mod tests {
 
         let expected = oracle_tiles(range_start, range_end, max_len, overlap);
         assert_eq!(actual, expected);
+    }
+
+    // r[verify unified.readers_segments]
+    /// `len()` is the number of tiles still to come, before and after every
+    /// tile, over several contigs of different lengths.
+    #[hegel::test]
+    fn len_counts_the_tiles_left(tc: TestCase) {
+        let lens = tc.draw(
+            gs::vecs(gs::integers::<u32>().min_value(1).max_value(5_000)).min_size(1).max_size(5),
+        );
+        let max_len = tc.draw(gs::integers::<u32>().min_value(1).max_value(700));
+        let overlap = tc.draw(gs::integers::<u32>().max_value(max_len - 1));
+        let names: Vec<String> = (0..lens.len()).map(|i| format!("c{i}")).collect();
+        let contigs: Vec<(&str, u32)> = names.iter().map(String::as_str).zip(lens).collect();
+        let header = header_with_contigs(&contigs);
+        let opts =
+            SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
+        let ranges = ().resolve_target(&header).unwrap();
+
+        let total = Segments::new(ranges.clone(), opts).count();
+        let mut segments = Segments::new(ranges, opts);
+        for left in (0..=total).rev() {
+            assert_eq!(segments.len(), left);
+            assert_eq!(segments.next().is_some(), left > 0);
+        }
+        assert_eq!(segments.len(), 0);
+        assert!(segments.next().is_none());
     }
 
     // r[verify unified.segment_overlap]

@@ -246,6 +246,9 @@ chromosome in one call without thinking about tile size.
 >   remainder. The iterator MUST NOT yield zero-length tiles.
 > - Yield tiles in `(tid, start)` order. For multi-contig targets, all tiles
 >   for one contig MUST be emitted contiguously before moving on.
+> - Know how many tiles it has left: `Segments` MUST be an
+>   `ExactSizeIterator` whose `len()` is the number of tiles still to come,
+>   without walking them (`collect` reserves once).
 > - Borrow `&self` only — building the iterator MUST NOT mutably borrow
 >   `Readers`, so callers can build the plan once and re-acquire `&mut self`
 >   for each `pileup(&segment)` call.
