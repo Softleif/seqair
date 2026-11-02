@@ -1505,10 +1505,11 @@ impl<U> RecordStore<U> {
     /// Every index of this store, in store order — the typed replacement for
     /// `0..store.len() as u32`. Pair it with [`record`](Self::record), which
     /// cannot fail for an index from here.
-    pub fn indices(&self) -> impl Iterator<Item = RecordIdx> + '_ {
+    pub fn indices(&self) -> impl ExactSizeIterator<Item = RecordIdx> + DoubleEndedIterator + '_ {
         // A slot whose index could not be minted never made it into the store:
-        // `push_raw`/`push_fields` fail with `SlabOverflow` first.
-        (0..self.records.len()).filter_map(RecordIdx::from_usize)
+        // `push_raw`/`push_fields` fail with `SlabOverflow` first, so the
+        // length fits.
+        RecordIdx::first(u32::try_from(self.records.len()).unwrap_or(u32::MAX))
     }
 
     // The slab readers below take the record rather than its index: the
@@ -2087,6 +2088,8 @@ pub(crate) mod tests {
                 .unwrap();
         }
         assert_eq!(store.indices().collect::<Vec<_>>(), [ri(0), ri(1), ri(2)]);
+        assert_eq!(store.indices().len(), 3);
+        assert_eq!(store.indices().next_back(), Some(ri(2)));
         for (idx, rec) in store.indices().zip(store.records()) {
             assert_eq!(store.record(idx).unwrap().pos, rec.pos);
         }

@@ -72,6 +72,12 @@ impl RecordIdx {
         Self::new(u32::try_from(n).ok()?)
     }
 
+    /// The indices `0..n`, in order.
+    pub(crate) fn first(n: u32) -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator {
+        // `i < n <= u32::MAX`, so `i + 1` never saturates.
+        (0..n).map(|i| Self(NonZeroU32::MIN.saturating_add(i)))
+    }
+
     /// The raw index.
     #[inline]
     #[must_use]

@@ -40,6 +40,14 @@ impl Tid {
         }
     }
 
+    /// The tids of `header`'s targets, in order.
+    pub(crate) fn all_of(header: &BamHeader) -> impl ExactSizeIterator<Item = Self> {
+        // Past `i32::MAX` BAM has no tid; a header holds far fewer targets.
+        let n = u32::try_from(header.target_count()).unwrap_or(u32::MAX).min(i32::MAX as u32);
+        // `i < i32::MAX`, so `i + 1` never saturates.
+        (0..n).map(|i| Self(NonZeroU32::MIN.saturating_add(i)))
+    }
+
     /// Target `index` of `header`, if it has one.
     pub(crate) fn of_header(index: u32, header: &BamHeader) -> Option<Self> {
         usize::try_from(index)

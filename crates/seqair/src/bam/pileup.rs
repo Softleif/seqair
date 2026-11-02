@@ -396,7 +396,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// per-position fields, and exposes [`extra`](AlignmentView::extra),
     /// [`qname`](AlignmentView::qname), [`aux`](AlignmentView::aux),
     /// [`seq`](AlignmentView::seq), and [`qualities`](AlignmentView::qualities) for slab data.
-    pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'eng, U>> + '_ {
+    pub fn alignments(&self) -> impl ExactSizeIterator<Item = AlignmentView<'_, 'eng, U>> + '_ {
         let store = self.store;
         // Deliberately does not resolve the record here. A consumer that only
         // reads `op`/`mapq`/`flags` — the common case — would pay a touch of
@@ -406,7 +406,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
     }
 
     /// Iterate the raw alignments without store access.
-    pub fn raw_alignments(&self) -> impl Iterator<Item = &PileupAlignment> + '_ {
+    pub fn raw_alignments(&self) -> impl ExactSizeIterator<Item = &PileupAlignment> + '_ {
         self.alignments.iter()
     }
 

@@ -330,7 +330,7 @@ impl BamHeader {
     }
 
     // r[impl bam.header.target_names]
-    pub fn target_names(&self) -> impl Iterator<Item = &str> {
+    pub fn target_names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.targets.iter().map(|t| t.name.as_str())
     }
 
@@ -344,14 +344,11 @@ impl BamHeader {
     /// Yields tid, name, and length together, so callers building per-contig
     /// state (VCF headers, region lists) don't re-derive the length via a
     /// second `target_len(tid)` lookup.
-    pub fn targets(&self) -> impl Iterator<Item = Target> {
-        // Every index below the target count is one of ours: the filter drops nothing.
-        self.targets.iter().zip(0u32..).filter_map(|(t, index)| {
-            Some(Target {
-                tid: Tid::of_header(index, self)?,
-                name: t.name.clone(),
-                length: t.length,
-            })
+    pub fn targets(&self) -> impl ExactSizeIterator<Item = Target> {
+        self.targets.iter().zip(Tid::all_of(self)).map(|(t, tid)| Target {
+            tid,
+            name: t.name.clone(),
+            length: t.length,
         })
     }
 
@@ -691,6 +688,7 @@ mod tests {
         assert_eq!(copy.tid("chr1"), original.tid("chr1"));
         assert_eq!(copy.tid("chr2").map(Tid::as_u32), Some(1));
         assert_eq!(copy.targets().collect::<Vec<_>>(), original.targets().collect::<Vec<_>>());
+        assert_eq!(copy.targets().len(), copy.target_count());
         assert_eq!(copy.target_len(copy.tid("chr2").unwrap()), Some(2000));
         assert_eq!(copy.header_text(), original.header_text());
     }
