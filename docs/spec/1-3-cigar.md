@@ -54,6 +54,12 @@ operations, so `None` means "ask for the copying path", never "there are none".
 
 These aggregate statistics are used downstream for read quality metrics (e.g. fraction of matching bases, indel rate).
 
+r[cigar.ref_len]
+`cigar::ref_len(ops)` MUST be the summed lengths of the reference-consuming operations (M, D, N, =, X), as htslib's `bam_cigar2rlen`, as a `u64`, for decoded ops (`&[CigarOp]`) and packed ones (`CigarOp::iter_bam_bytes`) alike. Every reference length the crate computes — end positions, the depth cap's span — MUST come from it, so `CigarOp::consumes_ref` is the one definition of which ops count.
+
+r[cigar.query_len]
+`cigar::query_len(ops)` MUST be the summed lengths of the query-consuming operations (M, I, S, =, X), as htslib's `bam_cigar2qlen`, as a `u64`, for decoded and packed ops alike. Every check of a CIGAR against a SEQ length MUST use it.
+
 r[cigar.matches_indels]
 `calc_matches_indels(cigar)` MUST compute the total number of matching bases (sum of M operation lengths) and the total number of indel bases (sum of I and D operation lengths) from a packed CIGAR array.
 

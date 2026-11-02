@@ -4,6 +4,7 @@
 
 use crate::utils::{TraceErr, TraceOk};
 use seqair_types::{Pos0, QPos, SmallVec};
+use std::borrow::Borrow;
 
 // r[impl cigar.operations]
 // r[impl io.named_constants]
@@ -276,15 +277,40 @@ const fn consumes_query(op: u8) -> bool {
     matches!(op, CIGAR_M | CIGAR_I | CIGAR_S | CIGAR_EQ | CIGAR_X)
 }
 
-/// Sum of query-consuming op lengths (M, I, S, =, X).
-pub fn calc_query_len(ops: &[CigarOp]) -> u32 {
-    let mut qlen = 0u32;
-    for op in ops {
-        if op.consumes_query() {
-            qlen = qlen.saturating_add(op.len());
-        }
-    }
-    qlen
+// r[impl cigar.ref_len]
+/// The reference length of `ops`: the summed lengths of M, D, N, = and X
+/// (htslib's `bam_cigar2rlen`). Takes decoded ops (`&[CigarOp]`) or packed
+/// ones ([`CigarOp::iter_bam_bytes`]).
+pub fn ref_len<I>(ops: I) -> u64
+where
+    I: IntoIterator,
+    I::Item: Borrow<CigarOp>,
+{
+    sum_lengths(ops, CigarOp::consumes_ref)
+}
+
+// r[impl cigar.query_len]
+/// The query length of `ops`: the summed lengths of M, I, S, = and X
+/// (htslib's `bam_cigar2qlen`), which a mapped record's SEQ must match.
+pub fn query_len<I>(ops: I) -> u64
+where
+    I: IntoIterator,
+    I::Item: Borrow<CigarOp>,
+{
+    sum_lengths(ops, CigarOp::consumes_query)
+}
+
+/// The summed lengths of the ops `counts` picks. A `u64` cannot overflow for
+/// a record (at most 2^29 ops of under 2^28 bases each); it saturates anyway.
+fn sum_lengths<I>(ops: I, counts: fn(CigarOp) -> bool) -> u64
+where
+    I: IntoIterator,
+    I::Item: Borrow<CigarOp>,
+{
+    ops.into_iter()
+        .map(|op| *op.borrow())
+        .filter(|&op| counts(op))
+        .fold(0, |n, op| n.saturating_add(u64::from(op.len())))
 }
 
 // r[impl cigar.matches_indels]
@@ -319,20 +345,18 @@ pub fn soft_clips(ops: &[CigarOp]) -> (u32, u32) {
 
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
-/// 0-based exclusive end position from `pos` + reference-consuming op lengths.
 // r[impl interval.end_pos_inclusive]
-pub fn compute_end_pos(pos: Pos0, ops: &[CigarOp]) -> Option<Pos0> {
-    let mut ref_len: i64 = 0;
-    for op in ops {
-        if op.consumes_ref() {
-            ref_len = ref_len.checked_add(i64::from(op.len()))?;
-        }
-    }
-    if ref_len == 0 {
-        Some(pos)
-    } else {
-        pos.checked_add_offset(seqair_types::Offset::new(ref_len.checked_sub(1)?))
-    }
+/// The last reference position an alignment at `pos` with `ops` covers:
+/// `pos + ref_len - 1`, or `pos` itself for a CIGAR that consumes no
+/// reference. `None` past [`Pos0::MAX`]. Takes decoded or packed ops, as
+/// [`ref_len`].
+pub fn compute_end_pos<I>(pos: Pos0, ops: I) -> Option<Pos0>
+where
+    I: IntoIterator,
+    I::Item: Borrow<CigarOp>,
+{
+    let Some(span) = ref_len(ops).checked_sub(1) else { return Some(pos) };
+    pos.checked_add_offset(seqair_types::Offset::new(i64::try_from(span).ok()?))
 }
 
 /// Position information returned by `CigarMapping` for the pileup engine.

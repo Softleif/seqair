@@ -17,7 +17,7 @@
 
 use super::MateFields;
 use super::aux_data::{AuxData, AuxDataError};
-use super::cigar::CigarOp;
+use super::cigar::{self, CigarOp};
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
@@ -235,7 +235,7 @@ impl OwnedBamRecord {
 
     /// Query-consuming length of the CIGAR.
     pub fn cigar_query_len(&self) -> u64 {
-        self.cigar.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum()
+        cigar::query_len(&self.cigar)
     }
 
     // r[impl bam.owned_record.set_alignment]
@@ -251,8 +251,7 @@ impl OwnedBamRecord {
         }
         // For mapped reads, validate CIGAR query length matches seq length
         if !self.is_unmapped() && !self.seq.is_empty() {
-            let query_len: u64 =
-                cigar.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum();
+            let query_len = cigar::query_len(&cigar);
             if query_len != self.seq.len() as u64 {
                 return Err(OwnedRecordError::CigarSeqLengthMismatch {
                     cigar_query_len: query_len,

@@ -8,7 +8,7 @@
 use crate::bam::{
     BamHeader, CigarOp, DecodeError, MateFields, RawBamRecord,
     aux::tag_end,
-    cigar::CigarOpType,
+    cigar::{self, CigarOpType},
     raw_record::Refill,
     record::{FixedHeaderFields, MAX_RECORD_SIZE, encode_fixed_header},
     seq,
@@ -306,7 +306,7 @@ impl SamRecordEncoder {
 
         // r[impl sam.encode.cigar_seq]
         if !seq.is_empty() && !self.cigar.is_empty() {
-            let cigar_query_len = query_len(&self.cigar);
+            let cigar_query_len = cigar::query_len(&self.cigar);
             if cigar_query_len != seq.len() as u64 {
                 return Err(SamRecordError::CigarSeqLenMismatch {
                     cigar_query_len,
@@ -468,7 +468,7 @@ pub(crate) fn encode_alignment(
     payload: &mut Vec<u8>,
     f: &AlignmentFields<'_>,
 ) -> Result<(), RecordEncodeError> {
-    let ref_len = ref_len(f.cigar);
+    let ref_len = cigar::ref_len(f.cigar);
     let span = if f.flags & UNMAPPED != 0 || ref_len == 0 { 1 } else { ref_len };
     let beg = f.pos.map_or(-1, |p| i64::from(p.as_i32()));
     let bin = reg2bin(beg, beg.saturating_add_unsigned(span));
@@ -567,22 +567,6 @@ pub(crate) fn warn_unknown_mate_reference(name: &[u8]) {
             "unknown mate reference name; treated as unmapped (further ones not logged)"
         );
     }
-}
-
-/// The CIGAR's query length (M, I, S, =, X), as `bam_cigar2qlen`.
-fn query_len(ops: &[CigarOp]) -> u64 {
-    ops.iter()
-        .filter(|op| op.consumes_query())
-        .map(|op| u64::from(op.len()))
-        .fold(0, u64::saturating_add)
-}
-
-/// The CIGAR's reference length (M, D, N, =, X), as `bam_cigar2rlen`.
-fn ref_len(ops: &[CigarOp]) -> u64 {
-    ops.iter()
-        .filter(|op| op.consumes_ref())
-        .map(|op| u64::from(op.len()))
-        .fold(0, u64::saturating_add)
 }
 
 /// htslib's `hts_reg2bin(beg, end, 14, 5)`, stored in BAM's 16-bit field.

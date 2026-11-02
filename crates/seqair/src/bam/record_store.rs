@@ -1627,8 +1627,8 @@ impl<U> RecordStore<U> {
         // ── All validation before any mutation ──
         // If any check fails, the store is unchanged (r[record_store.set_alignment.validation]).
 
-        let new_query_len = cigar::calc_query_len(new_cigar_ops);
-        if new_query_len != seq_len {
+        let new_query_len = cigar::query_len(new_cigar_ops);
+        if new_query_len != u64::from(seq_len) {
             return Err(DecodeError::CigarQueryLenMismatch {
                 cigar_query_len: new_query_len,
                 seq_len,

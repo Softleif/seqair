@@ -354,10 +354,7 @@ impl<'a> AlignedPairs<'a> {
         // Compute the remaining query-consuming CIGAR length and compare to
         // `seq[qpos..]`. We work in u64 so a runaway 32-bit CIGAR can't
         // wrap; real-world records are far below this.
-        let cigar_remaining_qlen: u64 = CigarOp::iter_bam_bytes(self.ops)
-            .filter(|op| op.consumes_query())
-            .map(|op| u64::from(op.len()))
-            .sum();
+        let cigar_remaining_qlen = super::cigar::query_len(CigarOp::iter_bam_bytes(self.ops));
         let qpos_consumed = u64::from(self.qpos.get());
         let total_qlen = cigar_remaining_qlen.saturating_add(qpos_consumed);
         // total_qlen represents the total query-consuming length the iterator

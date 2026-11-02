@@ -64,7 +64,7 @@ fn arb_read(tc: &TestCase) -> Read {
         let len = tc.draw_silent(gs::integers::<u32>().max_value(7));
         ops.push(CigarOp::new(op, len));
     }
-    let qlen = seqair::bam::cigar::calc_query_len(&ops) as usize;
+    let qlen = usize::try_from(seqair::bam::cigar::query_len(&ops)).unwrap();
     let seq_star = tc.draw_silent(gs::integers::<u8>().max_value(9)) == 0;
     let (seq, qual) = if seq_star {
         (Vec::new(), Vec::new())

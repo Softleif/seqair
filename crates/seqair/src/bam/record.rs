@@ -31,9 +31,6 @@ pub(crate) const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
 /// path before we know whether to keep the record, so we can't afford to
 /// allocate a `Vec<CigarOp>` here.
 pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
-    use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
-    use seqair_types::Offset;
-
     let h = parse_header(raw).ok()?;
     let pos = h.pos?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
@@ -46,24 +43,7 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
         cigar_bytes.len()
     );
 
-    let mut ref_len: i64 = 0;
-    for chunk in cigar_bytes.as_chunks::<4>().0 {
-        let arr: [u8; 4] = *chunk;
-        let op = u32::from_le_bytes(arr);
-        let op_len = i64::from(op >> 4);
-        let op_type = (op & 0xF) as u8;
-        match op_type {
-            CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X => {
-                ref_len = ref_len.checked_add(op_len)?;
-            }
-            _ => {}
-        }
-    }
-    if ref_len == 0 {
-        Some(pos)
-    } else {
-        pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
-    }
+    super::cigar::compute_end_pos(pos, super::cigar::CigarOp::iter_bam_bytes(cigar_bytes))
 }
 
 // Callers only invoke read2/read4 after validating raw.len() >= 32 or equivalent.
@@ -300,7 +280,7 @@ pub enum DecodeError {
     InvalidMatePosition { value: i32 },
 
     #[error("CIGAR query length {cigar_query_len} does not match seq_len {seq_len}")]
-    CigarQueryLenMismatch { cigar_query_len: u32, seq_len: u32 },
+    CigarQueryLenMismatch { cigar_query_len: u64, seq_len: u32 },
 
     #[error("CIGAR op count {count} exceeds u16::MAX (BAM n_cigar_op limit)")]
     CigarOpCountOverflow { count: usize },
@@ -338,7 +318,7 @@ mod tests {
     fn test_compute_end_pos() {
         use super::super::cigar::{CigarOp, CigarOpType, compute_end_pos};
         let ops = [CigarOp::new(CigarOpType::Match, 50)];
-        assert_eq!(compute_end_pos(Pos0::new(100).unwrap(), &ops), Some(Pos0::new(149).unwrap()));
+        assert_eq!(compute_end_pos(Pos0::new(100).unwrap(), ops), Some(Pos0::new(149).unwrap()));
     }
 
     // r[verify bam.record.checked_offsets]
