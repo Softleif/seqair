@@ -189,6 +189,10 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
 /// while stream.read_record(&mut record)? {
 ///     // ...
 /// }
+/// // or, one allocation per record:
+/// for record in AlignmentStream::from_reader(std::io::stdin())?.records() {
+///     let record = record?;
+/// }
 /// # Ok::<(), seqair::reader::AlignmentStreamError>(())
 /// ```
 pub struct AlignmentStream {
@@ -337,6 +341,46 @@ impl AlignmentStream {
             Inner::Sam(r) => r.read_record(record)?,
             Inner::Cram(r) => r.read_record(record)?,
         })
+    }
+
+    // r[impl unified.stream.iter]
+    /// Iterate over the remaining records, one allocation each. An error that
+    /// ends the stream is the last item. For a reused buffer, loop over
+    /// [`Self::read_record`] instead.
+    pub fn records(&mut self) -> Records<'_> {
+        Records { stream: self }
+    }
+
+    /// Whether an error ended the stream.
+    fn is_failed(&self) -> bool {
+        match &self.inner {
+            Inner::Bam(r) => r.is_failed(),
+            Inner::Sam(r) => r.is_failed(),
+            Inner::Cram(r) => r.reader.is_failed(),
+        }
+    }
+}
+
+/// Iterator over an [`AlignmentStream`]'s records. See
+/// [`AlignmentStream::records`].
+#[derive(Debug)]
+pub struct Records<'a> {
+    stream: &'a mut AlignmentStream,
+}
+
+impl Iterator for Records<'_> {
+    type Item = Result<RawBamRecord, AlignmentStreamError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stream.is_failed() {
+            return None;
+        }
+        let mut record = RawBamRecord::default();
+        match self.stream.read_record(&mut record) {
+            Ok(true) => Some(Ok(record)),
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 

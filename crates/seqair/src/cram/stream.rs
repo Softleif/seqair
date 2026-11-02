@@ -223,6 +223,11 @@ impl<R: Read> CramStreamReader<R> {
         }
     }
 
+    /// Whether an error ended the stream.
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self.state, State::Failed)
+    }
+
     /// Give up the reader, keeping the header.
     pub fn into_header(self) -> BamHeader {
         Arc::unwrap_or_clone(self.shared).header

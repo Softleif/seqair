@@ -518,3 +518,6 @@ r[unified.stream.detect+2]
 
 r[unified.stream.records]
 Whatever the format, `AlignmentStream` MUST expose the header (`BamHeader`, with the original text) and yield every record as a `RawBamRecord` in input order, and it MUST report which format it detected. BGZF thread and EOF-marker options apply to the BGZF formats.
+
+r[unified.stream.iter]
+`AlignmentStream::records()` MUST be an iterator over the records `read_record` reads, as `Result<RawBamRecord, AlignmentStreamError>`. An error the stream can continue past (an invalid record) is an item like any other; after an error that ends the stream, the iterator MUST end rather than repeat the poison error, so a `for` loop or `collect` terminates.
