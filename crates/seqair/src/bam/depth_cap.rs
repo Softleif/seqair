@@ -136,7 +136,8 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
         // span from the raw CIGAR. Guarantee a minimum 1bp span so a read
         // always occupies a slot.
         let end = fields.end_pos.map(Pos0::as_u64).unwrap_or_else(|| {
-            let span = ref_span_from_cigar(fields.cigar).max(1);
+            let span =
+                super::cigar::ref_len(super::cigar::CigarOp::iter_bam_bytes(fields.cigar)).max(1);
             start.saturating_add(span.saturating_sub(1))
         });
 
@@ -165,26 +166,6 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
     fn filter(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> bool {
         self.inner.filter(rec, store)
     }
-}
-
-/// Sum of reference-consuming CIGAR op lengths from raw BAM CIGAR bytes
-/// (`n_cigar_op` little-endian `u32`s: `len << 4 | op`).
-#[allow(clippy::indexing_slicing, reason = "as_chunks(4) yields exactly 4 bytes")]
-fn ref_span_from_cigar(cigar: &[u8]) -> u64 {
-    let mut span = 0u64;
-    debug_assert!(
-        cigar.len().is_multiple_of(4),
-        "BAM CIGAR bytes must be n_cigar_op * 4, got {}",
-        cigar.len()
-    );
-    for chunk in cigar.as_chunks::<4>().0 {
-        let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        // Reference-consuming ops: M(0), D(2), N(3), =(7), X(8).
-        if matches!(val & 0xf, 0 | 2 | 3 | 7 | 8) {
-            span = span.saturating_add(u64::from(val >> 4));
-        }
-    }
-    span
 }
 
 #[cfg(test)]

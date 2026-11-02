@@ -906,7 +906,7 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
                 }
             }
         };
-        let qlen = seqair::bam::cigar::calc_query_len(&ops) as usize;
+        let qlen = usize::try_from(seqair::bam::cigar::query_len(&ops)).unwrap();
         let seq: Vec<IupacBase> = (0..qlen).map(|_| bases[rng.below(4) as usize]).collect();
         let qual: Vec<u8> = (0..qlen).map(|_| 20 + rng.below(20) as u8).collect();
         let pos = Pos0::new(start).unwrap();

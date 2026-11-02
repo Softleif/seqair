@@ -549,17 +549,6 @@ fn long_cigar<'a>(cigar: &[u8], seq_len: usize, placed: bool, aux: Aux<'a>) -> O
     (n_ops >= cigar.len() / 4 && n_ops < 1 << 29).then_some(ops)
 }
 
-/// The query length of packed CIGAR operations (`bam_cigar2qlen`).
-fn query_len(cigar: &[u8]) -> u64 {
-    cigar
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|op| CigarOp::from_bam_u32(u32::from_le_bytes(*op)))
-        .filter(|op| op.consumes_query())
-        .fold(0u64, |n, op| n.saturating_add(u64::from(op.len())))
-}
-
 // r[impl bam.raw_record.cigar_seq]
 /// htslib's read-time sanity check (`bam_read1` and `bam_tag2cigar`): the
 /// long CIGAR of a record carrying one, else the stored CIGAR of a mapped
@@ -577,14 +566,11 @@ fn check_cigar_against_seq(
         None if h.n_cigar_ops != 0 && !h.flags.is_unmapped() => stored,
         None => return Ok(()),
     };
-    let query_len = query_len(checked);
+    let query_len = super::cigar::query_len(CigarOp::iter_bam_bytes(checked));
     if seq_len == 0 || query_len == u64::from(seq_len) {
         return Ok(());
     }
-    Err(DecodeError::CigarQueryLenMismatch {
-        cigar_query_len: u32::try_from(query_len).unwrap_or(u32::MAX),
-        seq_len,
-    })
+    Err(DecodeError::CigarQueryLenMismatch { cigar_query_len: query_len, seq_len })
 }
 
 #[cfg(test)]

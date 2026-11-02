@@ -650,7 +650,7 @@ fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
         matches!(
             err,
             DecodeError::CigarQueryLenMismatch { cigar_query_len, seq_len }
-                if cigar_query_len == qlen + delta && seq_len == qlen
+                if cigar_query_len == u64::from(qlen + delta) && seq_len == qlen
         ),
         "rejected with {err:?}, which does not name the mismatch"
     );
