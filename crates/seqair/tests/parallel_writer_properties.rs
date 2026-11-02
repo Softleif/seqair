@@ -23,6 +23,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
+use seqair::io::CompressionLevel;
 use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
@@ -131,7 +132,11 @@ fn bam_records(stream: &BamStream) -> Vec<OwnedBamRecord> {
 }
 
 /// BAM and BAI bytes from writing `records` with `threads` compression threads.
-fn write_bam(records: &[OwnedBamRecord], level: i32, threads: usize) -> (Vec<u8>, Vec<u8>) {
+fn write_bam(
+    records: &[OwnedBamRecord],
+    level: CompressionLevel,
+    threads: usize,
+) -> (Vec<u8>, Vec<u8>) {
     let header = bam_header();
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut writer = BamWriterBuilder::to_path(file.path(), &header)
@@ -156,13 +161,17 @@ fn write_bam(records: &[OwnedBamRecord], level: i32, threads: usize) -> (Vec<u8>
 fn parallel_bam_matches_serial(tc: TestCase) {
     let stream = tc.draw(arb_bam_stream());
     let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
-    let level = tc.draw(gs::sampled_from(&[0, 1, 6]));
+    let level = tc.draw(gs::sampled_from(&[
+        CompressionLevel::Level0,
+        CompressionLevel::Level1,
+        CompressionLevel::Level6,
+    ]));
     let records = bam_records(&stream);
 
     let (bam, bai) = write_bam(&records, level, 0);
     let (par_bam, par_bai) = write_bam(&records, level, threads);
-    assert!(par_bam == bam, "BAM bytes differ with {threads} threads at level {level}");
-    assert!(par_bai == bai, "BAI bytes differ with {threads} threads at level {level}");
+    assert!(par_bam == bam, "BAM bytes differ with {threads} threads at level {level:?}");
+    assert!(par_bai == bai, "BAI bytes differ with {threads} threads at level {level:?}");
 }
 
 // ── VCF.gz / BCF ────────────────────────────────────────────────────────
@@ -227,7 +236,7 @@ fn write_vcf(
     setup: &VcfSetup,
     stream: &VcfStream,
     format: OutputFormat,
-    level: i32,
+    level: CompressionLevel,
     threads: usize,
 ) -> (Vec<u8>, Vec<u8>) {
     let mut noise = Noise(stream.seed);
@@ -265,17 +274,21 @@ fn write_vcf(
 fn parallel_bcf_and_vcf_gz_match_serial(tc: TestCase) {
     let stream = tc.draw(arb_vcf_stream());
     let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
-    let level = tc.draw(gs::sampled_from(&[0, 1, 6]));
+    let level = tc.draw(gs::sampled_from(&[
+        CompressionLevel::Level0,
+        CompressionLevel::Level1,
+        CompressionLevel::Level6,
+    ]));
     let format =
         tc.draw(gs::sampled_from(&[OutputFormat::Bcf, OutputFormat::VcfGz]).print_as_debug());
     let setup = vcf_setup();
 
     let (data, csi) = write_vcf(&setup, &stream, format, level, 0);
     let (par_data, par_csi) = write_vcf(&setup, &stream, format, level, threads);
-    assert!(par_data == data, "{format:?} bytes differ with {threads} threads at level {level}");
+    assert!(par_data == data, "{format:?} bytes differ with {threads} threads at level {level:?}");
     assert!(
         par_csi == csi,
-        "{format:?} index bytes differ with {threads} threads at level {level}"
+        "{format:?} index bytes differ with {threads} threads at level {level:?}"
     );
 }
 
@@ -304,8 +317,8 @@ fn compression_level_reaches_the_bgzf_stream() {
     let setup = vcf_setup();
     let stream = VcfStream { records: 20_000, seed: 11 };
     for format in [OutputFormat::Bcf, OutputFormat::VcfGz] {
-        let (stored, _) = write_vcf(&setup, &stream, format, 0, 0);
-        let (packed, _) = write_vcf(&setup, &stream, format, 6, 0);
+        let (stored, _) = write_vcf(&setup, &stream, format, CompressionLevel::Level0, 0);
+        let (packed, _) = write_vcf(&setup, &stream, format, CompressionLevel::Level6, 0);
 
         let stored_types = first_deflate_block_types(&stored);
         assert!(stored_types.len() > 1, "{format:?}: several blocks");
@@ -336,7 +349,7 @@ fn plain_vcf_ignores_compression_settings() {
     let setup = vcf_setup();
     let stream = VcfStream { records: 50, seed: 7 };
     let mut outputs = Vec::new();
-    for (level, threads) in [(6, 0), (0, 3)] {
+    for (level, threads) in [(CompressionLevel::Level6, 0), (CompressionLevel::Level0, 3)] {
         let writer = Writer::new(Vec::new(), OutputFormat::Vcf)
             .compression_level(level)
             .compression_threads(threads);

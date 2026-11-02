@@ -10,8 +10,8 @@ use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
 use crate::bam::bgzf_writer::BgzfSink;
-use crate::io::BgzfWriter;
 use crate::io::IndexBuilder;
+use crate::io::{BgzfWriter, CompressionLevel};
 use seqair_types::{Pos1, SmallVec, SmolStr};
 use std::io::Write;
 use std::marker::PhantomData;
@@ -116,17 +116,14 @@ pub struct Writer<W: Write, S = Unstarted> {
     _state: PhantomData<S>,
 }
 
-/// BGZF level for `VcfGz` and `Bcf` (`BgzfWriter::new`'s default).
-const DEFAULT_LEVEL: i32 = 6;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Compression {
-    level: i32,
+    level: CompressionLevel,
     threads: usize,
 }
 
 impl Compression {
-    const DEFAULT: Self = Self { level: DEFAULT_LEVEL, threads: 0 };
+    const DEFAULT: Self = Self { level: CompressionLevel::Level6, threads: 0 };
 }
 
 // r[impl vcf_writer.buffered_output]
@@ -233,7 +230,7 @@ impl<W: Write> Writer<W> {
                 info_tracker: FieldTracker::default(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
-                bgzf: BgzfSink::Serial(BgzfWriter::with_compression_level(inner, DEFAULT_LEVEL)),
+                bgzf: BgzfSink::Serial(BgzfWriter::new(inner)),
                 index: None,
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
@@ -242,7 +239,7 @@ impl<W: Write> Writer<W> {
                 info_tracker: FieldTracker::default(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
-                bgzf: BgzfSink::Serial(BgzfWriter::with_compression_level(inner, DEFAULT_LEVEL)),
+                bgzf: BgzfSink::Serial(BgzfWriter::new(inner)),
                 index: None,
                 shared_buf: Vec::with_capacity(4096),
                 indiv_buf: Vec::with_capacity(4096),
@@ -260,11 +257,11 @@ impl<W: Write> Writer<W> {
     }
 
     // r[impl record_encoder.compression_level]
-    /// BGZF compression level for `VcfGz` and `Bcf`: 0 (stored) through 12.
-    /// Defaults to 6, htslib's default. Plain VCF is not compressed and
-    /// ignores this.
+    /// BGZF compression level for `VcfGz` and `Bcf`. Defaults to
+    /// [`CompressionLevel::Level6`], htslib's default. Plain VCF is not
+    /// compressed and ignores this.
     #[must_use]
-    pub fn compression_level(mut self, level: i32) -> Self {
+    pub fn compression_level(mut self, level: CompressionLevel) -> Self {
         self.compression.level = level;
         self
     }

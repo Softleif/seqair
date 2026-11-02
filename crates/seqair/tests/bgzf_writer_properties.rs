@@ -40,7 +40,7 @@
 mod pinned;
 use hegel::prelude::*;
 use noodles_bgzf::VirtualPosition;
-use seqair::io::BgzfWriter;
+use seqair::io::{BgzfWriter, CompressionLevel};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read as _};
 
@@ -133,6 +133,7 @@ fn noise_bytes(seed: u64, len: usize) -> Vec<u8> {
 /// the block has room first, then record where the write will land.
 fn write_all(writes: &[Vec<u8>], level: i32, flush_first: bool) -> (Vec<u8>, Vec<u64>) {
     let mut out = Vec::new();
+    let level = CompressionLevel::try_from(level).expect("arb_level draws 0..=12");
     let mut writer = BgzfWriter::with_compression_level(&mut out, level);
     let mut offsets = Vec::with_capacity(writes.len());
 

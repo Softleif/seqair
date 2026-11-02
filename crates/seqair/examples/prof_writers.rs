@@ -659,7 +659,9 @@ fn write_bam_seqair(
     recs: &[seqair::bam::OwnedBamRecord],
 ) {
     let mut writer = seqair::bam::BamWriterBuilder::to_path(out, header)
-        .compression_level(level)
+        .compression_level(
+            seqair::io::CompressionLevel::try_from(level).expect("a level between 0 and 12"),
+        )
         .compression_threads(threads)
         .write_index(index)
         .build()
