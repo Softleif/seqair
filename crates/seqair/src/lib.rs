@@ -8,6 +8,11 @@
 //! single-pass index co-production.
 //! See [`vcf`] for examples.
 
+// BAM, CRAM and BCF are little-endian on disk, and the readers and writers
+// view CIGARs, qualities and integer arrays in place as their native types.
+#[cfg(not(target_endian = "little"))]
+compile_error!("seqair supports little-endian targets only");
+
 pub mod bam;
 pub mod cram;
 pub mod fasta;

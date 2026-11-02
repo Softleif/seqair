@@ -457,11 +457,11 @@ fn renorm16<S: Simd>(simd: S, x: u32x16<S>, window: &[u8; 32]) -> (u32x16<S>, us
 }
 
 /// Whether [`step_renorm`] steps sixteen states at a time: where the level's
-/// vectors hold sixteen u32s (AVX-512) and [`renorm16`]'s u16 view of the
-/// stream is little-endian.
+/// vectors hold sixteen u32s (AVX-512). ([`renorm16`]'s u16 view of the
+/// stream needs a little-endian target, which seqair always is.)
 #[inline(always)]
 fn sixteen_lanes<S: Simd, const N: usize>() -> bool {
-    S::u32s::LEN >= 16 && N.is_multiple_of(16) && cfg!(target_endian = "little")
+    S::u32s::LEN >= 16 && N.is_multiple_of(16)
 }
 
 /// The packed state step and renorm for `N` states (a multiple of 4), as many
