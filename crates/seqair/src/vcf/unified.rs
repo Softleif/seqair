@@ -116,14 +116,10 @@ pub struct Writer<W: Write, S = Unstarted> {
     _state: PhantomData<S>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Compression {
     level: CompressionLevel,
     threads: usize,
-}
-
-impl Compression {
-    const DEFAULT: Self = Self { level: CompressionLevel::Level6, threads: 0 };
 }
 
 // r[impl vcf_writer.buffered_output]
@@ -251,7 +247,7 @@ impl<W: Write> Writer<W> {
         Writer {
             inner,
             contig_names: Vec::new(),
-            compression: Compression::DEFAULT,
+            compression: Compression::default(),
             _state: PhantomData,
         }
     }
@@ -284,7 +280,7 @@ impl<W: Write> Writer<W> {
 
     /// Rebuild the BGZF sink, still unwritten, with the configured settings.
     fn apply_compression(self) -> Result<Self, VcfError> {
-        if self.compression == Compression::DEFAULT {
+        if self.compression == Compression::default() {
             return Ok(self);
         }
         let Writer { inner, contig_names, compression, _state } = self;

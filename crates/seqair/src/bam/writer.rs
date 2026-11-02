@@ -456,7 +456,7 @@ impl<'a, T> BamWriterBuilder<'a, T> {
             target,
             header,
             write_index: false,
-            compression_level: CompressionLevel::Level6,
+            compression_level: CompressionLevel::default(),
             compression_threads: 0,
         }
     }
