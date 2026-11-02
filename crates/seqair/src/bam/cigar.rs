@@ -17,6 +17,9 @@ pub const CIGAR_H: u8 = 5;
 pub const CIGAR_P: u8 = 6;
 pub const CIGAR_EQ: u8 = 7;
 pub const CIGAR_X: u8 = 8;
+/// B(9): htslib's "back" op, in no current SAM spec; it has no
+/// [`CigarOpType`] variant of its own.
+pub const CIGAR_B: u8 = 9;
 
 // r[impl io.typed_cigar_ops]
 // r[impl cigar.index]
@@ -80,6 +83,34 @@ impl CigarOpType {
             Self::SeqMismatch => CIGAR_X,
             Self::Unknown(code) => code,
         }
+    }
+
+    // r[impl cigar.sam_letters]
+    /// The op's SAM letter by BAM code, as htslib's `BAM_CIGAR_STR` prints
+    /// it: `MIDNSHP=X`, `B` for code 9 (htslib's "back"), `?` for the reserved
+    /// codes 10–15.
+    pub fn to_sam_char(self) -> u8 {
+        const LETTERS: &[u8; 16] = b"MIDNSHP=XB??????";
+        LETTERS.get(usize::from(self.to_bam_code() & 0xF)).copied().unwrap_or(b'?')
+    }
+
+    /// The op a SAM CIGAR letter names: the inverse of
+    /// [`to_sam_char`](Self::to_sam_char) for its ten letters, `None` for any
+    /// other byte.
+    pub const fn from_sam_char(letter: u8) -> Option<Self> {
+        Some(match letter {
+            b'M' => Self::Match,
+            b'I' => Self::Insertion,
+            b'D' => Self::Deletion,
+            b'N' => Self::RefSkip,
+            b'S' => Self::SoftClip,
+            b'H' => Self::HardClip,
+            b'P' => Self::Padding,
+            b'=' => Self::SeqMatch,
+            b'X' => Self::SeqMismatch,
+            b'B' => Self::Unknown(CIGAR_B),
+            _ => return None,
+        })
     }
 
     pub const fn consumes_ref(self) -> bool {
@@ -227,22 +258,10 @@ impl std::fmt::Debug for CigarOp {
 }
 
 impl std::fmt::Display for CigarOpType {
-    /// SAM 1.6 single-character op code. `Unknown` renders as `?`.
+    /// The op's SAM letter, [`to_sam_char`](Self::to_sam_char).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::fmt::Write as _;
-        let c = match self {
-            Self::Match => 'M',
-            Self::Insertion => 'I',
-            Self::Deletion => 'D',
-            Self::RefSkip => 'N',
-            Self::SoftClip => 'S',
-            Self::HardClip => 'H',
-            Self::Padding => 'P',
-            Self::SeqMatch => '=',
-            Self::SeqMismatch => 'X',
-            Self::Unknown(_) => '?',
-        };
-        f.write_char(c)
+        f.write_char(char::from(self.to_sam_char()))
     }
 }
 
@@ -1257,7 +1276,28 @@ mod tests {
         assert_eq!(CigarOpType::Padding.to_string(), "P");
         assert_eq!(CigarOpType::SeqMatch.to_string(), "=");
         assert_eq!(CigarOpType::SeqMismatch.to_string(), "X");
-        assert_eq!(CigarOpType::Unknown(9).to_string(), "?");
+        assert_eq!(CigarOpType::Unknown(9).to_string(), "B");
+        assert_eq!(CigarOpType::Unknown(10).to_string(), "?");
+    }
+
+    // r[verify cigar.sam_letters]
+    /// Every BAM code prints as htslib's `BAM_CIGAR_STR` has it, and exactly
+    /// the ten letters parse back to their code.
+    #[test]
+    fn sam_letters_are_htslibs_and_parse_back() {
+        let htslib = b"MIDNSHP=XB??????";
+        for code in 0..16u8 {
+            let op = CigarOpType::from_bam(code);
+            let letter = op.to_sam_char();
+            assert_eq!(letter, htslib[usize::from(code)], "code {code}");
+            let parsed = CigarOpType::from_sam_char(letter);
+            assert_eq!(parsed, (code <= 9).then_some(op), "code {code}");
+        }
+        for byte in 0..=u8::MAX {
+            if let Some(op) = CigarOpType::from_sam_char(byte) {
+                assert_eq!(op.to_sam_char(), byte);
+            }
+        }
     }
 
     #[test]

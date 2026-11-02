@@ -671,24 +671,13 @@ pub fn parse_cigar(text: &[u8], out: &mut Vec<CigarOp>) -> Result<(), SamRecordE
         let Some((&op, tail)) = tail.split_first() else {
             return Err(SamRecordError::MissingCigarOp { value: len.into() });
         };
-        let code = match op {
-            b'M' => 0,
-            b'I' => 1,
-            b'D' => 2,
-            b'N' => 3,
-            b'S' => 4,
-            b'H' => 5,
-            b'P' => 6,
-            b'=' => 7,
-            b'X' => 8,
-            b'B' => 9,
-            _ => return Err(SamRecordError::UnknownCigarOp { op }),
-        };
+        let op_type =
+            CigarOpType::from_sam_char(op).ok_or(SamRecordError::UnknownCigarOp { op })?;
         let len_value = parse_digits(len)
             .and_then(|n| u32::try_from(n).ok())
             .filter(|n| *n < 1 << 28)
             .ok_or_else(|| SamRecordError::InvalidCigarLength { value: len.into() })?;
-        out.push(CigarOp::from_bam_u32((len_value << 4) | code));
+        out.push(CigarOp::new(op_type, len_value));
         rest = tail;
     }
     Ok(())

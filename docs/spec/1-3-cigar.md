@@ -60,6 +60,9 @@ r[cigar.ref_len]
 r[cigar.query_len]
 `cigar::query_len(ops)` MUST be the summed lengths of the query-consuming operations (M, I, S, =, X), as htslib's `bam_cigar2qlen`, as a `u64`, for decoded and packed ops alike. Every check of a CIGAR against a SEQ length MUST use it.
 
+r[cigar.sam_letters]
+`CigarOpType::to_sam_char` MUST give htslib's `BAM_CIGAR_STR` letter for the op's BAM code (`MIDNSHP=XB`, `?` for codes 10–15), and `from_sam_char` MUST invert it for those ten letters and refuse any other byte. The SAM formatter, the SAM parser and `Display` MUST all use these, so a CIGAR prints the way it parses.
+
 r[cigar.matches_indels]
 `calc_matches_indels(cigar)` MUST compute the total number of matching bases (sum of M operation lengths) and the total number of indel bases (sum of I and D operation lengths) from a packed CIGAR array.
 
