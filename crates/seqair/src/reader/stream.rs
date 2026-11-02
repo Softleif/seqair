@@ -80,7 +80,19 @@ type Source = std::io::Chain<Cursor<Vec<u8>>, Box<dyn Read + Send>>;
 /// The input of a CRAM [`AlignmentStream`] hands over with
 /// [`AlignmentStream::into_cram`]: the bytes it read to detect the format,
 /// then the rest.
-pub type CramInput = Box<dyn Read + Send>;
+pub struct CramInput(Source);
+
+impl Read for CramInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::fmt::Debug for CramInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CramInput").finish_non_exhaustive()
+    }
+}
 
 enum Inner {
     Bam(Box<BamStreamReader<Source>>),
@@ -290,8 +302,7 @@ impl AlignmentStream {
         }
         if prefix.starts_with(b"CRAM") {
             let fasta = options.reference.ok_or(AlignmentStreamError::CramNeedsReference)?;
-            let source: CramInput = Box::new(Cursor::new(prefix).chain(inner));
-            let reader = CramStreamReader::new(source)?;
+            let reader = CramStreamReader::new(CramInput(Cursor::new(prefix).chain(inner)))?;
             let mut decoder = reader.decoder(&fasta)?;
             if let Some(prefix) = options.name_prefix {
                 decoder = decoder.name_prefix(prefix);
