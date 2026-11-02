@@ -148,6 +148,22 @@ impl CigarOp {
         consumes_query(self.op_code())
     }
 
+    /// One op from its on-disk BAM bytes (a little-endian `u32`).
+    #[inline]
+    pub(crate) const fn from_bam_bytes(bytes: [u8; 4]) -> Self {
+        Self(u32::from_le_bytes(bytes))
+    }
+
+    /// The ops of BAM-on-disk CIGAR bytes (a little-endian `u32` per op),
+    /// which need not be aligned for `u32`. A trailing partial op is ignored;
+    /// a valid record has none.
+    #[inline]
+    pub(crate) fn iter_bam_bytes(
+        bytes: &[u8],
+    ) -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator + Clone + '_ {
+        bytes.as_chunks::<4>().0.iter().map(|&op| Self::from_bam_bytes(op))
+    }
+
     /// Reinterpret a slice of ops as their on-the-wire BAM bytes
     /// (LE u32 per op). Safe via `CigarOp: Pod` — `repr(transparent)` over
     /// `u32` with every bit pattern a valid op — and exact because seqair

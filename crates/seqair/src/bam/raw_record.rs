@@ -309,11 +309,7 @@ impl RawBamRecord {
     /// from its `CG` tag, as htslib's reader returns them. See
     /// [`Self::stored_cigar_bytes`] for the placeholder the record stores.
     pub fn cigar(&self) -> impl ExactSizeIterator<Item = CigarOp> + '_ {
-        self.cigar_packed()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|op| CigarOp::from_bam_u32(u32::from_le_bytes(*op)))
+        CigarOp::iter_bam_bytes(self.cigar_packed())
     }
 
     /// The real CIGAR in BAM's packed form: the long one, else the stored one.
@@ -539,7 +535,7 @@ impl RawBamRecord {
 /// op is exactly `<seq_len>S`, the record is placed, and the first `CG` tag is
 /// a `B:I`/`B:i` array of at least `n_cigar` and under 2^29 operations.
 fn long_cigar<'a>(cigar: &[u8], seq_len: usize, placed: bool, aux: Aux<'a>) -> Option<&'a [u8]> {
-    let first = u32::from_le_bytes(*cigar.as_chunks::<4>().0.first()?);
+    let first = CigarOp::iter_bam_bytes(cigar).next()?.to_bam_u32();
     let placeholder = u32::try_from(seq_len).ok()?.checked_mul(16)? | u32::from(CIGAR_S);
     if first != placeholder || !placed {
         return None;

@@ -124,10 +124,9 @@ fn write_record(
     if cigar.is_empty() {
         out.push(b'*');
     }
-    for op in cigar.as_chunks::<4>().0 {
-        let op = u32::from_le_bytes(*op);
-        out.extend_from_slice(int.format(op >> 4).as_bytes());
-        out.push(CIGAR_CHARS.get((op & 0xF) as usize).copied().unwrap_or(b'?'));
+    for op in crate::bam::cigar::CigarOp::iter_bam_bytes(cigar) {
+        out.extend_from_slice(int.format(op.len()).as_bytes());
+        out.push(CIGAR_CHARS.get(usize::from(op.op_code())).copied().unwrap_or(b'?'));
     }
     out.push(b'\t');
 
