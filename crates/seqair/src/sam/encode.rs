@@ -23,7 +23,7 @@ use tracing::warn;
 
 /// Shows bytes for an error message: printable ASCII as is, anything else as
 /// `\xNN`, at most 32 input bytes.
-struct Escaped<'a>(&'a [u8]);
+pub(crate) struct Escaped<'a>(pub(crate) &'a [u8]);
 
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
