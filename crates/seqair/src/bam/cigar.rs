@@ -309,9 +309,29 @@ impl std::fmt::Display for CigarStr<'_> {
 }
 
 // r[impl cigar.ref_len]
-/// The reference length of `ops`: the summed lengths of M, D, N, = and X
-/// (htslib's `bam_cigar2rlen`). Takes decoded ops (`&[CigarOp]`) or packed
-/// ones ([`CigarOp::iter_bam_bytes`]).
+/// How many reference bases a CIGAR spans: the summed lengths of its M, D,
+/// N, = and X ops, as htslib's `bam_cigar2rlen` counts them.
+///
+/// `ops` is any sequence of ops: a `&[CigarOp]` or `&Vec<CigarOp>`, a
+/// record's [`RawBamRecord::cigar`](super::RawBamRecord::cigar), or packed
+/// bytes through [`CigarOp::iter_bam_bytes`]. The sum is a `u64` so that no
+/// CIGAR, however long, can overflow it.
+///
+/// A CIGAR without reference ops (all soft clips and insertions) spans 0
+/// bases; an aligned read still sits at its position, which is why
+/// [`compute_end_pos`] treats that case on its own.
+///
+/// ```
+/// use seqair::bam::CigarOp;
+/// use seqair::bam::cigar::{CigarOpType::*, ref_len};
+///
+/// // 5S 10M 2I 3D 10M: the clip and the insertion take no reference bases.
+/// let ops = [(SoftClip, 5), (Match, 10), (Insertion, 2), (Deletion, 3), (Match, 10)]
+///     .map(|(op, len)| CigarOp::new(op, len));
+/// assert_eq!(ref_len(&ops), 23);
+/// // The same ops packed as BAM stores them.
+/// assert_eq!(ref_len(CigarOp::iter_bam_bytes(CigarOp::ops_as_bytes(&ops))), 23);
+/// ```
 pub fn ref_len<I>(ops: I) -> u64
 where
     I: IntoIterator,
@@ -321,8 +341,22 @@ where
 }
 
 // r[impl cigar.query_len]
-/// The query length of `ops`: the summed lengths of M, I, S, = and X
-/// (htslib's `bam_cigar2qlen`), which a mapped record's SEQ must match.
+/// How many read bases a CIGAR accounts for: the summed lengths of its M, I,
+/// S, = and X ops, as htslib's `bam_cigar2qlen` counts them. A mapped
+/// record's SEQ must be exactly this long (or `*`); hard clips are not in
+/// SEQ and do not count.
+///
+/// Takes the same inputs as [`ref_len`].
+///
+/// ```
+/// use seqair::bam::CigarOp;
+/// use seqair::bam::cigar::{CigarOpType::*, query_len};
+///
+/// // 4H 5S 10M 2I 3D 10M: 27 bases of SEQ.
+/// let ops = [(HardClip, 4), (SoftClip, 5), (Match, 10), (Insertion, 2), (Deletion, 3), (Match, 10)]
+///     .map(|(op, len)| CigarOp::new(op, len));
+/// assert_eq!(query_len(&ops), 27);
+/// ```
 pub fn query_len<I>(ops: I) -> u64
 where
     I: IntoIterator,
@@ -379,10 +413,27 @@ pub fn soft_clips(ops: &[CigarOp]) -> (u32, u32) {
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
 // r[impl interval.end_pos_inclusive]
-/// The last reference position an alignment at `pos` with `ops` covers:
-/// `pos + ref_len - 1`, or `pos` itself for a CIGAR that consumes no
-/// reference. `None` past [`Pos0::MAX`]. Takes decoded or packed ops, as
+/// The last reference position an alignment starting at `pos` covers:
+/// `pos + ref_len(ops) - 1`. This is seqair's `end_pos` convention
+/// everywhere (`RawBamRecord::end_pos`, `OwnedBamRecord::end_pos`, the
+/// record store): inclusive, so a read covers `pos..=end_pos`. htslib's
+/// `bam_endpos` is one past it; add one to compare, or to compute a BAI bin.
+///
+/// A CIGAR that consumes no reference ends where it starts, at `pos`, as
+/// htslib places such a read on the one base at its position. `None` when
+/// the end would lie past [`Pos0::MAX`]. Takes the same inputs as
 /// [`ref_len`].
+///
+/// ```
+/// use seqair::bam::CigarOp;
+/// use seqair::bam::cigar::{CigarOpType::*, compute_end_pos};
+/// use seqair_types::Pos0;
+///
+/// let pos = Pos0::new(100).unwrap();
+/// let ops = [CigarOp::new(SoftClip, 5), CigarOp::new(Match, 50)];
+/// assert_eq!(compute_end_pos(pos, &ops), Pos0::new(149)); // 100..=149
+/// assert_eq!(compute_end_pos(pos, &[CigarOp::new(SoftClip, 5)]), Some(pos));
+/// ```
 pub fn compute_end_pos<I>(pos: Pos0, ops: I) -> Option<Pos0>
 where
     I: IntoIterator,
