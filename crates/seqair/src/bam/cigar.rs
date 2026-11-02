@@ -180,17 +180,39 @@ impl CigarOp {
         self.op_type().consumes_query()
     }
 
-    /// One op from its on-disk BAM bytes (a little-endian `u32`).
+    /// One op from the four bytes BAM stores it in: a little-endian `u32`,
+    /// `len << 4 | op_code`. The inverse of `to_bam_u32().to_le_bytes()`.
     #[inline]
-    pub(crate) const fn from_bam_bytes(bytes: [u8; 4]) -> Self {
+    pub const fn from_bam_bytes(bytes: [u8; 4]) -> Self {
         Self(u32::from_le_bytes(bytes))
     }
 
-    /// The ops of BAM-on-disk CIGAR bytes (a little-endian `u32` per op),
-    /// which need not be aligned for `u32`. A trailing partial op is ignored;
-    /// a valid record has none.
+    /// Decode a CIGAR as BAM stores it — four bytes per op, see
+    /// [`from_bam_bytes`](Self::from_bam_bytes) — without copying it into a
+    /// `Vec` first. The bytes need not be aligned for `u32`, which a record's
+    /// CIGAR usually is not (its offset depends on the read name's length).
+    /// A trailing partial op is ignored; a valid record has none.
+    ///
+    /// This decodes the bytes it is given. A record with more than 65 535 ops
+    /// stores a placeholder CIGAR and the real one in its `CG` tag:
+    /// [`RawBamRecord::cigar`](super::RawBamRecord::cigar) yields the real
+    /// ops, while its
+    /// [`stored_cigar_bytes`](super::RawBamRecord::stored_cigar_bytes) are
+    /// the placeholder.
+    ///
+    /// ```
+    /// use seqair::bam::CigarOp;
+    /// use seqair::bam::cigar::CigarOpType;
+    ///
+    /// let ops = [CigarOp::new(CigarOpType::SoftClip, 3), CigarOp::new(CigarOpType::Match, 97)];
+    /// let packed = CigarOp::ops_as_bytes(&ops);
+    /// // An unaligned view, as a record's CIGAR usually is.
+    /// let mut shifted = vec![0u8];
+    /// shifted.extend_from_slice(packed);
+    /// assert!(CigarOp::iter_bam_bytes(&shifted[1..]).eq(ops));
+    /// ```
     #[inline]
-    pub(crate) fn iter_bam_bytes(
+    pub fn iter_bam_bytes(
         bytes: &[u8],
     ) -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator + Clone + '_ {
         bytes.as_chunks::<4>().0.iter().map(|&op| Self::from_bam_bytes(op))
