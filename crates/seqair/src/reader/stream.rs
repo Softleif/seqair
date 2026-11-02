@@ -144,8 +144,8 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
     /// The FASTA (with its `.fai`, and `.gzi` if bgzipped) CRAM input is
     /// decoded against. Other formats ignore it.
     #[must_use]
-    pub fn reference(mut self, fasta: impl Into<PathBuf>) -> Self {
-        self.reference = Some(fasta.into());
+    pub fn reference(mut self, fasta: &Path) -> Self {
+        self.reference = Some(fasta.to_path_buf());
         self
     }
 
