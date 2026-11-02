@@ -83,6 +83,7 @@ fn stream(
 
 // r[verify unified.stream.detect+2]
 // r[verify unified.stream.records]
+// r[verify unified.stream.iter]
 /// Every wrapping of the same SAM is detected as what it is, however the
 /// bytes arrive, and yields the same header and records.
 #[hegel::test(test_cases = crate::pinned::cases(100))]
@@ -98,11 +99,37 @@ fn every_format_is_detected_and_reads_the_same_records(tc: TestCase) {
         (StreamFormat::GzipSam, gzip(&sam)),
         (StreamFormat::Bam, bam(&sam)),
     ] {
+        let iterated: Vec<Vec<u8>> =
+            AlignmentStream::from_reader(std::io::Cursor::new(data.clone()))
+                .unwrap()
+                .records()
+                .map(|r| r.unwrap().into_payload())
+                .collect();
         let (found, header, records) = stream(data, chunk, threads).unwrap();
         assert_eq!(found, format);
         assert_eq!(header, header_text(), "{format:?}");
         assert_eq!(records, want, "{format:?}");
+        assert_eq!(iterated, want, "{format:?} through records()");
     }
+}
+
+// r[verify unified.stream.iter]
+/// An error that ends the stream is the iterator's last item: a BAM without
+/// its EOF marker gives its records, the error, and then nothing.
+#[test]
+fn records_end_after_an_error_that_ends_the_stream() {
+    let mut body = header_text();
+    for i in 0..20 {
+        writeln!(body, "r{i}\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\tIIII").unwrap();
+    }
+    let mut data = bam(body.as_bytes());
+    data.truncate(data.len() - 28); // the EOF marker block
+    let mut stream = AlignmentStream::from_reader(std::io::Cursor::new(data)).unwrap();
+    let items: Vec<_> = stream.records().collect();
+    assert_eq!(items.len(), 21);
+    assert!(items[..20].iter().all(Result::is_ok));
+    assert!(items[20].is_err());
+    assert!(stream.records().next().is_none());
 }
 
 // r[verify unified.stream.detect+2]

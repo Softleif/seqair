@@ -195,6 +195,11 @@ impl<R: Read> BamStreamReader<R> {
     pub fn into_header(self) -> BamHeader {
         self.header
     }
+
+    /// Whether an error ended the stream.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed
+    }
 }
 
 /// An end of input inside record `record` is truncation.
