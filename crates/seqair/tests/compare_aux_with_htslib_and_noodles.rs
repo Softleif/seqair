@@ -95,8 +95,8 @@ fn scalar_types_parity() {
     aux.set_int(*b"X5", -100_000).unwrap(); // → i (i32)
     aux.set_int(*b"X6", 3_000_000_000).unwrap(); // → I (u32)
     aux.set_float(*b"XF", std::f32::consts::PI);
-    aux.set_string(*b"RG", b"sample1");
-    aux.set_hex(*b"XH", b"DEADBEEF");
+    aux.set_string(*b"RG", b"sample1").unwrap();
+    aux.set_hex(*b"XH", b"DEADBEEF").unwrap();
     // `set_double` MUST come last in the byte order: noodles' `data.get()`
     // walks tags in insertion order, and noodles' SAM `Value` enum lacks a
     // `Double` variant. So if `XD` came before `RG`, the iterator would

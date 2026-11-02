@@ -158,7 +158,7 @@ fn apply(record: &mut RawBamRecord, edits: &[Edit]) -> Result<(), RawRecordEditE
         for edit in edits {
             match edit {
                 Edit::Remove(key) => aux.remove(*key),
-                Edit::SetString(key, text) => aux.set_string(*key, text),
+                Edit::SetString(key, text) => aux.set_string(*key, text)?,
                 Edit::SetBytes(key, bytes) => aux.set_array_u8(*key, bytes)?,
             }
         }
@@ -204,7 +204,7 @@ fn a_failing_aux_edit_leaves_the_record_alone() {
     let before = record.as_payload().to_vec();
     let err = record
         .edit_aux(|aux| {
-            aux.set_string(*b"XM", b"abc");
+            aux.set_string(*b"XM", b"abc").unwrap();
             aux.set_char(*b"XR", 0x01)
         })
         .unwrap_err();
@@ -295,9 +295,9 @@ fn samtools_reads_the_edited_record(tc: TestCase) {
             for key in [*b"XM", *b"XR", *b"MM"] {
                 aux.remove(key);
             }
-            aux.set_string(*b"MM", b"C+m,0;");
+            aux.set_string(*b"MM", b"C+m,0;").unwrap();
             aux.set_array_u8(*b"ML", &ml)?;
-            aux.set_string(*b"XG", b"CT");
+            aux.set_string(*b"XG", b"CT").unwrap();
             Ok::<(), AuxDataError>(())
         })
         .unwrap();

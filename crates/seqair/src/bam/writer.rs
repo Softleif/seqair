@@ -868,7 +868,7 @@ mod tests {
                 .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
                 .aux({
                     let mut a = AuxData::new();
-                    a.set_string(*b"RG", b"group1");
+                    a.set_string(*b"RG", b"group1").unwrap();
                     a
                 })
                 .build()

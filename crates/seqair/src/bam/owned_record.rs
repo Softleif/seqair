@@ -451,7 +451,7 @@ mod tests {
     fn serialize_with_aux_tags() {
         let mut aux = AuxData::new();
         aux.set_int(*b"NM", 3).unwrap();
-        aux.set_string(*b"RG", b"grp1");
+        aux.set_string(*b"RG", b"grp1").unwrap();
 
         let rec =
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r1".to_vec())

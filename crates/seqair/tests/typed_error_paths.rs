@@ -777,7 +777,7 @@ fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
 /// validated would have something behind it to corrupt.
 fn populated_aux() -> AuxData {
     let mut aux = AuxData::new();
-    aux.set_string(*b"RG", b"group-1");
+    aux.set_string(*b"RG", b"group-1").unwrap();
     aux.set_int(*b"NM", 3).unwrap();
     aux.set_float(*b"XF", 1.5);
     aux.set_int(*b"AS", -120).unwrap();

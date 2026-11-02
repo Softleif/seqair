@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `AuxData::set_string` and `set_hex` return `Result<(), AuxDataError>` and refuse a value outside their SAM grammar, leaving the tags untouched: `set_string` takes `[ !-~]*` (`AuxDataError::InvalidStringByte`; a NUL used to end the string early and turn the rest into garbage tags, which `RawBamRecord::edit_aux` then wrote into the record), `set_hex` takes `([0-9A-F][0-9A-F])*` (`InvalidHexByte`, `OddHexLength`).
 - `SlimRecord::seq`, `RecordRef::seq` and `AlignmentView::seq`/`inserted_bases` return `&[IupacBase]`, and `RecordRef::base_at` returns `IupacBase` (`IupacBase::N` past the read). `IupacBase::to_base` gives the old `Base`.
 - `RecordStore::push_fields` takes the sequence as `&[IupacBase]`; `record_store::Sequence::Bases(&[Base])` is now `Sequence::Iupac(&[IupacBase])`.
 - `AlignedPairWithRead`/`AlignedPairWithRef` and `MatchedBase`/`MatchedRef`: `query` is `IupacBase` (`Match`) or `&[IupacBase]` (`Insertion`, `SoftClip`); `AlignedPairs::with_read` takes `&[IupacBase]`. `ref_base`/`ref_bases` stay `Base`.

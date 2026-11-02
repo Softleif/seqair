@@ -92,7 +92,7 @@ fn make_methylation_record(
         IupacBase::A,
     ];
     let mut aux = AuxData::new();
-    aux.set_string(*b"MM", mm_str);
+    aux.set_string(*b"MM", mm_str).unwrap();
     aux.set_array_u8(*b"ML", ml_probs).unwrap();
 
     OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), name.to_vec())
@@ -271,7 +271,7 @@ fn mm_ml_empty_values() {
     let dir = tempfile::tempdir().unwrap();
 
     let mut aux = AuxData::new();
-    aux.set_string(*b"MM", b"");
+    aux.set_string(*b"MM", b"").unwrap();
     aux.set_array_u8(*b"ML", &[]).unwrap();
 
     let records = vec![
@@ -349,7 +349,7 @@ fn mm_ml_large_tags() {
         .collect();
 
     let mut aux = AuxData::new();
-    aux.set_string(*b"MM", mm_str.as_bytes());
+    aux.set_string(*b"MM", mm_str.as_bytes()).unwrap();
     aux.set_array_u8(*b"ML", &ml_probs).unwrap();
 
     let records = vec![
@@ -400,11 +400,11 @@ fn mm_ml_coexist_with_other_tags() {
 
     let mut aux = AuxData::new();
     aux.set_int(*b"NM", 2).unwrap();
-    aux.set_string(*b"RG", b"sample1");
-    aux.set_string(*b"MM", b"C+m,0,5;");
+    aux.set_string(*b"RG", b"sample1").unwrap();
+    aux.set_string(*b"MM", b"C+m,0,5;").unwrap();
     aux.set_array_u8(*b"ML", &[200, 180]).unwrap();
     aux.set_float(*b"XS", 0.95);
-    aux.set_string(*b"MD", b"5A4^GT10");
+    aux.set_string(*b"MD", b"5A4^GT10").unwrap();
 
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"multi_aux".to_vec())
