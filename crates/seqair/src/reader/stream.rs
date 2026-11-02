@@ -77,6 +77,11 @@ pub enum AlignmentStreamError {
 
 type Source = std::io::Chain<Cursor<Vec<u8>>, Box<dyn Read + Send>>;
 
+/// The input of a CRAM [`AlignmentStream`] hands over with
+/// [`AlignmentStream::into_cram`]: the bytes it read to detect the format,
+/// then the rest.
+pub type CramInput = Box<dyn Read + Send>;
+
 enum Inner {
     Bam(Box<BamStreamReader<Source>>),
     Sam(Box<SamStreamReader<Box<dyn BufRead + Send>>>),
@@ -85,7 +90,7 @@ enum Inner {
 
 /// A CRAM stream decoded one container at a time on the reading thread.
 struct CramRecords {
-    reader: CramStreamReader<Source>,
+    reader: CramStreamReader<CramInput>,
     decoder: CramContainerDecoder,
     /// The current container's records; those before `next` are handed out.
     pending: Vec<RawBamRecord>,
@@ -285,7 +290,8 @@ impl AlignmentStream {
         }
         if prefix.starts_with(b"CRAM") {
             let fasta = options.reference.ok_or(AlignmentStreamError::CramNeedsReference)?;
-            let reader = CramStreamReader::new(Cursor::new(prefix).chain(inner))?;
+            let source: CramInput = Box::new(Cursor::new(prefix).chain(inner));
+            let reader = CramStreamReader::new(source)?;
             let mut decoder = reader.decoder(&fasta)?;
             if let Some(prefix) = options.name_prefix {
                 decoder = decoder.name_prefix(prefix);
@@ -341,6 +347,26 @@ impl AlignmentStream {
             Inner::Sam(r) => r.read_record(record)?,
             Inner::Cram(r) => r.read_record(record)?,
         })
+    }
+
+    // r[impl unified.stream.into_cram]
+    /// For CRAM, the reader and decoder this stream decodes with, set up as
+    /// [`AlignmentStreamBuilder::build`] set them up (reference, name prefix),
+    /// so the caller can decode containers on threads of its own
+    /// ([`CramContainerDecoder::fork`]). The reader continues with the
+    /// containers this stream has not read.
+    ///
+    /// # Errors
+    /// The stream itself, unchanged, if it is not CRAM or holds records of a
+    /// container it has not handed out yet.
+    pub fn into_cram(self) -> Result<(CramStreamReader<CramInput>, CramContainerDecoder), Self> {
+        match self.inner {
+            Inner::Cram(cram) if cram.next >= cram.pending.len() => {
+                let CramRecords { reader, decoder, .. } = *cram;
+                Ok((reader, decoder))
+            }
+            inner => Err(Self { inner, format: self.format }),
+        }
     }
 
     // r[impl unified.stream.iter]

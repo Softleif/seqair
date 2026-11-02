@@ -31,7 +31,7 @@ pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
 pub use stream::{
-    AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, Records, StreamFormat,
+    AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, CramInput, Records, StreamFormat,
 };
 pub use stream_pileup::{
     DEFAULT_WINDOW_LEN, StreamColumn, StreamPileup, StreamPileupError, WindowBudget,

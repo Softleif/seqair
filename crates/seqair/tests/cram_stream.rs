@@ -13,8 +13,8 @@ use seqair::bam::stream::BamStreamReader;
 use seqair::bam::{RawBamRecord, RecordStore};
 use seqair::cram::container::{ContainerHeader, RefSeqId};
 use seqair::cram::reader::{CramError, IndexedCramReader};
-use seqair::cram::stream::{CramStreamError, CramStreamReader};
-use seqair::reader::{AlignmentStream, AlignmentStreamError, ResolveTid, StreamFormat};
+use seqair::cram::stream::{CramContainerDecoder, CramStreamError, CramStreamReader};
+use seqair::reader::{AlignmentStream, AlignmentStreamError, CramInput, ResolveTid, StreamFormat};
 use seqair::sam::format::format_sam_record;
 use seqair_types::Pos0;
 use std::io::Read;
@@ -301,6 +301,51 @@ fn alignment_stream_reads_cram() {
         AlignmentStream::from_reader(file),
         Err(AlignmentStreamError::CramNeedsReference)
     ));
+}
+
+// r[verify unified.stream.into_cram]
+/// `into_cram` hands over the reader and a decoder set up with the builder's
+/// reference and name prefix: decoding the containers it yields gives the
+/// records the stream would have read, also after the stream read some. A
+/// container half handed out, or another format, comes back unchanged.
+#[test]
+fn into_cram_hands_over_the_rest_of_the_stream() {
+    let decode_rest =
+        |(mut reader, decoder): (CramStreamReader<CramInput>, CramContainerDecoder)| {
+            let mut out = Vec::new();
+            while let Some(container) = reader.next_container().unwrap() {
+                decoder.fork().unwrap().decode(&container, &mut out).unwrap();
+            }
+            out.into_iter().map(RawBamRecord::into_payload).collect::<Vec<_>>()
+        };
+    for name in ["fidelity_lossy_names.cram", "fidelity_slices.cram"] {
+        let cram = data(&format!("cram-stream/{name}"));
+        let fasta = data("cram-stream/fidelity.fa");
+        let open = || AlignmentStream::open_path(&cram).unwrap().reference(&fasta).build().unwrap();
+        let want: Vec<_> = open().records().map(|r| r.unwrap().into_payload()).collect();
+        assert!(want.len() > 1, "{name}");
+
+        assert_eq!(decode_rest(open().into_cram().unwrap()), want, "{name}");
+
+        // Hand over after each record: refused while the container has more.
+        let mut stream = open();
+        let mut read = Vec::new();
+        let mut record = RawBamRecord::default();
+        let parts = loop {
+            assert!(stream.read_record(&mut record).unwrap(), "{name}");
+            read.push(record.as_payload().to_vec());
+            match stream.into_cram() {
+                Ok(parts) => break parts,
+                Err(back) => stream = back,
+            }
+        };
+        read.extend(decode_rest(parts));
+        assert_eq!(read, want, "{name}");
+    }
+
+    let sam = b"@SQ\tSN:c\tLN:10\n".to_vec();
+    let stream = AlignmentStream::from_reader(std::io::Cursor::new(sam)).unwrap();
+    assert!(matches!(stream.into_cram(), Err(s) if s.format() == StreamFormat::Sam));
 }
 
 // r[verify cram.record.read_name+2]
