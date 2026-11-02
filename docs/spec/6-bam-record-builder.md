@@ -116,8 +116,8 @@ A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()`
 > r[bam.owned_record.aux_data]
 > `AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]`). Mutation methods MUST be provided:
 >
-> - `set_string(tag, value: &[u8])` — add or replace a Z-type string tag
-> - `set_hex(tag, value: &[u8])` — add or replace an H-type hex string tag (encoded with type byte `H`, NUL-terminated like Z)
+> - `set_string(tag, value: &[u8]) -> Result` — add or replace a Z-type string tag. Every byte MUST be in `[ !-~]` (0x20..=0x7E, the Z grammar from [SAM1]); another byte MUST return `AuxDataError::InvalidStringByte { value, index }`. A NUL would end the string early and turn the bytes after it into garbage tags, so the setter cannot be allowed to write one. Validation happens BEFORE any mutation.
+> - `set_hex(tag, value: &[u8]) -> Result` — add or replace an H-type hex string tag (encoded with type byte `H`, NUL-terminated like Z). The value MUST match `([0-9A-F][0-9A-F])*` (the H grammar from [SAM1]): another byte MUST return `AuxDataError::InvalidHexByte { value, index }`, an odd number of digits `AuxDataError::OddHexLength { len }`. Validation happens BEFORE any mutation.
 > - `set_int(tag, value: i64)` — add or replace an integer tag
 > - `set_float(tag, value: f32)` — add or replace an f-type float tag
 > - `set_char(tag, value: u8) -> Result` — add or replace an A-type character tag. The byte MUST be in `[!-~]` (0x21..=0x7E, the printable-ASCII grammar from [SAM1]); other bytes MUST return `AuxDataError::InvalidCharByte { value }`. Validation happens BEFORE any mutation (no orphaned bytes on error).

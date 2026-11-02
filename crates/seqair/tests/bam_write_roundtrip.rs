@@ -331,7 +331,7 @@ fn roundtrip_aux_tags() {
 
     let mut aux = AuxData::new();
     aux.set_int(*b"NM", 3).unwrap();
-    aux.set_string(*b"RG", b"sample1");
+    aux.set_string(*b"RG", b"sample1").unwrap();
     aux.set_float(*b"XS", -1.5);
 
     let records = vec![
@@ -557,7 +557,7 @@ fn roundtrip_write_store_record() {
             })
             .aux({
                 let mut a = AuxData::new();
-                a.set_string(*b"RG", b"grp1");
+                a.set_string(*b"RG", b"grp1").unwrap();
                 a
             })
             .build()

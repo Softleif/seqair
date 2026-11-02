@@ -52,14 +52,8 @@ fn decode_f32(bytes: &[u8]) -> Vec<f32> {
 fn set_one(aux: &mut AuxData, tag: [u8; 2], value: &AuxValue<'_>) -> bool {
     match value {
         AuxValue::Char(v) => aux.set_char(tag, *v).is_ok(),
-        AuxValue::String(s) => {
-            aux.set_string(tag, s);
-            true
-        }
-        AuxValue::Hex(h) => {
-            aux.set_hex(tag, h);
-            true
-        }
+        AuxValue::String(s) => aux.set_string(tag, s).is_ok(),
+        AuxValue::Hex(h) => aux.set_hex(tag, h).is_ok(),
         AuxValue::I8(v) => aux.set_int(tag, i64::from(*v)).is_ok(),
         AuxValue::U8(v) => aux.set_int(tag, i64::from(*v)).is_ok(),
         AuxValue::I16(v) => aux.set_int(tag, i64::from(*v)).is_ok(),

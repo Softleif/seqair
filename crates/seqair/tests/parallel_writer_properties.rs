@@ -108,7 +108,7 @@ fn bam_records(stream: &BamStream) -> Vec<OwnedBamRecord> {
             let qual: Vec<BaseQuality> =
                 (0..len).map(|_| BaseQuality::from_byte(20 + (noise.next() % 20) as u8)).collect();
             let mut aux = AuxData::new();
-            aux.set_string(*b"MM", b"C+m,0,3,1;");
+            aux.set_string(*b"MM", b"C+m,0,3,1;").unwrap();
             let ml: Vec<u8> = (0..(len % 7)).map(|_| noise.next() as u8).collect();
             aux.set_array_u8(*b"ML", &ml).unwrap();
             let flags = if unmapped { BamFlags::from(0x4) } else { BamFlags::empty() };

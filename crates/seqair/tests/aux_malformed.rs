@@ -169,7 +169,7 @@ fn aux_data_handles_any_bytes(tc: TestCase) {
         }
 
         let mut set = aux.clone();
-        set.set_string(key, b"abc");
+        set.set_string(key, b"abc").unwrap();
         set.set_int(key, -7).unwrap();
         set.set_array_u8(key, &[1, 2, 3]).unwrap();
         set.set_float(key, 1.5);
@@ -201,7 +201,7 @@ fn edit_aux_refuses_exactly_the_malformed_blocks(tc: TestCase) {
     let key = tc.draw(gs::sampled_from(keys));
     let result = record.edit_aux(|aux| {
         aux.remove(key);
-        aux.set_string(*b"XR", b"CT");
+        aux.set_string(*b"XR", b"CT").unwrap();
         Ok(())
     });
 

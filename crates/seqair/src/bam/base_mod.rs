@@ -989,7 +989,7 @@ mod tests {
     fn from_record_with_mm_and_ml_returns_some() {
         let bases = vec![A, C, G, T, A, C, G, C, G, A, C, G, T];
         let mut aux = AuxData::new();
-        aux.set_string(*b"MM", b"C+m,0,2;");
+        aux.set_string(*b"MM", b"C+m,0,2;").unwrap();
         aux.set_array_u8(*b"ML", &[200, 180]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
@@ -1014,7 +1014,7 @@ mod tests {
         // sees ml=&[] and the length-mismatch validation fires.
         let bases = vec![A, C, G];
         let mut aux = AuxData::new();
-        aux.set_string(*b"MM", b"C+m,0;");
+        aux.set_string(*b"MM", b"C+m,0;").unwrap();
         // No ML set.
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
@@ -1029,7 +1029,7 @@ mod tests {
 
         // Empty MM (no deltas) is fine with no ML.
         let mut aux2 = AuxData::new();
-        aux2.set_string(*b"MM", b"C+m;");
+        aux2.set_string(*b"MM", b"C+m;").unwrap();
         let (store2, idx2) = push_record(&bases, aux2.as_bytes());
         let rec2 = store2.record(idx2).unwrap();
         let rec2 = rec2.slim();
@@ -1042,7 +1042,7 @@ mod tests {
         let bases = vec![A, C, G];
         let mut aux = AuxData::new();
         // Some unrelated tag, but no MM.
-        aux.set_string(*b"RG", b"grp1");
+        aux.set_string(*b"RG", b"grp1").unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
         let rec = store.record(idx).unwrap();
@@ -1057,7 +1057,7 @@ mod tests {
         // `C+m,0` — missing terminating ';' — propagates as Parse(MissingTerminator).
         let bases = vec![A, C, G];
         let mut aux = AuxData::new();
-        aux.set_string(*b"MM", b"C+m,0");
+        aux.set_string(*b"MM", b"C+m,0").unwrap();
         aux.set_array_u8(*b"ML", &[200]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
@@ -1091,7 +1091,7 @@ mod tests {
         // ML as a B:S array instead of B:C.
         let bases = vec![A, C, G];
         let mut aux = AuxData::new();
-        aux.set_string(*b"MM", b"C+m,0;");
+        aux.set_string(*b"MM", b"C+m,0;").unwrap();
         aux.set_array_u16(*b"ML", &[200]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
@@ -1108,7 +1108,7 @@ mod tests {
         // but driven through from_record with the reverse flag.
         let bases = vec![C, G, T, A, C, G, T];
         let mut aux = AuxData::new();
-        aux.set_string(*b"MM", b"C+m,0,0;");
+        aux.set_string(*b"MM", b"C+m,0,0;").unwrap();
         aux.set_array_u8(*b"ML", &[200, 210]).unwrap();
 
         let mut store: RecordStore<()> = RecordStore::new();

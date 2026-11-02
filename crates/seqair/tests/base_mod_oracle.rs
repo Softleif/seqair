@@ -77,7 +77,7 @@ fn build_record(
     is_reverse: bool,
 ) -> OwnedBamRecord {
     let mut aux = AuxData::new();
-    aux.set_string(*b"MM", mm);
+    aux.set_string(*b"MM", mm).unwrap();
     aux.set_array_u8(*b"ML", ml).unwrap();
     let flags = if is_reverse { BamFlags::from(FLAG_REVERSE) } else { BamFlags::empty() };
     let seq_len = seq.len();

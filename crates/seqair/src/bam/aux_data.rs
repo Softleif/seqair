@@ -29,6 +29,22 @@ pub enum AuxDataError {
     /// `[!-~]` (0x21..=0x7E).
     #[error("invalid A-type byte {value:#04x}: SAM grammar requires printable ASCII [!-~]")]
     InvalidCharByte { value: u8 },
+
+    /// `set_string` received a byte outside the SAM Z-type grammar `[ !-~]`
+    /// (0x20..=0x7E). A NUL would end the string early and corrupt the tags
+    /// after it.
+    #[error(
+        "invalid Z-type byte {value:#04x} at {index}: SAM grammar requires printable ASCII [ !-~]"
+    )]
+    InvalidStringByte { value: u8, index: usize },
+
+    /// `set_hex` received a byte outside the SAM H-type grammar `[0-9A-F]`.
+    #[error("invalid H-type byte {value:#04x} at {index}: SAM grammar requires [0-9A-F]")]
+    InvalidHexByte { value: u8, index: usize },
+
+    /// `set_hex` received an odd number of hex digits; SAM's H type is whole bytes.
+    #[error("H-type value has {len} hex digits; SAM requires an even number")]
+    OddHexLength { len: usize },
 }
 
 impl AuxData {
@@ -65,12 +81,23 @@ impl AuxData {
     // r[impl base_mod.passthrough.bam] — Z-type set/get round-trips MM bytes verbatim
     // r[impl base_mod.passthrough.coexistence] — `remove(tag)` only touches the named tag
     /// Add or replace a Z-type (null-terminated string) tag.
-    pub fn set_string(&mut self, tag: [u8; 2], value: &[u8]) {
+    ///
+    /// `value` MUST be in the SAM grammar `[ !-~]*` (printable ASCII and
+    /// space); any other byte returns [`AuxDataError::InvalidStringByte`] and
+    /// leaves the tags untouched.
+    // r[impl bam.owned_record.failed_mutation_is_inert]
+    pub fn set_string(&mut self, tag: [u8; 2], value: &[u8]) -> Result<(), AuxDataError> {
+        if let Some((index, &value)) =
+            value.iter().enumerate().find(|(_, b)| !matches!(b, 0x20..=0x7E))
+        {
+            return Err(AuxDataError::InvalidStringByte { value, index });
+        }
         self.remove(tag);
         self.data.extend_from_slice(&tag);
         self.data.push(b'Z');
         self.data.extend_from_slice(value);
         self.data.push(0); // NUL terminator
+        Ok(())
     }
 
     /// Add or replace a char (A-type) tag.
@@ -94,15 +121,25 @@ impl AuxData {
     /// Add or replace an H-type (hex string) tag.
     ///
     /// The H type is encoded like Z (NUL-terminated), but with type byte `'H'`.
-    /// `value` is written verbatim; the SAM grammar restricts it to even-length
-    /// `[0-9A-F]` but the writer is lenient — the BAM wire format does not
-    /// constrain the bytes, only the parser does.
-    pub fn set_hex(&mut self, tag: [u8; 2], value: &[u8]) {
+    /// `value` MUST be in the SAM grammar `([0-9A-F][0-9A-F])*`: another byte
+    /// returns [`AuxDataError::InvalidHexByte`], an odd length
+    /// [`AuxDataError::OddHexLength`], and the tags are left untouched.
+    // r[impl bam.owned_record.failed_mutation_is_inert]
+    pub fn set_hex(&mut self, tag: [u8; 2], value: &[u8]) -> Result<(), AuxDataError> {
+        if let Some((index, &value)) =
+            value.iter().enumerate().find(|(_, b)| !matches!(b, b'0'..=b'9' | b'A'..=b'F'))
+        {
+            return Err(AuxDataError::InvalidHexByte { value, index });
+        }
+        if !value.len().is_multiple_of(2) {
+            return Err(AuxDataError::OddHexLength { len: value.len() });
+        }
         self.remove(tag);
         self.data.extend_from_slice(&tag);
         self.data.push(b'H');
         self.data.extend_from_slice(value);
         self.data.push(0); // NUL terminator
+        Ok(())
     }
 
     // r[impl bam.owned_record.aux_int_encoding]
@@ -370,7 +407,7 @@ mod tests {
     #[test]
     fn set_and_get_string() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"group1");
+        aux.set_string(*b"RG", b"group1").unwrap();
         assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"group1")));
     }
 
@@ -394,8 +431,8 @@ mod tests {
     #[test]
     fn set_replaces_existing() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"old");
-        aux.set_string(*b"RG", b"new");
+        aux.set_string(*b"RG", b"old").unwrap();
+        aux.set_string(*b"RG", b"new").unwrap();
         assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"new")));
         // Should not have duplicate
         let tags: Vec<_> = aux::iter_tags(aux.as_bytes()).collect();
@@ -405,7 +442,7 @@ mod tests {
     #[test]
     fn remove_tag() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"grp");
+        aux.set_string(*b"RG", b"grp").unwrap();
         aux.set_int(*b"NM", 5).unwrap();
         aux.remove(*b"RG");
         assert_eq!(aux.get(*b"RG"), None);
@@ -415,7 +452,7 @@ mod tests {
     #[test]
     fn remove_nonexistent_is_noop() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"grp");
+        aux.set_string(*b"RG", b"grp").unwrap();
         aux.remove(*b"XX");
         assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"grp")));
     }
@@ -497,7 +534,7 @@ mod tests {
     #[test]
     fn multiple_tags_coexist() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"grp");
+        aux.set_string(*b"RG", b"grp").unwrap();
         aux.set_int(*b"NM", 3).unwrap();
         aux.set_float(*b"XF", 1.5);
         aux.set_array_u8(*b"ML", &[10, 20]).unwrap();
@@ -511,9 +548,9 @@ mod tests {
     #[test]
     fn remove_middle_tag_preserves_others() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"AA", b"first");
+        aux.set_string(*b"AA", b"first").unwrap();
         aux.set_int(*b"BB", 99).unwrap();
-        aux.set_string(*b"CC", b"third");
+        aux.set_string(*b"CC", b"third").unwrap();
 
         aux.remove(*b"BB");
 
@@ -598,7 +635,7 @@ mod tests {
     #[test]
     fn all_array_types_roundtrip_with_other_tags() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"sample");
+        aux.set_string(*b"RG", b"sample").unwrap();
 
         aux.set_array_i8(*b"X0", &[-1i8, 0, 1]).unwrap();
         aux.set_array_i16(*b"X1", &[100i16]).unwrap();
@@ -628,7 +665,7 @@ mod tests {
     #[test]
     fn set_char_rejects_non_printable() {
         let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"grp"); // unrelated tag
+        aux.set_string(*b"RG", b"grp").unwrap(); // unrelated tag
 
         // Pre-mutation snapshot.
         let before = aux.as_bytes().to_vec();
@@ -672,15 +709,15 @@ mod tests {
     #[test]
     fn set_and_get_hex() {
         let mut aux = AuxData::new();
-        aux.set_hex(*b"XH", b"DEADBEEF");
+        aux.set_hex(*b"XH", b"DEADBEEF").unwrap();
         assert_eq!(aux.get(*b"XH"), Some(AuxValue::Hex(b"DEADBEEF")));
     }
 
     #[test]
     fn hex_replaces_existing() {
         let mut aux = AuxData::new();
-        aux.set_hex(*b"XH", b"AA");
-        aux.set_hex(*b"XH", b"FF");
+        aux.set_hex(*b"XH", b"AA").unwrap();
+        aux.set_hex(*b"XH", b"FF").unwrap();
         assert_eq!(aux.get(*b"XH"), Some(AuxValue::Hex(b"FF")));
         let tags: Vec<_> = aux::iter_tags(aux.as_bytes()).collect();
         assert_eq!(tags.len(), 1);
@@ -691,8 +728,8 @@ mod tests {
         // Hex and String share the same parser path (NUL-terminated) but
         // produce different `AuxValue` variants based on the type byte.
         let mut aux = AuxData::new();
-        aux.set_hex(*b"XH", b"CAFE");
-        aux.set_string(*b"XZ", b"CAFE");
+        aux.set_hex(*b"XH", b"CAFE").unwrap();
+        aux.set_string(*b"XZ", b"CAFE").unwrap();
         assert_eq!(aux.get(*b"XH"), Some(AuxValue::Hex(b"CAFE")));
         assert_eq!(aux.get(*b"XZ"), Some(AuxValue::String(b"CAFE")));
     }
@@ -711,6 +748,88 @@ mod tests {
     // Properties: round-trip, uniqueness, and removal
     // ═══════════════════════════════════════════════════════════════
 
+    /// A byte of SAM's Z grammar, `[ !-~]`.
+    #[hegel::composite]
+    fn z_byte(tc: &TestCase) -> u8 {
+        tc.draw_silent(gs::integers::<u8>().min_value(0x20).max_value(0x7E))
+    }
+
+    /// A value of `valid` bytes with one drawn byte, any at all, inserted at
+    /// a drawn position: a value that is valid exactly when that byte is.
+    #[hegel::composite]
+    fn with_one_byte(tc: &TestCase, valid: Vec<u8>) -> (Vec<u8>, u8) {
+        let mut value = valid;
+        let at = tc.draw(gs::integers::<usize>().max_value(value.len()));
+        let byte = tc.draw(gs::integers::<u8>());
+        value.insert(at, byte);
+        (value, byte)
+    }
+
+    // r[verify bam.owned_record.aux_data]
+    // r[verify bam.owned_record.failed_mutation_is_inert]
+    /// `set_string` takes a value exactly when every byte is in `[ !-~]`; a
+    /// taken value reads back unchanged with the block still well-formed, and
+    /// a refused one leaves the block as it was.
+    #[hegel::test]
+    fn set_string_takes_exactly_the_z_grammar(tc: TestCase) {
+        let valid = tc.draw(gs::vecs(z_byte()).max_size(40));
+        let (value, byte) = tc.draw(with_one_byte(valid));
+        let mut aux = AuxData::new();
+        aux.set_string(*b"RG", b"grp").unwrap();
+        let before = aux.as_bytes().to_vec();
+
+        match aux.set_string(*b"XZ", &value) {
+            Ok(()) => {
+                assert!(matches!(byte, 0x20..=0x7E), "took byte {byte:#04x}");
+                assert_eq!(aux.get(*b"XZ"), Some(AuxValue::String(&value)));
+                assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"grp")));
+                assert!(aux::validate_aux(aux.as_bytes()).is_ok());
+            }
+            Err(AuxDataError::InvalidStringByte { value: bad, .. }) => {
+                assert_eq!(bad, byte);
+                assert!(!matches!(byte, 0x20..=0x7E), "refused byte {byte:#04x}");
+                assert_eq!(aux.as_bytes(), before.as_slice());
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    // r[verify bam.owned_record.aux_data]
+    // r[verify bam.owned_record.failed_mutation_is_inert]
+    /// `set_hex` takes a value exactly when it is an even number of
+    /// `[0-9A-F]` digits.
+    #[hegel::test]
+    fn set_hex_takes_exactly_the_h_grammar(tc: TestCase) {
+        let digit = gs::sampled_from(b"0123456789ABCDEF".to_vec());
+        let valid = tc.draw(gs::vecs(digit).max_size(40));
+        let (value, byte) = tc.draw(with_one_byte(valid));
+        let is_digit = matches!(byte, b'0'..=b'9' | b'A'..=b'F');
+        let mut aux = AuxData::new();
+        aux.set_string(*b"RG", b"grp").unwrap();
+        let before = aux.as_bytes().to_vec();
+
+        match aux.set_hex(*b"XH", &value) {
+            Ok(()) => {
+                assert!(is_digit && value.len().is_multiple_of(2));
+                assert_eq!(aux.get(*b"XH"), Some(AuxValue::Hex(&value)));
+                assert!(aux::validate_aux(aux.as_bytes()).is_ok());
+            }
+            Err(error) => {
+                match error {
+                    AuxDataError::InvalidHexByte { value: bad, .. } => {
+                        assert_eq!(bad, byte);
+                        assert!(!is_digit);
+                    }
+                    AuxDataError::OddHexLength { len } => {
+                        assert!(is_digit && !len.is_multiple_of(2));
+                    }
+                    other => panic!("unexpected error {other:?}"),
+                }
+                assert_eq!(aux.as_bytes(), before.as_slice());
+            }
+        }
+    }
+
     /// A two-letter upper-case tag name.
     #[hegel::composite]
     fn upper_tag(tc: &TestCase) -> [u8; 2] {
@@ -725,9 +844,10 @@ mod tests {
     /// builder (`AuxData::set_*`) use separate code paths. Round-tripping
     /// catches both encoding bugs and parse/skip divergence.
     ///
-    /// `Char` tags whose byte falls outside the printable-ASCII grammar
-    /// `[!-~]` are intentionally skipped — `set_char` rejects them by
-    /// design, and that path is covered by `set_char_rejects_non_printable`.
+    /// `Char`, `String` and `Hex` values outside their SAM grammar are
+    /// rejected by design (`set_char_rejects_non_printable`,
+    /// `set_string_takes_exactly_the_z_grammar`, `set_hex_takes_exactly_the_h_grammar`)
+    /// and are not expected back.
     #[hegel::test]
     fn roundtrip_random_bytes(tc: TestCase) {
         let raw = tc.draw(gs::binary().max_size(512));
@@ -736,18 +856,23 @@ mod tests {
 
         // Rebuild via AuxData using only the typed setters that match each variant.
         let mut built = AuxData::new();
-        let mut skipped_char_tags = std::collections::BTreeSet::new();
+        // The last value each tag was set to; a rejected set leaves the tags as they were.
+        let mut expected: std::collections::BTreeMap<[u8; 2], &AuxValue<'_>> =
+            std::collections::BTreeMap::new();
         for (tag, value) in &parsed {
+            // Random bytes are usually outside the A, Z and H grammars, which the
+            // setters reject.
+            let rejected = match value {
+                AuxValue::Char(v) => built.set_char(*tag, *v).is_err(),
+                AuxValue::String(s) => built.set_string(*tag, s).is_err(),
+                AuxValue::Hex(h) => built.set_hex(*tag, h).is_err(),
+                _ => false,
+            };
+            if !rejected {
+                expected.insert(*tag, value);
+            }
             match value {
-                AuxValue::Char(v) => {
-                    // Random bytes are usually not printable ASCII; the writer
-                    // rejects them. Track these so we don't expect them to round-trip.
-                    if built.set_char(*tag, *v).is_err() {
-                        skipped_char_tags.insert(*tag);
-                    }
-                }
-                AuxValue::String(s) => built.set_string(*tag, s),
-                AuxValue::Hex(h) => built.set_hex(*tag, h),
+                AuxValue::Char(_) | AuxValue::String(_) | AuxValue::Hex(_) => {}
                 AuxValue::I8(v) => drop(built.set_int(*tag, i64::from(*v))),
                 AuxValue::U8(v) => drop(built.set_int(*tag, i64::from(*v))),
                 AuxValue::I16(v) => drop(built.set_int(*tag, i64::from(*v))),
@@ -817,29 +942,8 @@ mod tests {
         // Re-parse the built bytes
         let rebuilt: Vec<_> = aux::iter_tags(built.as_bytes()).collect();
 
-        // Tag count must match (after dedup-by-name and after dropping skipped chars).
-        let mut expected_tags: std::collections::BTreeSet<[u8; 2]> =
-            parsed.iter().map(|(t, _)| *t).collect();
-        for t in &skipped_char_tags {
-            expected_tags.remove(t);
-        }
-        assert_eq!(
-            rebuilt.len(),
-            expected_tags.len(),
-            "tag count mismatch: parsed (deduped, minus rejected chars) vs rebuilt"
-        );
+        assert_eq!(rebuilt.len(), expected.len(), "tag count mismatch: accepted sets vs rebuilt");
 
-        // Verify each tag round-trips. For repeated-tag inputs, the LAST occurrence wins;
-        // walk forward and let later writes overwrite the expected value.
-        let mut expected: std::collections::BTreeMap<[u8; 2], &AuxValue<'_>> =
-            std::collections::BTreeMap::new();
-        for (tag, value) in &parsed {
-            if matches!(value, AuxValue::Char(_)) && skipped_char_tags.contains(tag) {
-                expected.remove(tag);
-                continue;
-            }
-            expected.insert(*tag, value);
-        }
         for (tag, original) in &expected {
             let rt = built.get(*tag);
             assert!(rt.is_some(), "tag missing after rebuild");
@@ -878,10 +982,10 @@ mod tests {
     #[hegel::test]
     fn set_replaces_always_unique(tc: TestCase) {
         let tag_names = tc.draw(gs::vecs(upper_tag()).min_size(1).max_size(30));
-        let values = tc.draw(gs::vecs(gs::integers::<u8>().min_value(1)).max_size(256));
+        let values = tc.draw(gs::vecs(z_byte()).max_size(256));
         let mut aux = AuxData::new();
         for &tag in &tag_names {
-            aux.set_string(tag, &values);
+            aux.set_string(tag, &values).unwrap();
         }
         // Deduplicated count must equal unique tag count
         let unique_count = tag_names.iter().collect::<std::collections::BTreeSet<_>>().len();

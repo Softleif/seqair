@@ -610,7 +610,7 @@ fn bam_seqair(args: &[String]) {
             let mut aux = AuxData::from_bytes(r.aux().to_vec());
             let (mm, ml) = mm_ml(&ascii);
             if !ml.is_empty() {
-                aux.set_string(*b"MM", &mm);
+                aux.set_string(*b"MM", &mm).unwrap();
                 aux.set_array_u8(*b"ML", &ml).unwrap();
             }
             OwnedBamRecord {

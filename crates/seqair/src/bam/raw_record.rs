@@ -662,7 +662,7 @@ mod tests {
         let fits = record::MAX_RECORD_SIZE - 38;
         record
             .edit_aux(|a| {
-                a.set_string(*b"XM", &vec![b'a'; fits]);
+                a.set_string(*b"XM", &vec![b'a'; fits]).unwrap();
                 Ok(())
             })
             .unwrap();
@@ -670,7 +670,7 @@ mod tests {
         let before = record.as_payload().to_vec();
         let err = record
             .edit_aux(|a| {
-                a.set_string(*b"XM", &vec![b'a'; fits + 1]);
+                a.set_string(*b"XM", &vec![b'a'; fits + 1]).unwrap();
                 Ok(())
             })
             .unwrap_err();

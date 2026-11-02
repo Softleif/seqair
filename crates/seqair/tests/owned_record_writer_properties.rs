@@ -78,13 +78,13 @@ impl Aux {
             Self::Char(c) => aux.set_char(tag, *c).expect("printable ASCII"),
             Self::Int(v) => aux.set_int(tag, *v).expect("inside the i32/u32 union"),
             Self::Float(v) => aux.set_float(tag, *v),
-            Self::Text(s) => aux.set_string(tag, s),
+            Self::Text(s) => aux.set_string(tag, s).expect("printable ASCII"),
             Self::Hex(bytes) => {
                 let mut hex = Vec::with_capacity(bytes.len() * 2);
                 for b in bytes {
                     write!(&mut HexSink(&mut hex), "{b:02X}").expect("cannot fail");
                 }
-                aux.set_hex(tag, &hex);
+                aux.set_hex(tag, &hex).expect("upper-case hex pairs");
             }
             Self::ArrayI8(v) => aux.set_array_i8(tag, v).expect("short array"),
             Self::ArrayU8(v) => aux.set_array_u8(tag, v).expect("short array"),
