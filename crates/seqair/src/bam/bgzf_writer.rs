@@ -1096,12 +1096,6 @@ mod tests {
             .collect()
     }
 
-    // r[verify bgzf.writer.parallel]
-    // r[verify bgzf.writer.parallel.identical_output]
-    // r[verify bgzf.writer.parallel.index_offsets]
-    /// The parallel writer produces the serial writer's bytes, and every index
-    /// offset it handed out resolves to the virtual offset the serial writer
-    /// reported at the same point of the stream.
     // r[verify bgzf.writer.compression_level]
     /// `try_from` takes exactly libdeflate's 0..=12 and `get` gives it back.
     #[hegel::test]
@@ -1121,6 +1115,12 @@ mod tests {
         assert_eq!(CompressionLevel::default(), CompressionLevel::Level6);
     }
 
+    // r[verify bgzf.writer.parallel]
+    // r[verify bgzf.writer.parallel.identical_output]
+    // r[verify bgzf.writer.parallel.index_offsets]
+    /// The parallel writer produces the serial writer's bytes, and every index
+    /// offset it handed out resolves to the virtual offset the serial writer
+    /// reported at the same point of the stream.
     #[hegel::test(test_cases = crate::pinned::cases(60))]
     fn parallel_writer_matches_serial(tc: TestCase) {
         let steps = tc.draw(gs::vecs(arb_step()).max_size(60));
