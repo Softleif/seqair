@@ -231,7 +231,7 @@ pub struct AlignedPairsOptions {
 #[derive(Debug, Clone)]
 pub struct AlignedPairs<'a> {
     /// Remaining CIGAR ops to process.
-    ops: &'a [CigarOp],
+    ops: Ops<'a>,
     /// Current 0-based query position (includes soft clips).
     qpos: QPos,
     /// Current 0-based reference position.
@@ -253,14 +253,53 @@ enum ExpandingState {
     },
 }
 
+/// The CIGAR an [`AlignedPairs`] walks: decoded ops, or a BAM record's
+/// packed little-endian `u32`s, which need not be aligned for `u32`.
+#[derive(Debug, Clone, Copy)]
+enum Ops<'a> {
+    Decoded(&'a [CigarOp]),
+    Packed(&'a [[u8; 4]]),
+}
+
+impl<'a> Ops<'a> {
+    fn is_empty(self) -> bool {
+        match self {
+            Self::Decoded(ops) => ops.is_empty(),
+            Self::Packed(ops) => ops.is_empty(),
+        }
+    }
+
+    fn split_first(self) -> Option<(CigarOp, Self)> {
+        match self {
+            Self::Decoded(ops) => ops.split_first().map(|(op, rest)| (*op, Self::Decoded(rest))),
+            Self::Packed(ops) => ops.split_first().map(|(op, rest)| {
+                (CigarOp::from_bam_u32(u32::from_le_bytes(*op)), Self::Packed(rest))
+            }),
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = CigarOp> + 'a {
+        let mut ops = self;
+        std::iter::from_fn(move || {
+            let (op, rest) = ops.split_first()?;
+            ops = rest;
+            Some(op)
+        })
+    }
+}
+
 impl<'a> AlignedPairs<'a> {
     // r[impl cigar.aligned_pairs.default_mode]
     /// Create a new iterator over `cigar` starting at reference position `rec_pos`.
     ///
     /// Default mode yields `Match`, `Insertion`, `Deletion`, `RefSkip` only.
     pub fn new(rec_pos: Pos0, cigar: &'a [CigarOp]) -> Self {
+        Self::over(rec_pos, Ops::Decoded(cigar))
+    }
+
+    fn over(rec_pos: Pos0, ops: Ops<'a>) -> Self {
         Self {
-            ops: cigar,
+            ops,
             qpos: QPos::ZERO,
             rpos: rec_pos,
             options: AlignedPairsOptions::default(),
@@ -391,7 +430,7 @@ impl Iterator for AlignedPairs<'_> {
         if let ExpandingState::PerBase { remaining, .. } = self.expanding {
             count = count.saturating_add(remaining as usize);
         }
-        for op in self.ops {
+        for op in self.ops.iter() {
             let len = op.len();
             if len == 0 {
                 continue;
@@ -659,6 +698,28 @@ impl SlimRecord {
 /// `0xFF` run BAM stores for them, which htslib detects by the first byte.
 fn available_qual(qual: &[BaseQuality]) -> Option<&[BaseQuality]> {
     qual.first().is_some_and(|&q| q != BaseQuality::UNAVAILABLE).then_some(qual)
+}
+
+// ── RawBamRecord integration ──────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.raw_record]
+impl super::raw_record::RawBamRecord {
+    /// Walk this record's CIGAR — the real one for a record with a long
+    /// CIGAR — yielding typed [`AlignedPair`]s, straight from the packed
+    /// bytes. Index the sequence with [`base_at`](Self::base_at).
+    ///
+    /// # Errors
+    /// [`AlignedPairsError::UnmappedWithCigar`] for a record without a
+    /// position whose CIGAR is not empty, as
+    /// [`OwnedBamRecord::aligned_pairs`](super::owned_record::OwnedBamRecord::aligned_pairs).
+    pub fn aligned_pairs(&self) -> Result<AlignedPairs<'_>, AlignedPairsError> {
+        let ops = Ops::Packed(self.cigar_packed().as_chunks::<4>().0);
+        match self.pos() {
+            Some(p) => Ok(AlignedPairs::over(p, ops)),
+            None if ops.is_empty() => Ok(AlignedPairs::over(Pos0::ZERO, ops)),
+            None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: self.cigar_len() }),
+        }
+    }
 }
 
 // ── OwnedBamRecord integration ────────────────────────────────────────────

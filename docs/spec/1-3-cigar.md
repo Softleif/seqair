@@ -137,6 +137,9 @@ For `Deletion { rpos, del_len }`, `rpos` MUST be the reference position where th
 r[cigar.aligned_pairs.slim_record]
 `SlimRecord::aligned_pairs(&self, store: &RecordStore<U>)` MUST return `Result<AlignedPairs, RecordAccessError>` by first reading the CIGAR slice from the store. Iteration over the returned `AlignedPairs` is infallible.
 
+r[cigar.aligned_pairs.raw_record]
+`RawBamRecord::aligned_pairs(&self) -> Result<AlignedPairs, AlignedPairsError>` MUST walk the record's real CIGAR (the `CG` tag's for a long CIGAR, `r[bam.raw_record.long_cigar]`) from its packed bytes, yielding what `AlignedPairs::new(pos, &record.cigar().collect::<Vec<_>>())` yields, and validate as `r[cigar.aligned_pairs.owned_record]` does.
+
 r[cigar.aligned_pairs.owned_record]
 `OwnedBamRecord::aligned_pairs(&self) -> Result<AlignedPairs, AlignedPairsError>` MUST validate before iteration starts: if `pos = None` (unmapped) AND the CIGAR is non-empty, it MUST return `AlignedPairsError::UnmappedWithCigar { cigar_ops }`. For mapped records (`pos = Some(_)`) and fully-unmapped records (`pos = None` + empty CIGAR), iteration is infallible. The reason: walking a non-empty CIGAR for an unmapped record without a base reference position would produce nonsense `rpos` values anchored at `Pos0::ZERO`; refusing is safer than silently corrupting output.
 
