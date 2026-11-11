@@ -26,23 +26,28 @@ fuzz = ["dep:bzip2"]
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytemuck = { workspace = true }
+fearless_simd = { workspace = true }
+fearless_simd_macros = { workspace = true }
+
+seqair-types = { version = "^0.4.1", path = "../seqair-types", default-features = false }
+
 indexmap = "2"
 itoa = "1"
+# used for non-streaming gzip
 libdeflater = "1.26.1"
 # `BgzfStream` inflates on a rayon pool, its own or one shared with the caller.
 rayon-core = "1.13"
-seqair-types = { version = "^0.4.0", path = "../seqair-types", default-features = false }
 rustc-hash = "2.1.3"
 # `HashTable`: a hash table whose equality lives outside the stored value —
 # mate linking stores record indices and compares the qnames they point into.
 hashbrown = "0.17.1"
+# used for streaming gzip (e.g. non bgzf sam)
 flate2 = "1.1.10"
-bz2ngrs = "0.1.0"
+bz2ngrs = "0.1.1"
+# used for fuzzing
 bzip2 = { version = "0.6.1", optional = true }
 xz2 = "0.1.7"
 md5 = "0.8.1"
-fearless_simd = { workspace = true }
-fearless_simd_macros = { workspace = true }
 
 [dev-dependencies]
 # Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
