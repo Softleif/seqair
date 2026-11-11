@@ -27,6 +27,9 @@ The scalar encoder MUST use a 256-entry lookup table mapping ASCII bytes to 4-bi
 
 > **Was:** only `acgtn` were folded, so a lower-case ambiguity code (`r`, `y`, ...) in SAM text became `N` where htslib keeps it.
 
+r[seq.encode_simd]
+`encode_seq_into`, the SAM encoder, MUST be one native-width SIMD kernel (`r[io.simd_portable]`) producing exactly what the scalar table of `r[seq.encode_scalar]` produces. Per iteration it takes `2 × LEN` bases, unzips the even and odd ones apart, and codes each byte by shuffling its low nibble through the table row (`0x30`..`0x7F`, one row per high nibble) that its high nibble selects, `N` for any other high nibble; the even code goes in the high nibble. The table MUST be checked at compile time to be `N` outside those rows. A ragged tail is one more iteration overlapping the last whole one; input shorter than one iteration, and an odd final base, MUST go through the scalar table.
+
 r[seq.iupac_bulk+3]
 `decode_iupac_bases_into(packed, &mut [IupacBase])` MUST decode as many bases as the slice holds, every 4-bit code kept, as the kernel of `r[seq.decode_simd]` with the identity table (code `i` → `IupacBase` `i`), and leave them all `N` when `packed` is too short. `encode_iupac_bases_into(&[IupacBase], &mut Vec<u8>)` MUST append the packed sequence (an odd length's last low nibble 0) without an intermediate allocation. The codes are already nibbles, so it is a plain pair loop the compiler vectorises: measured on NEON, that beat a byte-shuffle kernel with an identity table by 1.4x at 10 kb and 100 kb and tied at 150 bp. `RawBamRecord::set_seq`, `OwnedBamRecord::to_bam_bytes` and `BamWriter::write_store_record` MUST pack the same way, and `RawBamRecord::iupac_bases_into(&mut Vec<IupacBase>)` MUST append what `iupac_bases()` yields, decoded with the first.
 
