@@ -7,7 +7,7 @@
 //! `any_true` and builds a bitmask only for the vector that holds the hit;
 //! `split_tabs` walks the set bits of each vector's TAB mask.
 
-use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd::{Level, dispatch, prelude::*, u8x64};
 use fearless_simd_macros::simd;
 
 /// Index of the first `needle` in `hay`, if any.
@@ -129,6 +129,65 @@ fn split_tabs_simd<S: Simd>(simd: S, line: &[u8]) -> ([&[u8]; MAX_FIELDS], usize
     s.finish()
 }
 
+/// Every TAB offset of `line`, into `tabs` (cleared first), and the offset of
+/// the first NUL, if any — what SAM encoding needs from a whole line, in one
+/// pass instead of a NUL scan, a field split and a scan per optional field.
+pub(crate) fn tabs_and_nul(line: &[u8], tabs: &mut Vec<usize>) -> Option<usize> {
+    tabs_and_nul_at(Level::new(), line, tabs)
+}
+
+// r[impl io.simd_portable]
+fn tabs_and_nul_at(level: Level, line: &[u8], tabs: &mut Vec<usize>) -> Option<usize> {
+    dispatch!(level, simd => tabs_and_nul_simd(simd, line, tabs))
+}
+
+/// Every line goes through here, so it takes 64 bytes at a time rather than
+/// `S::u8s`: one 64-bit TAB mask per block (cheap to build even on NEON), and
+/// NUL folded into a running byte minimum checked once at the end.
+#[simd]
+#[allow(clippy::arithmetic_side_effects, reason = "`64 - tail.len()` on a nonempty tail")]
+fn tabs_and_nul_simd<S: Simd>(simd: S, line: &[u8], tabs: &mut Vec<usize>) -> Option<usize> {
+    tabs.clear();
+    let mut min = u8x64::splat(simd, u8::MAX);
+    let (blocks, tail) = line.as_chunks::<64>();
+    let mut offset = 0usize;
+    for chunk in blocks {
+        scan_block(u8x64::from_slice(simd, chunk), offset, 0, &mut min, tabs);
+        offset = offset.saturating_add(64);
+    }
+    if !tail.is_empty() {
+        if let Some(last) = line.last_chunk::<64>() {
+            // The last 64 bytes, overlapping the blocks before.
+            scan_block(u8x64::from_slice(simd, last), offset, 64 - tail.len(), &mut min, tabs);
+        } else {
+            // Shorter than a block: padding that is neither TAB nor NUL.
+            let mut last = [u8::MAX; 64];
+            last.get_mut(..tail.len()).unwrap_or_default().copy_from_slice(tail);
+            scan_block(u8x64::from_slice(simd, &last), offset, 0, &mut min, tabs);
+        }
+    }
+    if min.simd_eq(0).any_true() { find_byte_in(simd, line, 0) } else { None }
+}
+
+/// [`tabs_and_nul_simd`]'s block `v` at `offset`, whose first `skip` (< 64)
+/// bytes were scanned already.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "`bits - 1` runs only on a nonzero `bits`")]
+fn scan_block<S: Simd>(
+    v: u8x64<S>,
+    offset: usize,
+    skip: usize,
+    min: &mut u8x64<S>,
+    tabs: &mut Vec<usize>,
+) {
+    *min = min.min(v);
+    let mut bits = v.simd_eq(b'\t').to_bitmask() >> skip;
+    while bits != 0 {
+        tabs.push(offset.saturating_add(bits.trailing_zeros() as usize));
+        bits &= bits - 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +222,19 @@ mod tests {
         for level in crate::simd_levels::levels() {
             let (fields, n) = split_tabs_at(level, &line);
             assert_eq!(fields.get(..n), Some(expected.as_slice()), "{level:?}");
+        }
+    }
+
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn tabs_and_nul_every_level_matches_scalar(tc: TestCase) {
+        let line = text(&tc, 400);
+        let tabs: Vec<usize> = (0..line.len()).filter(|&i| line[i] == b'\t').collect();
+        let nul = line.iter().position(|&b| b == 0);
+        let mut got = vec![7];
+        for level in crate::simd_levels::levels() {
+            assert_eq!(tabs_and_nul_at(level, &line, &mut got), nul, "{level:?}");
+            assert_eq!(got, tabs, "{level:?}");
         }
     }
 

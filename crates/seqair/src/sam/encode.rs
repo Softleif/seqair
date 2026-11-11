@@ -176,6 +176,10 @@ pub enum SamRecordError {
 pub struct SamRecordEncoder {
     cigar: Vec<CigarOp>,
     aux: Vec<u8>,
+    /// The line's TAB offsets.
+    tabs: Vec<usize>,
+    /// The reference RNAME last resolved to.
+    last_tid: Option<Tid>,
 }
 
 impl SamRecordEncoder {
@@ -214,14 +218,20 @@ impl SamRecordEncoder {
         if line.is_empty() {
             return Err(SamRecordError::EmptyLine);
         }
-        if let Some(offset) = text_scan::find_byte(line, 0) {
+        if let Some(offset) = text_scan::tabs_and_nul(line, &mut self.tabs) {
             return Err(SamRecordError::NulByte { offset });
         }
-        let (fields, n_fields) = text_scan::split_tabs(line);
-        let [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, seq, qual, rest] = fields;
-        if n_fields < 11 {
-            return Err(SamRecordError::TooFewFields { found: n_fields });
+        let tabs = self.tabs.as_slice();
+        if tabs.len() < 10 {
+            return Err(SamRecordError::TooFewFields { found: tabs.len().saturating_add(1) });
         }
+        let [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, seq, qual] =
+            std::array::from_fn(|i| {
+                let start =
+                    i.checked_sub(1).and_then(|t| tabs.get(t)).map_or(0, |t| t.saturating_add(1));
+                line.get(start..tabs.get(i).copied().unwrap_or(line.len())).unwrap_or_default()
+            });
+        let aux_tabs = tabs.get(10..).unwrap_or_default();
         if qname.len() > 254 {
             return Err(SamRecordError::QnameTooLong { len: qname.len() });
         }
@@ -235,7 +245,7 @@ impl SamRecordEncoder {
         let mut tid = match rname {
             b"*" => None,
             name => Some(
-                resolve(header, name)
+                resolve(header, name, &mut self.last_tid)
                     .ok_or_else(|| SamRecordError::UnknownReference { name: name.into() })?,
             ),
         };
@@ -258,7 +268,7 @@ impl SamRecordEncoder {
         let mut mate_tid = match rnext {
             b"=" => tid,
             b"*" => None,
-            name => resolve(header, name).or_else(|| {
+            name => resolve(header, name, &mut self.last_tid).or_else(|| {
                 warn_unknown_mate_reference(name);
                 None
             }),
@@ -292,64 +302,77 @@ impl SamRecordEncoder {
             }
         }
 
-        self.aux.clear();
-        if n_fields > 11 {
-            parse_aux_fields(rest, &mut self.aux)?;
+        let fields = AlignmentFields {
+            tid,
+            pos,
+            flags,
+            mapq: MappingQuality::from_byte(mapq),
+            mate_fields: MateFields {
+                tid: mate_tid,
+                pos: mate_pos,
+                template_len: NonZeroI32::new(template_len),
+            },
+            qname,
+            cigar: &[],
+            seq: Seq::Ascii(seq),
+            qual: match qual {
+                None => Qualities::Missing,
+                Some(qual) => Qualities::Phred33(qual),
+            },
+            aux: &[],
+        };
+        let placed = tid.is_some() && pos.is_some();
+
+        // Most records: the CIGAR is final before the optional fields are
+        // read, so they are parsed straight into the payload, after the rest.
+        // Checks run in the order of the general path below.
+        if self.cigar.len() <= usize::from(u16::MAX)
+            && !(placed && self.cg_tag_may_apply(seq.len()))
+            && encode_alignment(payload, &AlignmentFields { cigar: &self.cigar, ..fields }).is_ok()
+        {
+            parse_aux_at_tabs(line, aux_tabs, payload)?;
+            check_cigar_seq(&self.cigar, seq)?;
+            if payload.len() > MAX_RECORD_SIZE {
+                return Err(SamRecordError::RecordTooLarge { size: payload.len() });
+            }
+            return Ok(());
         }
+        payload.clear();
+
+        self.aux.clear();
+        parse_aux_at_tabs(line, aux_tabs, &mut self.aux)?;
 
         // r[impl sam.encode.cg_tag]
-        if tid.is_some() && pos.is_some() {
+        if placed {
             self.take_cg_tag(seq.len());
         }
+        check_cigar_seq(&self.cigar, seq)?;
 
-        // r[impl sam.encode.cigar_seq]
-        if !seq.is_empty() && !self.cigar.is_empty() {
-            let cigar_query_len = cigar::query_len(&self.cigar);
-            if cigar_query_len != seq.len() as u64 {
-                return Err(SamRecordError::CigarSeqLenMismatch {
-                    cigar_query_len,
-                    seq_len: seq.len(),
-                });
-            }
-        }
+        encode_alignment(payload, &AlignmentFields { cigar: &self.cigar, aux: &self.aux, ..fields })
+            .map_err(|e| match e {
+                RecordEncodeError::QnameTooLong { len } => SamRecordError::QnameTooLong { len },
+                RecordEncodeError::CigarRefLenTooLong { ref_len } => {
+                    SamRecordError::CigarRefLenTooLong { ref_len }
+                }
+                RecordEncodeError::RecordTooLarge { size } => {
+                    SamRecordError::RecordTooLarge { size }
+                }
+            })
+    }
 
-        encode_alignment(
-            payload,
-            &AlignmentFields {
-                tid,
-                pos,
-                flags,
-                mapq: MappingQuality::from_byte(mapq),
-                mate_fields: MateFields {
-                    tid: mate_tid,
-                    pos: mate_pos,
-                    template_len: NonZeroI32::new(template_len),
-                },
-                qname,
-                cigar: &self.cigar,
-                seq: Seq::Ascii(seq),
-                qual: match qual {
-                    None => Qualities::Missing,
-                    Some(qual) => Qualities::Phred33(qual),
-                },
-                aux: &self.aux,
-            },
-        )
-        .map_err(|e| match e {
-            RecordEncodeError::QnameTooLong { len } => SamRecordError::QnameTooLong { len },
-            RecordEncodeError::CigarRefLenTooLong { ref_len } => {
-                SamRecordError::CigarRefLenTooLong { ref_len }
-            }
-            RecordEncodeError::RecordTooLarge { size } => SamRecordError::RecordTooLarge { size },
-        })
+    /// Whether [`Self::take_cg_tag`] could replace the CIGAR: its first
+    /// operation is `<l_seq>S`.
+    fn cg_tag_may_apply(&self, l_seq: usize) -> bool {
+        self.cigar
+            .first()
+            .is_some_and(|op| op.op_type() == CigarOpType::SoftClip && op.len() as usize == l_seq)
     }
 
     /// htslib's `bam_tag2cigar` on a placed record: a first CIGAR operation
     /// `<l_seq>S` and a first `CG` tag of type `B:I`/`B:i` holding at least as
     /// many (and fewer than 2^29) operations make that tag the CIGAR.
     fn take_cg_tag(&mut self, l_seq: usize) {
-        let Some(first) = self.cigar.first() else { return };
-        if first.op_type() != CigarOpType::SoftClip || first.len() as usize != l_seq {
+        if !self.cg_tag_may_apply(l_seq) {
             return;
         }
         let mut at = 0;
@@ -415,6 +438,7 @@ fn first_outside(bytes: &[u8], lo: u8, hi: u8) -> Option<(usize, u8)> {
 }
 
 /// A record's qualities as [`encode_alignment`] takes them.
+#[derive(Clone, Copy)]
 pub(crate) enum Qualities<'a> {
     /// None: every byte `0xFF`.
     Missing,
@@ -450,6 +474,7 @@ impl Seq<'_> {
 }
 
 /// One alignment's fields, as htslib's `bam_set1` takes them.
+#[derive(Clone, Copy)]
 pub(crate) struct AlignmentFields<'a> {
     pub tid: Option<Tid>,
     pub pos: Option<Pos0>,
@@ -560,8 +585,16 @@ const FIXED_LEN: usize = 32;
 /// FLAG `0x4`.
 const UNMAPPED: u16 = 0x4;
 
-fn resolve(header: &BamHeader, name: &[u8]) -> Option<Tid> {
-    header.tid(std::str::from_utf8(name).ok()?)
+/// `name`'s reference in `header`, trying `last` (and updating it) before a
+/// lookup: sorted SAM names one reference line after line.
+fn resolve(header: &BamHeader, name: &[u8], last: &mut Option<Tid>) -> Option<Tid> {
+    if let Some(tid) = *last
+        && header.target_name(tid).is_some_and(|n| n.as_bytes() == name)
+    {
+        return Some(tid);
+    }
+    *last = Some(header.tid(std::str::from_utf8(name).ok()?)?);
+    *last
 }
 
 // r[impl sam.encode.references+2]
@@ -712,6 +745,34 @@ pub(crate) fn parse_aux_fields(text: &[u8], out: &mut Vec<u8>) -> Result<(), Sam
             None => return Ok(()),
         }
     }
+}
+
+/// [`parse_aux_fields`] on a line whose TABs are known: each optional field
+/// runs from one of `tabs` to the next, the last to the end of `line`.
+fn parse_aux_at_tabs(line: &[u8], tabs: &[usize], out: &mut Vec<u8>) -> Result<(), SamRecordError> {
+    for (i, &tab) in tabs.iter().enumerate() {
+        let end = tabs.get(i.saturating_add(1)).copied();
+        let field = line.get(tab.saturating_add(1)..end.unwrap_or(line.len())).unwrap_or_default();
+        // As in `parse_aux_fields`: one TAB at the very end is accepted.
+        if field.is_empty() && end.is_none() {
+            return Ok(());
+        }
+        parse_aux_field(field, out)?;
+    }
+    Ok(())
+}
+
+// r[impl sam.encode.cigar_seq]
+/// A CIGAR and a SEQ, both present, must agree on the query length.
+fn check_cigar_seq(cigar: &[CigarOp], seq: &[u8]) -> Result<(), SamRecordError> {
+    if seq.is_empty() || cigar.is_empty() {
+        return Ok(());
+    }
+    let cigar_query_len = cigar::query_len(cigar);
+    if cigar_query_len != seq.len() as u64 {
+        return Err(SamRecordError::CigarSeqLenMismatch { cigar_query_len, seq_len: seq.len() });
+    }
+    Ok(())
 }
 
 /// A tag byte as htslib (with a signed `char`) accepts it: `!` to DEL.
