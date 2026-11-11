@@ -416,6 +416,29 @@ fn an_unmapped_read_still_needs_a_matching_cigar() {
     ));
 }
 
+// r[verify sam.encode.limits]
+// r[verify sam.encode.cigar_seq]
+/// Optional fields usually go straight into the record, after the rest; the
+/// errors keep their order and the size counts them.
+#[test]
+fn optional_fields_written_last_keep_the_error_order() {
+    assert!(matches!(
+        encode("r\t4\tchr1\t10\t0\t3M\t*\t0\t0\tACGT\t*\tNM:i:x"),
+        Err(SamRecordError::InvalidAuxValue { .. })
+    ));
+    // 2 MiB without the optional field, over with it.
+    let n = 1_398_000;
+    let line = format!(
+        "big\t4\t*\t0\t0\t*\t*\t0\t0\t{}\t{}\tXX:Z:{}",
+        "A".repeat(n),
+        "I".repeat(n),
+        "z".repeat(200)
+    );
+    // Fixed fields, `big\0`, SEQ, QUAL, `XXZ`, the value and its NUL.
+    let size = 32 + 4 + n / 2 + n + 3 + 200 + 1;
+    assert!(matches!(encode(&line), Err(SamRecordError::RecordTooLarge { size: s }) if s == size));
+}
+
 /// The bytes of `sam_parse_cigar` (htslib 1.19.1, via rust-htslib's FFI),
 /// or `None` where it fails.
 fn htslib_parse_cigar(text: &str) -> Option<Vec<u32>> {

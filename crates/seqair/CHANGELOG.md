@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Faster SAM parsing: SEQ and QUAL are validated with a branch-free scan LLVM vectorises (was an early-exit byte loop), and `seq::encode_seq_into` packs ASCII bases with one `fearless_simd` kernel instead of a byte-at-a-time table loop. Output is unchanged; about 15% less wall time reading a 4.2M-record SAM through `AlignmentStream` into methylsieve.
+- Faster SAM parsing. SEQ and QUAL are validated with a branch-free scan LLVM vectorises (was an early-exit byte loop), and `seq::encode_seq_into` packs ASCII bases with one `fearless_simd` kernel instead of a byte-at-a-time table loop. `SamRecordEncoder` finds every TAB and any NUL of a line in one 64-byte-block SIMD pass (was a NUL scan, a field split and a scan per optional field), writes the optional fields straight into the record when the CIGAR is final (was a scratch buffer copied in after; a possible `CG` tag or a CIGAR over 65535 ops still takes that path), and tries the previous line's reference before hashing RNAME. Output and error order are unchanged; about 24% less wall time reading a 4.2M-record SAM through `AlignmentStream` into methylsieve.
 
 ## v0.10.0 (2026-11-11)
 
