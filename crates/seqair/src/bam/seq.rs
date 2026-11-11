@@ -11,8 +11,9 @@
 //!   one of CRAM's rANS PACK transform (`cram::rans_nx16`).
 //! - **Encode**: `IupacBase` codes are already nibbles and need no lookup:
 //!   a plain pair loop, which LLVM vectorises, beat a byte-shuffle kernel
-//!   1.4x on NEON. ASCII text (`encode_seq_into`, the SAM encoder) takes the
-//!   scalar 256-entry `ENCODE_BASE`.
+//!   1.4x on NEON. ASCII text (`encode_seq_into`, the SAM encoder) is one
+//!   kernel: even and odd bases unzipped apart, each byte's low nibble
+//!   shuffled through the `ENCODE_BASE` row its high nibble picks.
 //! - The `IupacBase` kernels fill their output through
 //!   `IupacBase::as_codes_mut`, whose contract is that only codes (< 16) are
 //!   left behind; the identity tables hold nothing else.
@@ -213,28 +214,108 @@ fn decode_vector<S: Simd>(
     second.store_slice(o_second);
 }
 
-/// Encode ASCII bases to 4-bit packed BAM format, appending into `buf`.
-///
-/// This avoids the intermediate `Vec` allocation of [`encode_seq`].
+/// The rows of [`ENCODE_BASE`] the vector encoder looks up: ASCII `0x30` to
+/// `0x7F`, one 16-entry row per high nibble. Every other byte is `N`, which
+/// the assertion below checks against the table at compile time.
+const ENCODE_ROW_FIRST: u8 = 0x3;
+const ENCODE_ROWS: [[u8; 16]; 5] = {
+    let mut rows = [[0u8; 16]; 5];
+    let mut b = 0;
+    while b < 256 {
+        let row = b >> 4;
+        let code = IupacBase::CODE_OF_ASCII[b];
+        if row >= ENCODE_ROW_FIRST as usize && row < ENCODE_ROW_FIRST as usize + 5 {
+            rows[row - ENCODE_ROW_FIRST as usize][b & 0xF] = code;
+        } else {
+            assert!(code == 15, "ENCODE_BASE outside 0x30..0x80 is N");
+        }
+        b += 1;
+    }
+    rows
+};
+
+// r[impl seq.encode_simd]
+/// Encode ASCII bases to 4-bit packed BAM format, appending
+/// `bases.len().div_ceil(2)` bytes to `buf`; an odd length leaves the last
+/// low nibble 0.
+pub fn encode_seq_into(bases: &[u8], buf: &mut Vec<u8>) {
+    encode_ascii_at(Level::new(), bases, buf);
+}
+
+// r[impl io.simd_portable]
+fn encode_ascii_at(level: Level, bases: &[u8], buf: &mut Vec<u8>) {
+    let start = buf.len();
+    buf.resize(start.saturating_add(bases.len().div_ceil(2)), 0);
+    let out = buf.get_mut(start..).unwrap_or_default();
+    dispatch!(level, simd => encode_ascii_simd(simd, bases, out));
+}
+
+/// Two native-width vectors of ASCII in, one of packed bytes out per
+/// iteration: the even and odd bases are unzipped apart, each coded by
+/// [`encode_codes`], and the even code shifted into the high nibble. A ragged
+/// tail is one more step overlapping the last whole one, as in
+/// [`decode_nibbles_simd`]; inputs shorter than one step go through
+/// [`ENCODE_BASE`] a pair at a time.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
-    reason = "bounds ensured by step_by loop and reserve"
+    reason = "a u8 indexes a 256-entry table; a 4-bit code shifted by 4 fits a u8"
 )]
-pub fn encode_seq_into(bases: &[u8], buf: &mut Vec<u8>) {
-    let n_bytes = bases.len().div_ceil(2);
-    let start = buf.len();
-    buf.resize(start + n_bytes, 0);
+fn encode_ascii_simd<S: Simd>(simd: S, bases: &[u8], out: &mut [u8]) {
+    let n = S::u8s::LEN;
+    let rows = ENCODE_ROWS.map(|row| S::u8s::block_splat(u8x16::from_slice(simd, &row)));
+    let (pairs, odd) = bases.as_chunks::<2>();
+    let pairs = pairs.as_flattened();
+    let (whole, last) = out.split_at_mut(pairs.len() / 2);
 
-    for j in (0..bases.len()).step_by(2) {
-        let hi = ENCODE_BASE[bases[j] as usize];
-        let lo = if j.saturating_add(1) < bases.len() {
-            ENCODE_BASE[bases[j.saturating_add(1)] as usize]
-        } else {
-            0
-        };
-        buf[start + j / 2] = (hi << 4) | lo;
+    let mut vec_in = pairs.chunks_exact(2 * n);
+    for (b, o) in (&mut vec_in).zip(whole.chunks_exact_mut(n)) {
+        encode_vector(simd, &rows, b, o);
     }
+    let tail = vec_in.remainder();
+    let overlap = whole.len().checked_sub(n).filter(|_| !tail.is_empty());
+    match overlap.and_then(|t| Some((pairs.get(2 * t..)?, whole.get_mut(t..)?))) {
+        Some((b, o)) => encode_vector(simd, &rows, b, o),
+        None => {
+            for (o, &[hi, lo]) in whole.iter_mut().zip(pairs.as_chunks::<2>().0) {
+                *o = (ENCODE_BASE[usize::from(hi)] << 4) | ENCODE_BASE[usize::from(lo)];
+            }
+        }
+    }
+    if let ([b], [o]) = (odd, last) {
+        *o = ENCODE_BASE[usize::from(*b)] << 4;
+    }
+}
+
+/// `2 × LEN` ASCII bases into `LEN` packed bytes. A function, not a closure,
+/// for the reason given at [`decode_vector`].
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "a lanewise shift by 4 of a code < 16 fits a u8")]
+fn encode_vector<S: Simd>(simd: S, rows: &[S::u8s; 5], bases: &[u8], out: &mut [u8]) {
+    let (a, b) = bases.split_at(S::u8s::LEN);
+    let (a, b) = (S::u8s::from_slice(simd, a), S::u8s::from_slice(simd, b));
+    let even = encode_codes(simd, rows, a.unzip_low(b));
+    let odd = encode_codes(simd, rows, a.unzip_high(b));
+    ((even << 4) | odd).store_slice(out);
+}
+
+/// Each byte's [`ENCODE_BASE`] code: its low nibble shuffled through the row
+/// its high nibble picks, `N` where no row is picked.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "a lanewise shift of a u8 cannot overflow")]
+fn encode_codes<S: Simd>(simd: S, rows: &[S::u8s; 5], v: S::u8s) -> S::u8s {
+    let high = v >> 4;
+    let low = v & 0x0F;
+    let mut code = S::u8s::splat(simd, IupacBase::N.code());
+    for (i, row) in (ENCODE_ROW_FIRST..).zip(rows) {
+        code = high.simd_eq(i).select(row.swizzle_dyn_within_blocks(low), code);
+    }
+    code
 }
 
 /// The identity table: `IupacBase` code `i` is nibble `i`.
@@ -392,6 +473,33 @@ mod tests {
             let mut out = vec![0u8; len];
             assert!(decode_nibbles(level, NibbleOrder::LowFirst, &lut, &pairs, &packed, &mut out));
             assert_eq!(out, expected, "{level:?}, len={len}");
+        }
+    }
+
+    // r[verify seq.encode_simd]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn every_level_encodes_as_the_table(tc: TestCase) {
+        // Mostly bases, so long runs exercise the vector path, plus any byte.
+        let bases = tc.draw(
+            gs::vecs(gs::one_of(vec![
+                gs::sampled_from(b"ACGTNacgtn=RYMKSWBDHVUu0123".to_vec()).boxed(),
+                gs::integers::<u8>().boxed(),
+            ]))
+            .max_size(300),
+        );
+        let prefix = tc.draw(gs::binary().max_size(3));
+        // One base at a time through the 256-entry table: shares neither the
+        // pair loop nor the vector kernel.
+        let mut expected = prefix.clone();
+        expected.extend(bases.chunks(2).map(|pair| {
+            let code = |i: usize| pair.get(i).map_or(0, |&b| ENCODE_BASE[usize::from(b)]);
+            (code(0) << 4) | code(1)
+        }));
+        for level in crate::simd_levels::levels() {
+            let mut out = prefix.clone();
+            encode_ascii_at(level, &bases, &mut out);
+            assert_eq!(out, expected, "{level:?}, len={}", bases.len());
         }
     }
 

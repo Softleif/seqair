@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Faster SAM parsing: SEQ and QUAL are validated with a branch-free scan LLVM vectorises (was an early-exit byte loop), and `seq::encode_seq_into` packs ASCII bases with one `fearless_simd` kernel instead of a byte-at-a-time table loop. Output is unchanged; about 15% less wall time reading a 4.2M-record SAM through `AlignmentStream` into methylsieve.
+
 ## v0.10.0 (2026-11-11)
 
 ### Added
