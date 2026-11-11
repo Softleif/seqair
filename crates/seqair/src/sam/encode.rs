@@ -275,8 +275,7 @@ impl SamRecordEncoder {
 
         // r[impl sam.encode.seq]
         let seq: &[u8] = if seq == b"*" { b"" } else { seq };
-        if let Some(offset) = seq.iter().position(|b| !(b'!'..=b'~').contains(b)) {
-            let byte = seq.get(offset).copied().unwrap_or_default();
+        if let Some((offset, byte)) = first_outside(seq, b'!', b'~') {
             return Err(SamRecordError::InvalidSeq { byte, offset });
         }
         // r[impl sam.encode.qual]
@@ -288,8 +287,7 @@ impl SamRecordEncoder {
                     seq_len: seq.len(),
                 });
             }
-            if let Some(offset) = qual.iter().position(|b| !(33..=160).contains(b)) {
-                let byte = qual.get(offset).copied().unwrap_or_default();
+            if let Some((offset, byte)) = first_outside(qual, 33, 160) {
                 return Err(SamRecordError::InvalidQual { byte, offset });
             }
         }
@@ -404,6 +402,16 @@ pub enum RecordEncodeError {
     /// (`r[io.writer_limits]`).
     #[error("record would be {size} bytes, over the {MAX_RECORD_SIZE}-byte limit")]
     RecordTooLarge { size: usize },
+}
+
+/// The first byte of `bytes` outside `lo..=hi`, with its offset. The whole
+/// slice is checked branch-free first, which LLVM vectorises (an early-exit
+/// `position` stays scalar, and was most of SAM parsing on SEQ and QUAL).
+fn first_outside(bytes: &[u8], lo: u8, hi: u8) -> Option<(usize, u8)> {
+    if bytes.iter().fold(true, |ok, &b| ok & (lo <= b) & (b <= hi)) {
+        return None;
+    }
+    bytes.iter().copied().enumerate().find(|&(_, b)| b < lo || b > hi)
 }
 
 /// A record's qualities as [`encode_alignment`] takes them.
