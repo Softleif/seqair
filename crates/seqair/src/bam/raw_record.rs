@@ -375,6 +375,18 @@ impl RawBamRecord {
         }
     }
 
+    // r[impl bam.raw_record.edit_qual]
+    /// Base qualities to edit in place, or `None` exactly when [`Self::qual`]
+    /// is. Writing [`BaseQuality::UNAVAILABLE`] to the first base makes the
+    /// record one without qualities.
+    pub fn qual_mut(&mut self) -> Option<&mut [BaseQuality]> {
+        let qual = self.payload.get_mut(self.seq_end..self.qual_end).unwrap_or_default();
+        match qual.first() {
+            None | Some(&0xFF) => None,
+            Some(_) => Some(bytemuck::cast_slice_mut(qual)),
+        }
+    }
+
     /// The aux tags, as stored. Not validated: use [`Aux::iter_checked`] to
     /// see a malformed tag as an error rather than the end of the tags.
     pub fn aux(&self) -> Aux<'_> {

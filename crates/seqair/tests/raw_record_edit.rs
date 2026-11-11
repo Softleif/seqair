@@ -1,4 +1,4 @@
-//! `RawBamRecord::set_seq`, `set_base` and `edit_aux`: against a model of the
+//! `RawBamRecord::set_seq`, `set_base`, `qual_mut` and `edit_aux`: against a model of the
 //! expected bytes, and against `samtools view` on the written file.
 #![allow(
     clippy::unwrap_used,
@@ -21,7 +21,7 @@ use hegel::generators as gs;
 use raw_record_gen::{GenRecord, GenTag, HTSLIB, arb_record, array_tag, header};
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{AuxDataError, RawBamRecord, RawRecordEditError};
-use seqair_types::{IupacBase, QPos};
+use seqair_types::{BaseQuality, IupacBase, QPos};
 use std::process::Command;
 
 const EDITED_KEYS: [[u8; 2]; 6] = [*b"MM", *b"ML", *b"XR", *b"XG", *b"XM", *b"CG"];
@@ -95,6 +95,42 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
         record.set_base(QPos::new(len as u32), IupacBase::A),
         Err(RawRecordEditError::BaseOutOfRange { .. })
     ));
+}
+
+// r[verify bam.raw_record.edit_qual]
+#[hegel::test(test_cases = pinned::cases(200))]
+fn qual_mut_changes_only_the_qualities(tc: TestCase) {
+    let g: GenRecord = tc.draw(arb_record(HTSLIB));
+    let mut record = record_of(&g);
+    let original = record.as_payload().to_vec();
+    let qual_end = original.len() - g.tags.iter().map(|t| 2 + t.value.len()).sum::<usize>();
+    let qual_start = qual_end - g.qual.len();
+
+    let has_qual = g.qual.first().is_some_and(|&q| q != 0xFF);
+    assert_eq!(record.qual().is_some(), has_qual);
+    let Some(quals) = record.qual_mut() else {
+        assert!(!has_qual);
+        return;
+    };
+    assert_eq!(wire_bytes(quals), g.qual);
+
+    // Any bytes at all, 0xFF first included: every byte is a valid quality.
+    let new: Vec<u8> = (0..g.qual.len()).map(|_| tc.draw_silent(gs::integers::<u8>())).collect();
+    for (q, &b) in quals.iter_mut().zip(&new) {
+        *q = BaseQuality::from_byte(b);
+    }
+    let mut expected = original;
+    expected[qual_start..qual_end].copy_from_slice(&new);
+    assert_eq!(record.as_payload(), expected);
+    let reread = RawBamRecord::from_payload(expected, &header()).unwrap();
+    match reread.qual() {
+        None => assert_eq!(new[0], 0xFF),
+        Some(q) => assert_eq!(wire_bytes(q), new),
+    }
+}
+
+fn wire_bytes(q: &[BaseQuality]) -> Vec<u8> {
+    q.iter().map(|q| q.as_byte()).collect()
 }
 
 /// One aux edit the model can replay.

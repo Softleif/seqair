@@ -27,6 +27,9 @@ The aux block MUST NOT be validated when a record is read: htslib passes a malfo
 r[bam.raw_record.edit_seq]
 `RawBamRecord::set_seq(&[IupacBase])` and `set_base(QPos, IupacBase)` MUST replace the sequence, or one base of it, in place in the packed SEQ field, storing each base's 4-bit code (so every IUPAC code survives). The sequence MUST keep its length: `set_seq` with a different number of bases, and `set_base` past the last base, MUST fail with a `RawRecordEditError` and leave the record unchanged. The edit MUST NOT change anything else — not QUAL, the CIGAR, the aux block, `bin`, nor the unused low nibble of an odd-length sequence's last byte. Because the length and the other fields are untouched, the record still satisfies `r[bam.raw_record.validation]` and `r[bam.raw_record.cigar_seq]` without re-validation.
 
+r[bam.raw_record.edit_qual]
+`RawBamRecord::qual_mut()` MUST give the record's QUAL field as `&mut [BaseQuality]`, in place, exactly when `qual()` gives it as `&[BaseQuality]`, and `None` otherwise (no sequence, or a first quality byte of `0xFF`): a record without qualities has no field of the right length to edit. Writing through it MUST NOT change anything but QUAL, and the length cannot change, so the record still satisfies `r[bam.raw_record.validation]` without re-validation. Every byte is a valid quality; writing `BaseQuality::UNAVAILABLE` (`0xFF`) to the first base makes the record one whose `qual()` is `None`, as `[SAM1] §4.2` reads it.
+
 r[bam.raw_record.iupac_bases]
 `RawBamRecord::iupac_bases()` MUST yield the record's bases as `IupacBase`, one per base, every 4-bit code kept; it MUST agree with `decode_seq_into` (the ASCII spelling, used by the SAM formatter) letter for letter.
 
