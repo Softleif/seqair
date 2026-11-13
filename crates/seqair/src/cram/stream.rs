@@ -367,6 +367,10 @@ pub(crate) fn read_container<R: Read>(
     Ok(Some(header))
 }
 
+/// The most records [`CramContainerDecoder`] reserves room for at once:
+/// samtools writes 10 000 per slice; a slice claiming more grows as it goes.
+const MAX_RESERVED_RECORDS: usize = 16 * 1024;
+
 // r[impl cram.stream.decoder]
 /// Decodes [`CramContainer`]s of one file into [`RawBamRecord`]s, or into
 /// [`PartialRecord`](crate::reader::PartialRecord)s once given
@@ -501,6 +505,11 @@ impl<K: RecordKind> CramContainerDecoder<K> {
                 self.slices.decode_slice(self.fasta.as_mut(), &ch, data, offset, Keep::All)?;
             let header = self.slices.header();
             let fields_read = &self.slices.fields;
+            // Slots past `at` are refilled; reserve only the rest, and no more
+            // than samtools' 10 000-record slices need, whatever a slice says.
+            let spare = out.len().saturating_sub(at);
+            let needed = decoded.records.alignments().len().saturating_sub(spare);
+            out.reserve(needed.min(MAX_RESERVED_RECORDS));
 
             // r[impl cram.stream.raw_records]
             // r[impl cram.stream.fidelity+2]
