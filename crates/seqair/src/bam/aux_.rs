@@ -156,11 +156,6 @@ pub enum GetAuxError {
     /// The requested tag is not present in the auxiliary data.
     #[error("tag not found: {tag}")]
     TagNotFound { tag: AuxTag },
-    /// The record was read without this tag
-    /// ([`RecordFields`](crate::reader::RecordFields)), whether or not the
-    /// file has it.
-    #[error("tag {tag} was not requested")]
-    NotRequested { tag: AuxTag },
     /// Tag name must be exactly 2 bytes (BAM format requirement).
     #[error("invalid tag name length: expected 2, got {len} (bytes: {actual:02x?})")]
     InvalidTagName { len: usize, actual: Vec<u8> },
@@ -175,6 +170,12 @@ pub enum GetAuxError {
     /// A `Z`-type string contains bytes that are not valid UTF-8.
     #[error("Z-type string contains invalid UTF-8")]
     InvalidUtf8,
+    // Last, so no earlier variant's discriminant moves (cargo semver-checks).
+    /// The record was read without this tag
+    /// ([`RecordFields`](crate::reader::RecordFields)), whether or not the
+    /// file has it.
+    #[error("tag {tag} was not requested")]
+    NotRequested { tag: AuxTag },
 }
 
 // r[impl bam.record.aux_from_aux_value]
