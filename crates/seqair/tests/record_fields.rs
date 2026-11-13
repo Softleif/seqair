@@ -24,9 +24,11 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::bam::aux::{AuxValue, GetAuxError};
+use seqair::bam::{BamWriterBuilder, RawBamRecord};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::{
-    AlignmentStream, AuxTags, Field, IndexedReader, PartialRecord, RecordFields, Skipped,
+    AlignmentStream, AuxTags, Field, FormatDetectionError, IndexPath, IndexedReader, PartialRecord,
+    ReaderError, RecordFields, Skipped,
 };
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -542,4 +544,239 @@ fn core_refuses_everything_else_on_every_format() {
         assert_eq!(g.seq_len, 10);
         assert!(!g.complete);
     }
+}
+// ── IndexedReader::builder against the shorthands ───────────────────────
+
+/// Every record of every contig, as stored bytes.
+fn all_payloads(reader: &mut IndexedReader) -> Vec<Vec<u8>> {
+    let header = reader.header().clone();
+    let mut out = Vec::new();
+    for name in header.target_names() {
+        let tid = header.tid(name).expect("tid");
+        let last = u32::try_from(header.target_len(tid).expect("len")).unwrap() - 1;
+        let span = (Pos0::new(0).unwrap()..=Pos0::new(last).unwrap()).into();
+        for rec in reader.query_raw(tid, span).expect("query") {
+            out.push(rec.expect("record").as_payload().to_vec());
+        }
+    }
+    out
+}
+
+fn is_cram_requires_fasta(e: &ReaderError) -> bool {
+    matches!(e, ReaderError::Format { source: FormatDetectionError::CramRequiresFasta })
+}
+
+// r[verify unified.reader_builder]
+/// `builder` opens what `open`, `open_with_reference` and
+/// `open_with_reference_and_index` open, on every indexed format; CRAM without
+/// a reference fails the same way through both.
+#[hegel::test(test_cases = crate::pinned::cases(12))]
+fn the_builder_opens_what_the_shorthands_open(tc: TestCase) {
+    let (reference, reads) = tc.draw(arb_input().print_as_debug());
+    let files = write_files(&reference, &reads);
+    let moved = tempfile::tempdir().expect("tempdir");
+
+    for (f, index_ext) in [(Fmt::SamGz, "tbi"), (Fmt::Bam, "bai"), (Fmt::Cram, "crai")] {
+        let data = path(&files, f);
+        let name = data.file_name().unwrap().to_str().unwrap();
+        let beside = PathBuf::from(format!("{}.{index_ext}", data.display()));
+
+        // No reference.
+        match (IndexedReader::open(data), IndexedReader::builder(data).open()) {
+            (Ok(mut a), Ok(mut b)) => assert_eq!(all_payloads(&mut a), all_payloads(&mut b)),
+            (Err(a), Err(b)) => {
+                assert!(matches!(f, Fmt::Cram), "{f:?}: unexpected failure {a}");
+                assert!(is_cram_requires_fasta(&a) && is_cram_requires_fasta(&b), "{a} / {b}");
+            }
+            (a, b) => panic!("{f:?}: open ok {}, builder ok {}", a.is_ok(), b.is_ok()),
+        }
+
+        // With a reference.
+        let mut a = IndexedReader::open_with_reference(data, &files.fasta).expect("shorthand");
+        let mut b = IndexedReader::builder(data).reference(&files.fasta).open().expect("builder");
+        let want = all_payloads(&mut a);
+        assert_eq!(all_payloads(&mut b), want, "{f:?}: reference");
+
+        // An index that default lookup cannot find: data and index copied
+        // apart under other names.
+        let dir = moved.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data2 = dir.join(format!("data-{name}"));
+        let index_file = dir.join("elsewhere.idx");
+        std::fs::copy(data, &data2).unwrap();
+        std::fs::copy(&beside, &index_file).unwrap();
+        let index2 = IndexPath::new(index_file);
+        assert!(
+            IndexedReader::open_with_reference(&data2, &files.fasta).is_err(),
+            "{f:?}: the copy must have no index beside it"
+        );
+        let mut a = IndexedReader::open_with_reference_and_index(&data2, &files.fasta, &index2)
+            .expect("shorthand with index");
+        let mut b = IndexedReader::builder(&data2)
+            .reference(&files.fasta)
+            .index(index2.clone())
+            .open()
+            .expect("builder with index");
+        assert_eq!(all_payloads(&mut a), want, "{f:?}: explicit index, shorthand");
+        assert_eq!(all_payloads(&mut b), want, "{f:?}: explicit index, builder");
+    }
+}
+
+// ── a long CIGAR resolved whatever tags were requested ──────────────────
+
+/// BAM's op codes `MIDNSHP=X`.
+const OP_CODES: &[u8; 9] = b"MIDNSHP=X";
+
+/// A CIGAR of at least two ops (`CG` only counts when it holds as many as the
+/// placeholder), starting with `M` (so it is never `<l>S` itself), as
+/// `(op char, length)`, with its query length and its length on the reference.
+#[hegel::composite]
+fn arb_real_cigar(tc: &TestCase) -> (Vec<(u8, u32)>, usize, u32) {
+    let n_segments = tc.draw_silent(gs::integers::<usize>().min_value(2).max_value(5));
+    let mut ops = Vec::new();
+    let (mut seq_len, mut ref_len) = (0usize, 0u32);
+    for i in 0..n_segments {
+        if i > 0 && tc.draw_silent(gs::booleans()) {
+            let gap = tc.draw_silent(gs::sampled_from(b"DN"));
+            let len = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(5));
+            ops.push((gap, len));
+            ref_len += len;
+        }
+        let kind = if i == 0 { b'M' } else { tc.draw_silent(gs::sampled_from(b"MIX=")) };
+        let len = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(6));
+        ops.push((kind, len));
+        seq_len += len as usize;
+        if kind != b'I' {
+            ref_len += len;
+        }
+    }
+    (ops, seq_len, ref_len)
+}
+
+fn packed(ops: &[(u8, u32)]) -> Vec<u32> {
+    ops.iter()
+        .map(|&(c, len)| len << 4 | OP_CODES.iter().position(|&x| x == c).unwrap() as u32)
+        .collect()
+}
+
+#[hegel::composite]
+fn arb_fields_with_cg(tc: &TestCase) -> RecordFields {
+    let aux = match tc.draw_silent(gs::integers::<u8>().max_value(2)) {
+        0 => AuxTags::All,
+        1 => AuxTags::None,
+        _ => {
+            let mut tags = Vec::new();
+            for t in [*b"CG", *b"NM", *b"RG", ABSENT] {
+                if tc.draw_silent(gs::booleans()) {
+                    tags.push(t);
+                }
+            }
+            AuxTags::only(tags)
+        }
+    };
+    let (n, s, q) = (
+        tc.draw_silent(gs::booleans()),
+        tc.draw_silent(gs::booleans()),
+        tc.draw_silent(gs::booleans()),
+    );
+    fields_from(n, s, q, aux)
+}
+
+fn check_long_cigar(rec: &PartialRecord, want: &[u32], fields: &RecordFields, what: &str) {
+    let got: Vec<u32> = rec.cigar().map(|op| op.to_bam_u32()).collect();
+    assert_eq!(got, want, "{what}: cigar");
+    assert_eq!(rec.cigar_len(), want.len(), "{what}: cigar_len");
+    if !fields.aux().contains(*b"CG") {
+        assert!(
+            matches!(rec.aux().get::<i64>(*b"CG"), Err(GetAuxError::NotRequested { .. })),
+            "{what}: CG leaked"
+        );
+    }
+}
+
+// r[verify unified.partial_record.no_payload]
+/// A record whose CIGAR lives in a `CG` tag behind the `<l_seq>S<ref_len>N`
+/// placeholder shows its real CIGAR through `PartialRecord::cigar` whatever
+/// tags were requested, from SAM text and from a BAM that keeps the
+/// placeholder form, by stream and by `IndexedReader::query_raw`.
+#[hegel::test(test_cases = crate::pinned::cases(30))]
+fn a_long_cigar_is_resolved_whatever_tags_were_requested(tc: TestCase) {
+    let (ops, seq_len, ref_len) = tc.draw(arb_real_cigar().print_as_debug());
+    let seq = tc.draw(bases(seq_len));
+    let fields = tc.draw(arb_fields_with_cg().print_as_debug());
+    let want = packed(&ops);
+    let placeholder = format!("{seq_len}S{ref_len}N");
+    let cg: Vec<String> = want.iter().map(u32::to_string).collect();
+
+    // (a) SAM text.
+    let sam = format!(
+        "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:{CONTIG}\tLN:{CONTIG_LEN}\n\
+         r0\t0\t{CONTIG}\t10\t30\t{placeholder}\t*\t0\t0\t{seq}\t*\tNM:i:3\tCG:B:I,{}\tRG:Z:g1\n",
+        cg.join(",")
+    );
+    let mut stream = AlignmentStream::builder(std::io::Cursor::new(sam.into_bytes()))
+        .fields(fields.clone())
+        .build()
+        .expect("sam stream");
+    let header = stream.header().clone();
+    let recs: Vec<_> = stream.records().collect::<Result<_, _>>().expect("records");
+    assert_eq!(recs.len(), 1);
+    check_long_cigar(&recs[0], &want, &fields, "sam");
+
+    // (b) BAM, packed by hand: a writer of a short CIGAR would not keep the
+    // placeholder, and samtools folds a CG tag back into the CIGAR.
+    let mut p = Vec::new();
+    p.extend_from_slice(&0i32.to_le_bytes());
+    p.extend_from_slice(&9i32.to_le_bytes());
+    p.extend_from_slice(&[3, 30]); // l_read_name, mapq
+    p.extend_from_slice(&4680u16.to_le_bytes());
+    p.extend_from_slice(&2u16.to_le_bytes()); // n_cigar_op: the placeholder
+    p.extend_from_slice(&0u16.to_le_bytes());
+    p.extend_from_slice(&(seq_len as u32).to_le_bytes());
+    p.extend_from_slice(&(-1i32).to_le_bytes());
+    p.extend_from_slice(&(-1i32).to_le_bytes());
+    p.extend_from_slice(&0i32.to_le_bytes());
+    p.extend_from_slice(b"r0\0");
+    p.extend_from_slice(&((seq_len as u32) << 4 | 4).to_le_bytes());
+    p.extend_from_slice(&(ref_len << 4 | 3).to_le_bytes());
+    p.extend(std::iter::repeat_n(0x11, seq_len.div_ceil(2))); // A
+    p.extend(std::iter::repeat_n(30, seq_len));
+    p.extend_from_slice(b"NMC\x03");
+    p.extend_from_slice(b"CGBI");
+    p.extend_from_slice(&(want.len() as u32).to_le_bytes());
+    for op in &want {
+        p.extend_from_slice(&op.to_le_bytes());
+    }
+    p.extend_from_slice(b"RGZg1\0");
+    let record = RawBamRecord::from_payload(p, &header).expect("payload");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bam = dir.path().join("long.bam");
+    let mut w = BamWriterBuilder::to_path(&bam, &header).build().expect("writer");
+    w.write_raw(&record).expect("write");
+    w.finish().expect("finish");
+    run(Command::new("samtools").arg("index").arg(&bam), "samtools index");
+
+    // The file keeps the placeholder form, and the whole record reads back
+    // with the real CIGAR resolved.
+    let mut full = AlignmentStream::open_path(&bam).expect("open").build().expect("build");
+    let full: Vec<_> = full.records().collect::<Result<_, _>>().expect("records");
+    let raw = full[0].clone();
+    assert!(raw.has_cg_placeholder(), "the BAM must hold the placeholder");
+    assert_eq!(raw.stored_cigar_bytes().len(), 8);
+
+    let mut stream = AlignmentStream::open_path(&bam)
+        .expect("open")
+        .fields(fields.clone())
+        .build()
+        .expect("build");
+    let recs: Vec<_> = stream.records().collect::<Result<_, _>>().expect("records");
+    check_long_cigar(&recs[0], &want, &fields, "bam stream");
+
+    let mut reader = IndexedReader::builder(&bam).fields(fields.clone()).open().expect("open");
+    let tid = reader.header().tid(CONTIG).expect("contig");
+    let recs: Vec<_> =
+        reader.query_raw(tid, span()).expect("query").collect::<Result<_, _>>().unwrap();
+    assert_eq!(recs.len(), 1);
+    check_long_cigar(&recs[0], &want, &fields, "bam query_raw");
 }
