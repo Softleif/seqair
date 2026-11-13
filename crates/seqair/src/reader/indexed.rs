@@ -411,7 +411,8 @@ impl<K: RecordKind> IndexedReaderBuilder<K> {
     /// The FASTA CRAM records are decoded against; BAM and SAM ignore it.
     /// CRAM needs none when the fields leave out the sequence and `MD`/`NM`
     /// (`r[cram.stream.fields.reference_optional]`), but a fetch of such a
-    /// reader, which reads the sequence, then fails.
+    /// reader, which reads the sequence, then fails, until
+    /// [`PartialIndexedReader::into_pileup`] hands it the pileup's FASTA.
     pub fn reference(mut self, fasta: impl Into<PathBuf>) -> Self {
         self.reference = Some(fasta.into());
         self
@@ -573,18 +574,29 @@ impl PartialIndexedReader<std::fs::File> {
     }
 
     /// As [`IndexedReader::into_pileup`]: the pileup's fetches keep the
-    /// requested tags only.
-    pub fn into_pileup(self, fasta: IndexedFastaReader) -> Readers<()> {
-        Readers::from_parts(self.inner, fasta)
+    /// requested tags only. A CRAM reader opened without a reference decodes
+    /// against `fasta` from here on, since the pileup reads the sequence.
+    ///
+    /// # Errors
+    /// `fasta` cannot be reopened for the CRAM reader.
+    pub fn into_pileup(self, fasta: IndexedFastaReader) -> Result<Readers<()>, ReaderError> {
+        self.into_pileup_customized(fasta, ())
     }
 
     /// [`Self::into_pileup`] with a [`CustomizeRecordStore`].
+    ///
+    /// # Errors
+    /// As [`Self::into_pileup`].
     pub fn into_pileup_customized<E: CustomizeRecordStore>(
         self,
         fasta: IndexedFastaReader,
         customize: E,
-    ) -> Readers<E> {
-        Readers::from_parts_customized(self.inner, fasta, customize)
+    ) -> Result<Readers<E>, ReaderError> {
+        let mut inner = self.inner;
+        if let IndexedReader::Cram(cram) = &mut inner {
+            cram.ensure_reference(&fasta)?;
+        }
+        Ok(Readers::from_parts_customized(inner, fasta, customize))
     }
 }
 
@@ -622,6 +634,39 @@ impl<R: Read + Seek> Iterator for PartialRegionQuery<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // r[verify unified.record_fields.indexed]
+    /// A CRAM reader opened without a reference (its fields need none) gets
+    /// the pileup's FASTA from `into_pileup`, so its fetches decode like a
+    /// reader opened with one.
+    #[test]
+    fn into_pileup_gives_a_reference_less_cram_reader_the_fasta() {
+        use crate::reader::{AuxTags, ResolveTid};
+        let data = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data"));
+        let (cram, fasta) = (data.join("test.cram"), data.join("test.fasta.gz"));
+        let fields = RecordFields::core().with_aux(AuxTags::None);
+        let partial = IndexedReader::builder(&cram).fields(fields).open().unwrap();
+        let mut readers = partial.into_pileup(IndexedFastaReader::open(&fasta).unwrap()).unwrap();
+        let mut full = IndexedReader::builder(&cram).reference(&fasta).open().unwrap();
+
+        let tid = "chr19".resolve_tid(full.header()).unwrap();
+        let span = RangeInclusive {
+            start: Pos0::new(6_100_000).unwrap(),
+            last: Pos0::new(6_145_000).unwrap(),
+        };
+        let (mut got, mut want) = (RecordStore::new(), RecordStore::new());
+        let n = readers.fetch_into(tid, span, &mut got).unwrap();
+        full.fetch_into(tid, span, &mut want).unwrap();
+        assert!(n > 0);
+        assert_eq!(got.len(), want.len());
+        for (i, j) in got.indices().zip(want.indices()) {
+            let (g, w) = (got.record(i).unwrap(), want.record(j).unwrap());
+            assert_eq!(
+                (g.pos, g.cigar(), g.seq(), g.qual()),
+                (w.pos, w.cigar(), w.seq(), w.qual())
+            );
+        }
+    }
     use std::io::Write as _;
     use tempfile::NamedTempFile;
 
