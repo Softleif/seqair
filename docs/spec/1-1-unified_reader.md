@@ -516,14 +516,48 @@ See `r[io.non_exhaustive_enums]` and `r[io.minimal_public_api]` in `general.md` 
 
 The indexed readers above need a path and an index. A whole-file consumer reading `stdin` cannot tell from a filename what it was handed, and cannot seek back after looking.
 
-r[unified.stream.detect+2]
-`AlignmentStream::from_reader(R: Read)` MUST decide the format from the first bytes alone, without seeking and without consuming anything the chosen reader then misses: it reads until it has enough bytes or the input ends (a pipe may deliver one byte at a time), and replays them to the reader it picks. A BGZF block header (gzip magic with `FEXTRA` and a `BC` subfield) whose decompressed data starts with `BAM\1` is BAM (`r[bam.stream]`); any other BGZF data is bgzipped SAM; any other gzip member is gzip-compressed SAM, read through a multi-member gzip decoder; `CRAM` is CRAM (`r[cram.stream+2]`), decoded serially on the reading thread against the FASTA given with the builder's `reference(path)`, and refused with `AlignmentStreamError::CramNeedsReference` when none was given; plain gzip whose data starts with `BAM\1` (htslib reads it) is refused with `AlignmentStreamError::GzipBamNotSupported`; everything else, including empty input, is SAM text (`r[sam.stream]`). A file extension is never consulted.
+r[unified.stream.detect+4]
+`AlignmentStream::from_reader(R: Read)` MUST decide the format from the first bytes alone, without seeking and without consuming anything the chosen reader then misses: it reads until it has enough bytes or the input ends (a pipe may deliver one byte at a time), and replays them to the reader it picks. A BGZF block header (gzip magic with `FEXTRA` and a `BC` subfield) whose decompressed data starts with `BAM\1` is BAM (`r[bam.stream]`); any other BGZF data is bgzipped SAM; any other gzip member is gzip-compressed SAM, read through a multi-member gzip decoder; `CRAM` is CRAM (`r[cram.stream+2]`), decoded on the reading thread or, with threads, on a rayon pool (`r[unified.stream.cram_threads]`), against the FASTA given with the builder's `reference(path)`, and refused with `AlignmentStreamError::CramNeedsReference` when none was given and the fields read need one (`r[cram.stream.fields.reference_optional]`: the sequence, or `MD`/`NM`); plain gzip whose data starts with `BAM\1` (htslib reads it) is refused with `AlignmentStreamError::GzipBamNotSupported`; everything else, including empty input, is SAM text (`r[sam.stream]`). A file extension is never consulted.
 
-r[unified.stream.records]
-Whatever the format, `AlignmentStream` MUST expose the header (`BamHeader`, with the original text) and yield every record as a `RawBamRecord` in input order, and it MUST report which format it detected. BGZF thread and EOF-marker options apply to the BGZF formats.
+r[unified.stream.records+2]
+Whatever the format, `AlignmentStream` MUST expose the header (`BamHeader`, with the original text) and yield every record as a `RawBamRecord` in input order, and it MUST report which format it detected. The thread options apply to the BGZF formats and to CRAM (`r[unified.stream.cram_threads]`), the EOF-marker option to the BGZF formats.
 
-r[unified.stream.into_cram]
-`AlignmentStream::into_cram()` MUST give a CRAM stream's `CramStreamReader` and `CramContainerDecoder`, set up with the builder's reference and name prefix, so a caller can decode containers on its own threads without detecting the format or configuring the decoder again. The reader MUST continue with the first container the stream has not read; decoding every container it yields MUST give the records `read_record` would have given. A stream that is not CRAM, or that holds decoded records it has not handed out, MUST come back unchanged as the error.
+r[unified.stream.cram_threads]
+A CRAM stream built with `threads(n)` or `threads_in(n, pool)` MUST decode its containers on that rayon pool, chosen as for BGZF (`r[bgzf.stream.current_pool]`, `r[bgzf.stream.shared_pool]`, which includes not deadlocking when read from one of the pool's own threads); built without, it decodes them on the reading thread. The reading thread reads containers and hands each to a job, at most `n` decoding at once and at most `2n` read ahead of the consumer, and returns their records strictly in file order. Each job decodes with a `CramContainerDecoder` of its own, forked from the stream's (`r[cram.stream.decoder]`), at most `n` of them at a time, and reused from container to container, and gives it back as soon as it is done, before its records are consumed, so a container decoded early does not hold a decoder idle. The records and errors MUST be those of the unthreaded stream, in the same order (`r[unified.stream.iter]`): a container that fails to decode is one error, the next call continuing with the following container; an error reading a container is returned after the records of every container before it, and ends the stream. A job that panics MUST NOT abort the process or hang the stream: its container is one `CramStreamError::WorkerLost` error. Dropping the stream MUST NOT block on outstanding jobs; jobs not yet started skip their container. Read-ahead MUST NOT delay the first records: each refill reads at most two new containers. With or without threads, a container's records are decoded into the record buffers earlier containers' records left, the ones `read_record` swapped back, rather than fresh allocations.
+
+r[unified.stream.into_cram+2]
+`AlignmentStream::into_cram()` MUST give a CRAM stream's `CramStreamReader` and `CramContainerDecoder`, set up with the builder's reference and name prefix, so a caller can decode containers on its own threads without detecting the format or configuring the decoder again. The reader MUST continue with the first container the stream has not read; decoding every container it yields MUST give the records `read_record` would have given. A stream that is not CRAM, or that holds records (or an error) it has not handed out — with threads, any container it has read ahead — MUST come back unchanged as the error, so no record is lost or reordered. A threaded stream therefore hands over before its first read and after its end, not in between.
 
 r[unified.stream.iter]
 `AlignmentStream::records()` MUST be an iterator over the records `read_record` reads, as `Result<RawBamRecord, AlignmentStreamError>`. An error the stream can continue past (an invalid record) is an item like any other; after an error that ends the stream, the iterator MUST end rather than repeat the poison error, so a `for` loop or `collect` terminates. For CRAM, a container that fails to decode MUST be one error item, with none of its records, and iteration MUST continue with the next container; an error reading a container ends the stream. The iterator MUST be fused: once it returns `None`, it MUST keep returning `None`.
+
+## Reading only some fields
+
+A consumer that never looks at a read's sequence, qualities or tags should not pay to decode them. CRAM can skip that work (its fields are separate blocks); SAM can skip parsing tags; BAM records are bytes either way. Whatever a format skips, what a consumer *sees* must not depend on the format, or code that forgot to request a field would pass on BAM and read filler on CRAM.
+
+r[unified.record_fields]
+`RecordFields` MUST name the per-record fields a consumer reads: read names, sequence, qualities, and the aux tags (`AuxTags::All`, `None`, or `Only` a list). Flags, reference, position, MAPQ, CIGAR, mate reference and position, TLEN and the read length are always read. `RecordFields::all()` is every field and the default of every reader; `RecordFields::core()` is none of the optional ones, and `with_names`, `with_sequence`, `with_quality` and `with_aux` add to it; `union` gives the fields of both. A reader takes its fields once, when built, and its forks read the same ones.
+
+r[unified.partial_record]
+A reader built with `RecordFields` MUST yield `PartialRecord`s, not `RawBamRecord`s. A `PartialRecord` has the core fields of a `RawBamRecord`; `into_complete()` MUST give the `RawBamRecord` back exactly when the record was read with `RecordFields::all()`, and the record unchanged otherwise.
+
+r[unified.partial_record.skipped]
+`PartialRecord::qname`, `seq` and `qual` MUST return `Err(Skipped)` exactly when that field was not requested, on every format, whether or not the format decoded it. Its `aux()` MUST see only the requested tags: `get` of any other tag MUST return `GetAuxError::NotRequested`, distinct from `TagNotFound` for a requested tag the record lacks, and iteration MUST yield only requested tags. Every requested field MUST equal what a reader with `RecordFields::all()` reads for that record.
+
+r[unified.partial_record.l_seq]
+A `PartialRecord`'s `seq_len()` MUST be the read length whether or not the sequence was requested.
+
+r[unified.partial_record.no_payload]
+`PartialRecord` MUST have no accessor for its BAM bytes, and no writer may take one: skipped fields hold filler. A requested long CIGAR (`CG`) MUST be resolved by `cigar()` whatever tags were requested.
+
+r[unified.stream.fields]
+`AlignmentStreamBuilder::fields(f)` MUST give a builder whose stream yields `PartialRecord`s read with `f`, on every format; `into_cram()` then gives a decoder that yields `PartialRecord`s too.
+
+r[unified.reader_builder]
+`IndexedReader::builder(path)` MUST open what `open`, `open_with_reference` and `open_with_reference_and_index` open, given the same reference (`.reference`) and index (`.index`); those openers are shorthands for it.
+
+r[unified.record_fields.indexed]
+`IndexedReader::builder(path).fields(f).open()` MUST give a `PartialIndexedReader` whose `query_raw` yields `PartialRecord`s read with `f`. Its fetches into a `RecordStore`, and the pileup of `into_pileup`, MUST read the sequence and qualities whatever `f` says, since the pileup needs both.
+
+r[unified.record_fields.fetch_into]
+A fetch of a reader built with `RecordFields` MUST store only the requested tags, on every format, so that a tag missing from the request is missing from the store on BAM as on CRAM.

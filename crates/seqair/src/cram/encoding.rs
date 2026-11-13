@@ -297,6 +297,20 @@ impl ExternalCursor {
         Some(())
     }
 
+    /// Step past `n` bytes.
+    fn skip(&mut self, n: usize) -> Option<()> {
+        let end = self.pos.checked_add(n)?;
+        (end <= self.data.len()).then(|| self.pos = end)
+    }
+
+    /// Step past the bytes up to and including the next `stop` byte; how
+    /// many there were before it.
+    fn skip_until(&mut self, stop: u8) -> Option<usize> {
+        let len = find_byte(self.data.get(self.pos..)?, stop)?;
+        self.pos = self.pos.checked_add(len)?.checked_add(1)?;
+        Some(len)
+    }
+
     pub fn into_data(self) -> Vec<u8> {
         self.data
     }
@@ -334,6 +348,14 @@ impl<'a> DecodeContext<'a> {
             }
         }
         Err(CramError::ExternalBlockNotFound { content_id })
+    }
+
+    // r[impl cram.stream.fields.dropped_blocks]
+    /// The cursor for `content_id`, `None` when the slice's decode left that
+    /// block out, as it does every block only skipped series read.
+    #[inline]
+    fn kept_external(&mut self, content_id: i32) -> Option<&mut ExternalCursor> {
+        self.external.iter_mut().find(|(id, _)| *id == content_id).map(|(_, cursor)| cursor)
     }
 }
 
@@ -379,6 +401,17 @@ impl IntEncoding {
                 val.checked_sub(*offset)
                     .ok_or_else(|| CramError::Truncated { context: "gamma int offset overflow" })
             }
+        }
+    }
+
+    // r[impl cram.stream.fields.dropped_blocks]
+    /// Step past a value the decode does not keep, whose external block it
+    /// may have left out: `None` then, else the value, read so that a block
+    /// or the core stream shared with a kept series stays in step.
+    pub fn skip(&self, ctx: &mut DecodeContext<'_>) -> Result<Option<i32>, CramError> {
+        match self {
+            Self::External { content_id } if ctx.kept_external(*content_id).is_none() => Ok(None),
+            _ => self.decode(ctx).map(Some),
         }
     }
 
@@ -520,6 +553,28 @@ impl ByteEncoding {
         }
     }
 
+    // r[impl cram.stream.fields.dropped_blocks]
+    /// Step past `n` values the decode does not keep: nothing when it left
+    /// their external block out, else they are read and dropped, so a block
+    /// or the core stream shared with a kept series stays in step.
+    pub fn skip_n(&self, ctx: &mut DecodeContext<'_>, n: usize) -> Result<(), CramError> {
+        match self {
+            Self::Null => Ok(()),
+            Self::External { content_id } => match ctx.kept_external(*content_id) {
+                None => Ok(()),
+                Some(cursor) => cursor
+                    .skip(n)
+                    .ok_or_else(|| CramError::Truncated { context: "external bulk bytes" }),
+            },
+            Self::Huffman(_) | Self::Beta { .. } => {
+                for _ in 0..n {
+                    self.decode(ctx)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
         let encoding_id = varint::read_itf8_from(cursor)
             .ok_or_else(|| CramError::Truncated { context: "encoding id" })?
@@ -604,6 +659,35 @@ impl ByteArrayEncoding {
                     .read_bytes_until_into(*stop_byte, buf)
                     .ok_or_else(|| CramError::Truncated { context: "byte array stop" })
             }
+        }
+    }
+
+    // r[impl cram.stream.fields.dropped_blocks]
+    /// Step past a value the decode does not keep, giving its length: its
+    /// bytes are not copied, and not read at all where the decode left their
+    /// block out. `0` when the length's own block was left out, which the
+    /// decode does only when it left the bytes' block out too
+    /// (`needed_blocks`).
+    pub fn skip(&self, ctx: &mut DecodeContext<'_>) -> Result<usize, CramError> {
+        match self {
+            Self::Null => Ok(0),
+            Self::External { content_id } => {
+                Err(CramError::ExternalByteArrayNeedsLength { content_id: *content_id })
+            }
+            Self::ByteArrayLen { len_encoding, val_encoding } => {
+                let Some(len_i32) = len_encoding.skip(ctx)? else { return Ok(0) };
+                let len = usize::try_from(len_i32)
+                    .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
+                super::reader::check_alloc_size(len, "byte array length")?;
+                val_encoding.skip_n(ctx, len)?;
+                Ok(len)
+            }
+            Self::ByteArrayStop { stop_byte, content_id } => match ctx.kept_external(*content_id) {
+                None => Ok(0),
+                Some(cursor) => cursor
+                    .skip_until(*stop_byte)
+                    .ok_or_else(|| CramError::Truncated { context: "byte array stop" }),
+            },
         }
     }
 

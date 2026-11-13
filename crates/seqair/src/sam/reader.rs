@@ -13,7 +13,7 @@ use crate::bam::{
     region_buf::{BlockCache, RegionBuf},
 };
 use crate::io::text_scan;
-use crate::reader::{ResolveTid, Tid};
+use crate::reader::{AuxTags, ResolveTid, Tid};
 use core::range::RangeInclusive;
 use seqair_types::{IupacBase, MappingQuality, Pos0, Pos1};
 use std::num::NonZeroI32;
@@ -105,6 +105,8 @@ pub struct IndexedSamReader<R = File> {
     shared: Arc<SamShared>,
     /// Decompressed blocks kept between queries; see `r[region_buf.block_cache]`.
     block_cache: BlockCache,
+    /// The tags a fetch stores (`r[unified.record_fields.fetch_into]`).
+    aux: AuxTags,
 }
 
 impl<R> std::fmt::Debug for IndexedSamReader<R> {
@@ -162,6 +164,7 @@ impl IndexedSamReader<File> {
             bulk_reader: bulk_file,
             shared: Arc::new(SamShared { index, header, sam_path: path.to_path_buf() }),
             block_cache: BlockCache::new(),
+            aux: AuxTags::All,
         })
     }
 
@@ -173,6 +176,7 @@ impl IndexedSamReader<File> {
             bulk_reader: bulk_file,
             shared: Arc::clone(&self.shared),
             block_cache: BlockCache::new(),
+            aux: self.aux.clone(),
         })
     }
 }
@@ -191,6 +195,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
             bulk_reader: std::io::Cursor::new(sam_data),
             shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz>") }),
             block_cache: BlockCache::new(),
+            aux: AuxTags::All,
         })
     }
 
@@ -222,6 +227,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
             bulk_reader: std::io::Cursor::new(sam_data),
             shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz-plain>") }),
             block_cache: BlockCache::new(),
+            aux: AuxTags::All,
         })
     }
 
@@ -275,6 +281,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
                 &mut bases_buf,
                 &mut qual_buf,
                 &mut aux_buf,
+                &self.aux,
                 &mut (),
             )?;
         }
@@ -284,6 +291,11 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
 }
 
 impl<R: Read + Seek> IndexedSamReader<R> {
+    /// Store only `aux` on fetches; set once, when opened.
+    pub(crate) fn set_aux_tags(&mut self, aux: AuxTags) {
+        self.aux = aux;
+    }
+
     pub fn shared(&self) -> &Arc<SamShared> {
         &self.shared
     }
@@ -358,6 +370,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                 &mut seq_buf,
                 &mut qual_buf,
                 &mut aux_buf,
+                &self.aux,
                 customize,
             )? {
                 counts.add(record);
@@ -712,6 +725,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     seq_buf: &mut Vec<IupacBase>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
+    aux: &AuxTags,
     customize: &mut E,
 ) -> Result<Option<FetchedRecord>, SamError> {
     let (fields, n_fields) = text_scan::split_tabs(line);
@@ -752,7 +766,8 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         // r[impl sam.record.aux_tags+2]
         // r[impl sam.record.aux_parse_strict+2]
         // r[impl sam.record.aux_int_range+3]
-        encode::parse_aux_fields(aux_text, aux_buf)?;
+        // r[impl sam.reader.fields.aux]
+        encode::parse_aux_fields(aux_text, aux, aux_buf)?;
     }
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
@@ -942,7 +957,7 @@ mod tests {
     /// The aux bytes the shared parser produces for one `TAG:TYPE:VALUE` field.
     fn aux_bytes(field: &str) -> Result<Vec<u8>, SamError> {
         let mut buf = Vec::new();
-        encode::parse_aux_fields(field.as_bytes(), &mut buf)?;
+        encode::parse_aux_fields(field.as_bytes(), &AuxTags::All, &mut buf)?;
         Ok(buf)
     }
 
@@ -1021,6 +1036,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &AuxTags::All,
             &mut (),
         )
         .map(|outcome| outcome.map(|record| record.kept))
@@ -1053,6 +1069,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &AuxTags::All,
             &mut (),
         )
         .expect("a SEQ of any bytes parses")
@@ -1135,6 +1152,7 @@ mod tests {
                 &mut bases_buf,
                 &mut qual_buf,
                 &mut aux_buf,
+                &AuxTags::All,
                 &mut (),
             )
             .unwrap()
@@ -1219,6 +1237,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &AuxTags::All,
             &mut (),
         )
         .expect("MAPQ 255 is valid SAM");
@@ -1310,6 +1329,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &AuxTags::All,
             &mut (),
         )?;
         Ok((result.map(|record| record.kept), store))
@@ -1434,6 +1454,42 @@ mod tests {
             let err = call_parse(line.as_bytes(), &header).expect_err(aux);
             assert!(matches!(err, SamError::MalformedRecord { .. }), "{aux}: {err:?}");
         }
+    }
+
+    // r[verify sam.reader.fields.aux]
+    /// A fetch stores only the requested tags; a malformed unrequested one
+    /// does not fail the line, a malformed requested one still does.
+    #[test]
+    fn fetch_parses_only_the_requested_tags() {
+        let header = make_header();
+        let parse = |aux: &str, tags: &AuxTags| {
+            let line = format!("r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~\t{aux}");
+            let (mut store, mut cigar, mut bases, mut qual, mut aux_buf) = make_store_and_bufs();
+            parse_sam_line(
+                line.as_bytes(),
+                &header,
+                tid(0),
+                0,
+                10000,
+                &mut store,
+                &mut cigar,
+                &mut bases,
+                &mut qual,
+                &mut aux_buf,
+                tags,
+                &mut (),
+            )
+            .map(|_| store)
+        };
+        let nm = AuxTags::only([*b"NM"]);
+        let store = parse("XA:Z:x\tNM:i:3\tXB:i:1", &nm).unwrap();
+        let rec = store.records().next().unwrap();
+        let tags: Vec<_> = rec.aux(&store).unwrap().iter_tags().map(|(t, _)| t).collect();
+        assert_eq!(tags, [*b"NM"]);
+
+        assert!(parse("XA:q:broken\tNM:i:3", &nm).is_ok());
+        assert!(parse("NM:i:broken", &nm).is_err());
+        assert!(parse("NM:i:broken", &AuxTags::None).is_ok());
     }
 
     // r[verify sam.record.aux_int_range+3]

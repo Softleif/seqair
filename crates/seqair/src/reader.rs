@@ -12,6 +12,7 @@ use crate::{
 use seqair_types::SmolStr;
 use std::path::PathBuf;
 
+mod fields;
 mod formats;
 mod indexed;
 mod readers;
@@ -24,9 +25,16 @@ mod stream_pileup;
 mod fuzz;
 
 pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
+pub use fields::{
+    AuxTags, Complete, Field, Partial, PartialRecord, RecordFields, RecordKind, RequestedAux,
+    SeqRef, Skipped,
+};
 pub use formats::FormatDetectionError;
 pub(crate) use indexed::FetchedRecord;
-pub use indexed::{FetchCounts, IndexPath, IndexedReader, RawRegionQuery};
+pub use indexed::{
+    FetchCounts, IndexPath, IndexedReader, IndexedReaderBuilder, PartialIndexedReader,
+    PartialRegionQuery, RawRegionQuery,
+};
 pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};

@@ -14,7 +14,7 @@ use crate::bam::{
     seq,
 };
 use crate::io::text_scan;
-use crate::reader::Tid;
+use crate::reader::{AuxTags, Tid};
 use seqair_types::{IupacBase, MappingQuality, Pos0};
 use std::fmt;
 use std::num::NonZeroI32;
@@ -180,11 +180,21 @@ pub struct SamRecordEncoder {
     tabs: Vec<usize>,
     /// The reference RNAME last resolved to.
     last_tid: Option<Tid>,
+    /// The optional fields kept; the rest are skipped unparsed.
+    tags: AuxTags,
 }
 
 impl SamRecordEncoder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Parse only the optional fields in `tags`; the others are skipped
+    /// unparsed, so a malformed one does not fail the line.
+    #[must_use]
+    pub fn with_aux_tags(mut self, tags: AuxTags) -> Self {
+        self.tags = tags;
+        self
     }
 
     // r[impl sam.encode]
@@ -330,7 +340,7 @@ impl SamRecordEncoder {
             && !(placed && self.cg_tag_may_apply(seq.len()))
             && encode_alignment(payload, &AlignmentFields { cigar: &self.cigar, ..fields }).is_ok()
         {
-            parse_aux_at_tabs(line, aux_tabs, payload)?;
+            parse_aux_at_tabs(line, aux_tabs, &self.tags, payload)?;
             check_cigar_seq(&self.cigar, seq)?;
             if payload.len() > MAX_RECORD_SIZE {
                 return Err(SamRecordError::RecordTooLarge { size: payload.len() });
@@ -340,7 +350,7 @@ impl SamRecordEncoder {
         payload.clear();
 
         self.aux.clear();
-        parse_aux_at_tabs(line, aux_tabs, &mut self.aux)?;
+        parse_aux_at_tabs(line, aux_tabs, &self.tags, &mut self.aux)?;
 
         // r[impl sam.encode.cg_tag]
         if placed {
@@ -728,7 +738,11 @@ pub fn parse_cigar(text: &[u8], out: &mut Vec<CigarOp>) -> Result<(), SamRecordE
 /// Append the BAM encoding of SAM optional fields — `text` is everything
 /// after the TAB that ends QUAL — to `out`. On error `out` holds a partial
 /// encoding the caller must discard.
-pub(crate) fn parse_aux_fields(text: &[u8], out: &mut Vec<u8>) -> Result<(), SamRecordError> {
+pub(crate) fn parse_aux_fields(
+    text: &[u8],
+    tags: &AuxTags,
+    out: &mut Vec<u8>,
+) -> Result<(), SamRecordError> {
     let mut rest = text;
     loop {
         let (field, next) = match text_scan::find_byte(rest, b'\t') {
@@ -739,7 +753,7 @@ pub(crate) fn parse_aux_fields(text: &[u8], out: &mut Vec<u8>) -> Result<(), Sam
         if field.is_empty() && next.is_none() {
             return Ok(());
         }
-        parse_aux_field(field, out)?;
+        parse_aux_field_if(field, tags, out)?;
         match next {
             Some(next) => rest = next,
             None => return Ok(()),
@@ -749,7 +763,12 @@ pub(crate) fn parse_aux_fields(text: &[u8], out: &mut Vec<u8>) -> Result<(), Sam
 
 /// [`parse_aux_fields`] on a line whose TABs are known: each optional field
 /// runs from one of `tabs` to the next, the last to the end of `line`.
-fn parse_aux_at_tabs(line: &[u8], tabs: &[usize], out: &mut Vec<u8>) -> Result<(), SamRecordError> {
+fn parse_aux_at_tabs(
+    line: &[u8],
+    tabs: &[usize],
+    tags: &AuxTags,
+    out: &mut Vec<u8>,
+) -> Result<(), SamRecordError> {
     for (i, &tab) in tabs.iter().enumerate() {
         let end = tabs.get(i.saturating_add(1)).copied();
         let field = line.get(tab.saturating_add(1)..end.unwrap_or(line.len())).unwrap_or_default();
@@ -757,7 +776,7 @@ fn parse_aux_at_tabs(line: &[u8], tabs: &[usize], out: &mut Vec<u8>) -> Result<(
         if field.is_empty() && end.is_none() {
             return Ok(());
         }
-        parse_aux_field(field, out)?;
+        parse_aux_field_if(field, tags, out)?;
     }
     Ok(())
 }
@@ -773,6 +792,25 @@ fn check_cigar_seq(cigar: &[CigarOp], seq: &[u8]) -> Result<(), SamRecordError> 
         return Err(SamRecordError::CigarSeqLenMismatch { cigar_query_len, seq_len: seq.len() });
     }
     Ok(())
+}
+
+// r[impl sam.stream.fields.aux]
+/// [`parse_aux_field`], unless `tags` leaves the field's tag out. `CG` is
+/// always parsed: a long CIGAR lives in it (`r[sam.encode.cg_tag]`).
+#[inline(always)]
+fn parse_aux_field_if(
+    field: &[u8],
+    tags: &AuxTags,
+    out: &mut Vec<u8>,
+) -> Result<(), SamRecordError> {
+    if !matches!(tags, AuxTags::All)
+        && let Some(&[t0, t1]) = field.first_chunk::<2>()
+        && [t0, t1] != *b"CG"
+        && !tags.contains([t0, t1])
+    {
+        return Ok(());
+    }
+    parse_aux_field(field, out)
 }
 
 /// A tag byte as htslib (with a signed `char`) accepts it: `!` to DEL.
@@ -947,7 +985,7 @@ mod tests {
 
     fn aux(field: &str) -> Result<Vec<u8>, SamRecordError> {
         let mut out = Vec::new();
-        parse_aux_fields(field.as_bytes(), &mut out)?;
+        parse_aux_fields(field.as_bytes(), &AuxTags::All, &mut out)?;
         Ok(out)
     }
 

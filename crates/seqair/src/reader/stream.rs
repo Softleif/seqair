@@ -1,18 +1,31 @@
 //! [`AlignmentStream`]: read BAM, SAM (plain, bgzipped or gzipped) or CRAM
 //! front to back from any reader, deciding the format from its first bytes.
-//! See `r[unified.stream.detect+2]`.
+//! See `r[unified.stream.detect+4]`.
 
 use crate::bam::{
     BamHeader, RawBamRecord,
-    bgzf::{BgzfError, BgzfStream, EofMarker, Workers},
+    bgzf::{BgzfError, BgzfStream, EofMarker, Pool, Workers},
     header::BAM_MAGIC,
     stream::{BamStreamError, BamStreamReader},
 };
-use crate::cram::stream::{CramContainerDecoder, CramStreamError, CramStreamReader};
+use crate::cram::{
+    slice::Plan,
+    stream::{CramContainer, CramContainerDecoder, CramStreamError, CramStreamReader},
+};
+use crate::reader::{Complete, Partial, RecordFields, RecordKind};
 use crate::sam::{SamStreamError, SamStreamReader};
 use seqair_types::SmolStr;
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::marker::PhantomData;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use tracing::{trace, warn};
 
 /// The format an [`AlignmentStream`] detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,9 +74,12 @@ pub enum AlignmentStreamError {
         source: CramStreamError,
     },
 
-    /// CRAM is decoded against a reference; give one with
+    /// CRAM is decoded against a reference unless the fields read leave out
+    /// the sequence and `MD`/`NM`; give one with
     /// [`AlignmentStreamBuilder::reference`].
-    #[error("the input is CRAM, which needs a FASTA reference (AlignmentStreamBuilder::reference)")]
+    #[error(
+        "the input is CRAM, whose sequence needs a FASTA reference (AlignmentStreamBuilder::reference)"
+    )]
     CramNeedsReference,
 
     /// BAM in ordinary gzip rather than BGZF. htslib reads it; recompress with
@@ -100,54 +116,307 @@ enum Inner {
     Cram(Box<CramRecords>),
 }
 
-/// A CRAM stream decoded one container at a time on the reading thread.
+/// A CRAM stream: containers read on the reading thread, decoded there or,
+/// with threads, on a rayon pool (`r[unified.stream.cram_threads]`).
 struct CramRecords {
     reader: CramStreamReader<CramInput>,
+    /// Decodes inline, and is what workers' decoders are forked from.
     decoder: CramContainerDecoder,
-    /// The current container's records; those before `next` are handed out.
-    pending: Vec<RawBamRecord>,
+    /// The current container's records, `..len` of them valid, those before
+    /// `next` handed out. Those past `len` are buffers kept for reuse.
+    records: Vec<RawBamRecord>,
+    len: usize,
     next: usize,
+    /// `None` decodes on the reading thread.
+    threads: Option<CramThreads>,
 }
 
 impl CramRecords {
+    fn new(
+        reader: CramStreamReader<CramInput>,
+        decoder: CramContainerDecoder,
+        workers: Workers,
+    ) -> Self {
+        let threads = workers.pool().map(|(pool, threads)| CramThreads::new(pool, threads));
+        Self { reader, decoder, records: Vec::new(), len: 0, next: 0, threads }
+    }
+
     fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, CramStreamError> {
         loop {
-            if let Some(slot) = self.pending.get_mut(self.next) {
-                // A swap, so the caller's old record goes back to be dropped
-                // with the container and nothing is copied.
+            if self.next < self.len
+                && let Some(slot) = self.records.get_mut(self.next)
+            {
+                // A swap: the caller's old record becomes a buffer the next
+                // container is decoded into, and nothing is copied.
                 std::mem::swap(record, slot);
                 self.next = self.next.saturating_add(1);
                 return Ok(true);
             }
-            let Some(container) = self.reader.next_container()? else { return Ok(false) };
-            self.pending.clear();
+            self.len = 0;
             self.next = 0;
-            self.decoder.decode(&container, &mut self.pending)?;
+            let Some(threads) = &mut self.threads else {
+                let Some(container) = self.reader.next_container()? else { return Ok(false) };
+                self.len = self.decoder.decode_reusing(&container, &mut self.records, 0)?;
+                continue;
+            };
+            let Some(Decoded { records, result }) =
+                threads.next(&mut self.reader, &mut self.decoder)
+            else {
+                return Ok(false);
+            };
+            let done = std::mem::replace(&mut self.records, records);
+            threads.recycle(done);
+            self.len = result?;
+        }
+    }
+
+    /// Whether an error ended the stream and was returned.
+    fn is_failed(&self) -> bool {
+        self.reader.is_failed() && self.threads.as_ref().is_none_or(|t| t.pending.is_empty())
+    }
+
+    /// Whether every record read from the input has been handed out.
+    fn is_drained(&self) -> bool {
+        self.next >= self.len && self.threads.as_ref().is_none_or(|t| t.pending.is_empty())
+    }
+}
+
+/// A container's records, `result` how many of them it holds (or why it
+/// failed), and the buffer they are in.
+struct Decoded {
+    records: Vec<RawBamRecord>,
+    result: Result<usize, CramStreamError>,
+}
+
+/// One container, in file order.
+enum Pending {
+    /// Read, waiting for a decoder.
+    Queued(CramContainer),
+    /// On a worker.
+    Waiting {
+        container: u64,
+        reply: mpsc::Receiver<Decoded>,
+    },
+    Ready(Decoded),
+}
+
+/// Containers decoded in flight per thread asked for: one decoding, one read
+/// and waiting for a decoder (or decoded and waiting for the consumer).
+const CONTAINERS_PER_THREAD: usize = 2;
+
+// r[impl unified.stream.cram_threads]
+/// Containers decoded on a rayon pool by at most `threads` decoders, so at
+/// most `threads` at once, with up to twice as many read ahead.
+struct CramThreads {
+    pool: Pool,
+    threads: usize,
+    pending: VecDeque<Pending>,
+    /// Decoders forked so far and not lost to a panic.
+    decoders: usize,
+    /// Decoders free for the next container.
+    idle: Vec<CramContainerDecoder>,
+    /// Workers hand their decoder back here as soon as they are done, before
+    /// their records, so a container decoded early frees its decoder at once.
+    returned: mpsc::Receiver<CramContainerDecoder>,
+    give_back: mpsc::Sender<CramContainerDecoder>,
+    /// Record buffers to decode the next containers into.
+    spare: Vec<Vec<RawBamRecord>>,
+    /// Set when the stream is dropped, so queued jobs skip their container.
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for CramThreads {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Relaxed);
+    }
+}
+
+impl CramThreads {
+    fn new(pool: Pool, threads: usize) -> Self {
+        let (give_back, returned) = mpsc::channel();
+        Self {
+            pool,
+            threads,
+            pending: VecDeque::new(),
+            decoders: 0,
+            idle: Vec::new(),
+            returned,
+            give_back,
+            spare: Vec::new(),
+            dropped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The next container's records, in file order; `None` at the end.
+    fn next(
+        &mut self,
+        reader: &mut CramStreamReader<CramInput>,
+        template: &mut CramContainerDecoder,
+    ) -> Option<Decoded> {
+        self.top_up(reader);
+        self.dispatch(template);
+        Some(match self.pending.pop_front()? {
+            Pending::Ready(decoded) => decoded,
+            Pending::Waiting { container, reply } => match self.pool.wait(&reply) {
+                Ok(decoded) => decoded,
+                Err(_) => {
+                    // Its decoder went down with it.
+                    self.decoders = self.decoders.saturating_sub(1);
+                    Decoded {
+                        records: Vec::new(),
+                        result: Err(CramStreamError::WorkerLost { container }),
+                    }
+                }
+            },
+            // Every earlier container is consumed, so every decoder is
+            // free and `dispatch` gave it one, unless forking failed.
+            Pending::Queued(container) => {
+                let mut records = self.spare.pop().unwrap_or_default();
+                let result = template.decode_reusing(&container, &mut records, 0);
+                Decoded { records, result }
+            }
+        })
+    }
+
+    /// Read containers until `CONTAINERS_PER_THREAD` per thread are pending
+    /// or the input is done, at most two per call so a slow producer (a pipe)
+    /// is not waited on for the whole read-ahead before the first records
+    /// return. A read error is queued after the containers before it, so it
+    /// reaches the consumer in file order.
+    fn top_up(&mut self, reader: &mut CramStreamReader<CramInput>) {
+        let depth = self.threads.saturating_mul(CONTAINERS_PER_THREAD);
+        for _ in 0..2 {
+            // A failed reader's error is queued already; read again (for
+            // `Poisoned`) only once it has been returned.
+            if self.pending.len() >= depth || (reader.is_failed() && !self.pending.is_empty()) {
+                return;
+            }
+            self.pending.push_back(match reader.next_container() {
+                Ok(Some(container)) => Pending::Queued(container),
+                // Ended: later calls to `next_container` keep saying so.
+                Ok(None) => return,
+                Err(e) => Pending::Ready(Decoded { records: Vec::new(), result: Err(e) }),
+            });
+        }
+    }
+
+    /// Hand queued containers, in file order, to workers while a decoder is
+    /// free or another may be forked.
+    fn dispatch(&mut self, template: &CramContainerDecoder) {
+        self.idle.extend(self.returned.try_iter());
+        for slot in &mut self.pending {
+            let Pending::Queued(queued) = slot else { continue };
+            let number = queued.number();
+            let decoder = match self.idle.pop() {
+                Some(decoder) => decoder,
+                None if self.decoders < self.threads => match template.fork() {
+                    Ok(decoder) => {
+                        self.decoders = self.decoders.saturating_add(1);
+                        decoder
+                    }
+                    Err(error) => {
+                        warn!(%error, "cannot fork a CRAM decoder; decoding on fewer threads");
+                        return;
+                    }
+                },
+                None => return,
+            };
+            let (reply, receiver) = mpsc::sync_channel(1);
+            let waiting = Pending::Waiting { container: number, reply: receiver };
+            // Always `Queued`, matched above.
+            if let Pending::Queued(container) = std::mem::replace(slot, waiting) {
+                let records = self.spare.pop().unwrap_or_default();
+                let give_back = self.give_back.clone();
+                let dropped = Arc::clone(&self.dropped);
+                self.pool.spawn(move || {
+                    decode_job(decoder, &container, records, &give_back, &reply, &dropped);
+                });
+            }
+        }
+    }
+
+    /// Keep `records` for reuse, up to what the containers in flight can need.
+    fn recycle(&mut self, records: Vec<RawBamRecord>) {
+        if self.spare.len() < self.threads.saturating_mul(CONTAINERS_PER_THREAD) {
+            self.spare.push(records);
         }
     }
 }
 
-/// Configures an [`AlignmentStream`]. The options apply to the BGZF formats.
+/// Decode a container on a pool thread, hand the decoder back, then send the
+/// records. A panic (there should be none) drops `reply` unanswered, which
+/// the stream reports as [`CramStreamError::WorkerLost`]; rayon would
+/// otherwise abort.
+fn decode_job(
+    mut decoder: CramContainerDecoder,
+    container: &CramContainer,
+    mut records: Vec<RawBamRecord>,
+    give_back: &mpsc::Sender<CramContainerDecoder>,
+    reply: &mpsc::SyncSender<Decoded>,
+    dropped: &AtomicBool,
+) {
+    if dropped.load(Ordering::Relaxed) {
+        // The stream is gone; nobody will read these records.
+        return;
+    }
+    let decoded = panic::catch_unwind(AssertUnwindSafe(move || {
+        let result = decoder.decode_reusing(container, &mut records, 0);
+        (decoder, Decoded { records, result })
+    }));
+    match decoded {
+        Ok((decoder, decoded)) => {
+            if give_back.send(decoder).is_err() || reply.send(decoded).is_err() {
+                trace!("the CRAM stream was dropped while a container decoded");
+            }
+        }
+        Err(_) => warn!(container = container.number(), "a CRAM decoding job panicked"),
+    }
+}
+
+/// Configures an [`AlignmentStream`]. The thread options apply to the BGZF
+/// formats and CRAM, the EOF-marker option to the BGZF formats.
 #[derive(Debug)]
-pub struct AlignmentStreamBuilder<R> {
+pub struct AlignmentStreamBuilder<R, K: RecordKind = Complete> {
     inner: R,
     workers: Workers,
     eof_marker: EofMarker,
     reference: Option<PathBuf>,
     name_prefix: Option<SmolStr>,
+    fields: RecordFields,
+    kind: PhantomData<K>,
 }
 
-impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
-    /// Inflate up to `n` BGZF batches at once on the reading thread's rayon
-    /// pool, else the global one (`r[bgzf.stream.current_pool]`).
+impl<R: Read + Send + 'static> AlignmentStreamBuilder<R, Complete> {
+    // r[impl unified.stream.fields]
+    /// Read only `fields`: the stream yields
+    /// [`PartialRecord`](crate::reader::PartialRecord)s, which refuse the
+    /// rest, and may skip decoding it (`r[unified.record_fields]`).
+    pub fn fields(self, fields: RecordFields) -> AlignmentStreamBuilder<R, Partial> {
+        let Self { inner, workers, eof_marker, reference, name_prefix, .. } = self;
+        AlignmentStreamBuilder {
+            inner,
+            workers,
+            eof_marker,
+            reference,
+            name_prefix,
+            fields,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<R: Read + Send + 'static, K: RecordKind> AlignmentStreamBuilder<R, K> {
+    /// Inflate up to `n` BGZF batches, or decode up to `n` CRAM containers,
+    /// at once on the reading thread's rayon pool, else the global one
+    /// (`r[bgzf.stream.current_pool]`, `r[unified.stream.cram_threads]`).
     #[must_use]
     pub fn threads(mut self, n: std::num::NonZeroU8) -> Self {
         self.workers = Workers::Threads { n, pool: None };
         self
     }
 
-    /// Inflate up to `n` BGZF batches at once on `pool`
-    /// (`r[bgzf.stream.shared_pool]`).
+    /// Inflate up to `n` BGZF batches, or decode up to `n` CRAM containers,
+    /// at once on `pool` (`r[bgzf.stream.shared_pool]`).
     #[must_use]
     pub fn threads_in(
         mut self,
@@ -159,7 +428,9 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
     }
 
     /// The FASTA (with its `.fai`, and `.gzi` if bgzipped) CRAM input is
-    /// decoded against. Other formats ignore it.
+    /// decoded against. Other formats ignore it, and CRAM read with fields
+    /// that leave out the sequence and `MD`/`NM` needs none
+    /// (`r[cram.stream.fields.reference_optional]`).
     #[must_use]
     pub fn reference(mut self, fasta: &Path) -> Self {
         self.reference = Some(fasta.to_path_buf());
@@ -188,13 +459,15 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
     /// # Errors
     /// Reading or decompression errors, a header error, or an unsupported
     /// format.
-    pub fn build(self) -> Result<AlignmentStream, AlignmentStreamError> {
+    pub fn build(self) -> Result<AlignmentStream<K>, AlignmentStreamError> {
         AlignmentStream::open(self)
     }
 }
 
-// r[impl unified.stream.records]
-/// Any BAM or SAM input, read front to back as [`RawBamRecord`]s.
+// r[impl unified.stream.records+2]
+/// Any BAM, SAM or CRAM input, read front to back as [`RawBamRecord`]s, or
+/// as [`PartialRecord`](crate::reader::PartialRecord)s when built with
+/// [`AlignmentStreamBuilder::fields`].
 ///
 /// ```no_run
 /// use seqair::bam::RawBamRecord;
@@ -212,12 +485,14 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
 /// }
 /// # Ok::<(), seqair::reader::AlignmentStreamError>(())
 /// ```
-pub struct AlignmentStream {
+pub struct AlignmentStream<K: RecordKind = Complete> {
     inner: Inner,
     format: StreamFormat,
+    fields: RecordFields,
+    kind: PhantomData<K>,
 }
 
-impl std::fmt::Debug for AlignmentStream {
+impl<K: RecordKind> std::fmt::Debug for AlignmentStream<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignmentStream").field("format", &self.format).finish_non_exhaustive()
     }
@@ -244,6 +519,8 @@ impl AlignmentStream {
             eof_marker: EofMarker::Required,
             reference: None,
             name_prefix: None,
+            fields: RecordFields::all(),
+            kind: PhantomData,
         }
     }
 
@@ -263,11 +540,18 @@ impl AlignmentStream {
             None => builder,
         })
     }
+}
 
-    // r[impl unified.stream.detect+2]
+impl<K: RecordKind> AlignmentStream<K> {
+    fn new(inner: Inner, format: StreamFormat, fields: RecordFields) -> Self {
+        Self { inner, format, fields, kind: PhantomData }
+    }
+
+    // r[impl unified.stream.detect+4]
     fn open<R: Read + Send + 'static>(
-        options: AlignmentStreamBuilder<R>,
+        options: AlignmentStreamBuilder<R, K>,
     ) -> Result<Self, AlignmentStreamError> {
+        let fields = options.fields;
         let mut inner: Box<dyn Read + Send> = Box::new(options.inner);
         let mut prefix = Vec::with_capacity(18);
         read_up_to(&mut inner, &mut prefix, 18)?;
@@ -282,13 +566,10 @@ impl AlignmentStream {
                 let magic = peek_magic(&mut bgzf)?;
                 if magic == BAM_MAGIC {
                     let reader = BamStreamReader::after_magic(bgzf)?;
-                    return Ok(Self {
-                        inner: Inner::Bam(Box::new(reader)),
-                        format: StreamFormat::Bam,
-                    });
+                    return Ok(Self::new(Inner::Bam(Box::new(reader)), StreamFormat::Bam, fields));
                 }
                 let text: Box<dyn BufRead + Send> = Box::new(Cursor::new(magic).chain(bgzf));
-                return Self::sam(text, StreamFormat::BgzfSam);
+                return Self::sam(text, StreamFormat::BgzfSam, fields);
             }
             let source = Cursor::new(prefix).chain(inner);
             let mut gzip = BufReader::new(flate2::read::MultiGzDecoder::new(source));
@@ -298,39 +579,47 @@ impl AlignmentStream {
                 return Err(AlignmentStreamError::GzipBamNotSupported);
             }
             let text: Box<dyn BufRead + Send> = Box::new(Cursor::new(magic).chain(gzip));
-            return Self::sam(text, StreamFormat::GzipSam);
+            return Self::sam(text, StreamFormat::GzipSam, fields);
         }
         if prefix.starts_with(b"CRAM") {
-            let fasta = options.reference.ok_or(AlignmentStreamError::CramNeedsReference)?;
+            // r[impl cram.stream.fields.reference_optional]
+            // Before the header: the decoder generates MD/NM by default.
+            if options.reference.is_none() && Plan::new(&fields, true).needs_reference() {
+                return Err(AlignmentStreamError::CramNeedsReference);
+            }
             let reader = CramStreamReader::new(CramInput(Cursor::new(prefix).chain(inner)))?;
-            let mut decoder = reader.decoder(&fasta)?;
+            let mut decoder = match options.reference {
+                Some(fasta) => reader.decoder(&fasta)?,
+                None => reader.decoder_without_reference(),
+            }
+            .with_fields(fields.clone());
             if let Some(prefix) = options.name_prefix {
                 decoder = decoder.name_prefix(prefix);
             }
-            return Ok(Self {
-                inner: Inner::Cram(Box::new(CramRecords {
-                    reader,
-                    decoder,
-                    pending: Vec::new(),
-                    next: 0,
-                })),
-                format: StreamFormat::Cram,
-            });
+            let records = CramRecords::new(reader, decoder, options.workers);
+            return Ok(Self::new(Inner::Cram(Box::new(records)), StreamFormat::Cram, fields));
         }
         if prefix.starts_with(&BAM_MAGIC) {
             return Err(AlignmentStreamError::UncompressedBamNotSupported);
         }
         let text: Box<dyn BufRead + Send> =
             Box::new(BufReader::new(Cursor::new(prefix).chain(inner)));
-        Self::sam(text, StreamFormat::Sam)
+        Self::sam(text, StreamFormat::Sam, fields)
     }
 
     fn sam(
         text: Box<dyn BufRead + Send>,
         format: StreamFormat,
+        fields: RecordFields,
     ) -> Result<Self, AlignmentStreamError> {
-        let reader = SamStreamReader::new(text)?;
-        Ok(Self { inner: Inner::Sam(Box::new(reader)), format })
+        let reader = SamStreamReader::new(text)?.with_aux_tags(fields.aux().clone());
+        Ok(Self::new(Inner::Sam(Box::new(reader)), format, fields))
+    }
+
+    /// The fields read: [`RecordFields::all`] unless built with
+    /// [`AlignmentStreamBuilder::fields`].
+    pub fn fields(&self) -> &RecordFields {
+        &self.fields
     }
 
     /// The format detected.
@@ -356,8 +645,11 @@ impl AlignmentStream {
     /// ([`CramStreamReader::next_container`]), but a container that fails to
     /// decode (a reference sequence the FASTA lacks, a corrupt slice) is one
     /// error for the whole container: none of its records are returned, and
-    /// the next call continues with the following container.
-    pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, AlignmentStreamError> {
+    /// the next call continues with the following container. Decoding on
+    /// threads changes none of this; a worker that panics is one
+    /// [`CramStreamError::WorkerLost`] for its container.
+    pub fn read_record(&mut self, record: &mut K::Record) -> Result<bool, AlignmentStreamError> {
+        let record = K::raw_mut(record, &self.fields);
         Ok(match &mut self.inner {
             Inner::Bam(r) => r.read_record(record)?,
             Inner::Sam(r) => r.read_record(record)?,
@@ -365,7 +657,7 @@ impl AlignmentStream {
         })
     }
 
-    // r[impl unified.stream.into_cram]
+    // r[impl unified.stream.into_cram+2]
     /// For CRAM, the reader and decoder this stream decodes with, set up as
     /// [`AlignmentStreamBuilder::build`] set them up (reference, name prefix),
     /// so the caller can decode containers on threads of its own
@@ -373,15 +665,17 @@ impl AlignmentStream {
     /// containers this stream has not read.
     ///
     /// # Errors
-    /// The stream itself, unchanged, if it is not CRAM or holds records of a
-    /// container it has not handed out yet.
-    pub fn into_cram(self) -> Result<(CramStreamReader<CramInput>, CramContainerDecoder), Self> {
+    /// The stream itself, unchanged, if it is not CRAM or holds records it
+    /// has not handed out yet: with threads, any container read ahead, so a
+    /// threaded stream hands over only before its first read or after its
+    /// end.
+    pub fn into_cram(self) -> Result<(CramStreamReader<CramInput>, CramContainerDecoder<K>), Self> {
         match self.inner {
-            Inner::Cram(cram) if cram.next >= cram.pending.len() => {
+            Inner::Cram(cram) if cram.is_drained() => {
                 let CramRecords { reader, decoder, .. } = *cram;
-                Ok((reader, decoder))
+                Ok((reader, decoder.retype()))
             }
-            inner => Err(Self { inner, format: self.format }),
+            inner => Err(Self::new(inner, self.format, self.fields)),
         }
     }
 
@@ -393,7 +687,7 @@ impl AlignmentStream {
     /// container's records (see [`Self::read_record`]). An error that ends the
     /// stream is the last item. For a reused buffer, loop over
     /// [`Self::read_record`] instead.
-    pub fn records(&mut self) -> Records<'_> {
+    pub fn records(&mut self) -> Records<'_, K> {
         Records { stream: self, done: false }
     }
 
@@ -402,7 +696,7 @@ impl AlignmentStream {
         match &self.inner {
             Inner::Bam(r) => r.is_failed(),
             Inner::Sam(r) => r.is_failed(),
-            Inner::Cram(r) => r.reader.is_failed(),
+            Inner::Cram(r) => r.is_failed(),
         }
     }
 }
@@ -410,20 +704,20 @@ impl AlignmentStream {
 /// Iterator over an [`AlignmentStream`]'s records. See
 /// [`AlignmentStream::records`].
 #[derive(Debug)]
-pub struct Records<'a> {
-    stream: &'a mut AlignmentStream,
+pub struct Records<'a, K: RecordKind = Complete> {
+    stream: &'a mut AlignmentStream<K>,
     /// `None` was returned; the readers do not promise to keep returning it.
     done: bool,
 }
 
-impl Iterator for Records<'_> {
-    type Item = Result<RawBamRecord, AlignmentStreamError>;
+impl<K: RecordKind> Iterator for Records<'_, K> {
+    type Item = Result<K::Record, AlignmentStreamError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done || self.stream.is_failed() {
             return None;
         }
-        let mut record = RawBamRecord::default();
+        let mut record = K::Record::default();
         match self.stream.read_record(&mut record) {
             Ok(true) => Some(Ok(record)),
             Ok(false) => {
@@ -435,7 +729,7 @@ impl Iterator for Records<'_> {
     }
 }
 
-impl std::iter::FusedIterator for Records<'_> {}
+impl<K: RecordKind> std::iter::FusedIterator for Records<'_, K> {}
 
 /// Append bytes from `inner` to `buf` until it holds `len` or the input ends.
 fn read_up_to(

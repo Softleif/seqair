@@ -1,4 +1,5 @@
 use super::ReaderError;
+use super::fields::{Complete, Partial, PartialRecord, RecordFields, RecordKind};
 use super::formats::{self, Format, FormatDetectionError};
 use super::readers::Readers;
 use super::resolve::Tid;
@@ -7,7 +8,10 @@ use crate::{
         BamHeader, IndexedBamReader, RawBamRecord, RawQuery, ReferenceStats,
         record_store::{CustomizeRecordStore, RecordStore},
     },
-    cram::reader::{CramRawQuery, IndexedCramReader},
+    cram::{
+        reader::{CramRawQuery, IndexedCramReader},
+        slice::Plan,
+    },
     fasta::IndexedFastaReader,
     sam::reader::{IndexedSamReader, SamRawQuery},
 };
@@ -15,6 +19,7 @@ use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Pos0};
 use std::{
     io::{Read, Seek},
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 use tracing::instrument;
@@ -278,16 +283,30 @@ impl IndexedReader<std::fs::File> {
     // r[impl unified.readers_backward_compat]
     #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, ReaderError> {
-        match formats::detect(path)? {
-            Format::Bam => {
-                let reader = IndexedBamReader::open(path)?;
-                Ok(IndexedReader::Bam(reader))
-            }
-            Format::Sam => {
-                let reader = IndexedSamReader::open(path)?;
-                Ok(IndexedReader::Sam(reader))
-            }
-            Format::Cram => Err(FormatDetectionError::CramRequiresFasta.into()),
+        Self::builder(path).open()
+    }
+
+    // r[impl unified.reader_builder]
+    /// Configure the reference, the index and the fields to read before
+    /// opening the alignment file at `path`.
+    ///
+    /// ```no_run
+    /// use seqair::reader::{AuxTags, IndexedReader, RecordFields};
+    ///
+    /// let fields = RecordFields::core().with_aux(AuxTags::only([*b"MC"]));
+    /// let mut reader = IndexedReader::builder("sample.cram")
+    ///     .reference("ref.fa")
+    ///     .fields(fields)
+    ///     .open()?;
+    /// # Ok::<(), seqair::reader::ReaderError>(())
+    /// ```
+    pub fn builder(path: impl Into<PathBuf>) -> IndexedReaderBuilder {
+        IndexedReaderBuilder {
+            path: path.into(),
+            reference: None,
+            index: None,
+            fields: RecordFields::all(),
+            kind: PhantomData,
         }
     }
 
@@ -320,20 +339,7 @@ impl IndexedReader<std::fs::File> {
     /// ```
     // r[impl unified.open_with_reference]
     pub fn open_with_reference(path: &Path, reference_path: &Path) -> Result<Self, ReaderError> {
-        match formats::detect(path)? {
-            Format::Bam => {
-                let reader = IndexedBamReader::open(path)?;
-                Ok(IndexedReader::Bam(reader))
-            }
-            Format::Sam => {
-                let reader = IndexedSamReader::open(path)?;
-                Ok(IndexedReader::Sam(reader))
-            }
-            Format::Cram => {
-                let reader = IndexedCramReader::open(path, reference_path)?;
-                Ok(IndexedReader::Cram(Box::new(reader)))
-            }
-        }
+        Self::builder(path).reference(reference_path).open()
     }
 
     // r[impl index.explicit]
@@ -346,15 +352,7 @@ impl IndexedReader<std::fs::File> {
         reference_path: &Path,
         index: &IndexPath,
     ) -> Result<Self, ReaderError> {
-        match formats::detect(path)? {
-            Format::Bam => Ok(IndexedReader::Bam(IndexedBamReader::open_with_index(path, index)?)),
-            Format::Sam => Ok(IndexedReader::Sam(IndexedSamReader::open_with_index(path, index)?)),
-            Format::Cram => Ok(IndexedReader::Cram(Box::new(IndexedCramReader::open_with_index(
-                path,
-                reference_path,
-                index,
-            )?))),
-        }
+        Self::builder(path).reference(reference_path).index(index.clone()).open()
     }
 
     /// Upgrade this record reader into a reference-aware [`Readers`] for pileup.
@@ -394,6 +392,230 @@ impl IndexedReader<std::fs::File> {
             Self::Sam(r) => Ok(Self::Sam(r.fork()?)),
             Self::Cram(r) => Ok(Self::Cram(Box::new(r.fork()?))),
         }
+    }
+}
+
+/// Opens an [`IndexedReader`], or a [`PartialIndexedReader`] once given
+/// [`Self::fields`]. See [`IndexedReader::builder`].
+#[derive(Debug)]
+#[must_use]
+pub struct IndexedReaderBuilder<K: RecordKind = Complete> {
+    path: PathBuf,
+    reference: Option<PathBuf>,
+    index: Option<IndexPath>,
+    fields: RecordFields,
+    kind: PhantomData<K>,
+}
+
+impl<K: RecordKind> IndexedReaderBuilder<K> {
+    /// The FASTA CRAM records are decoded against; BAM and SAM ignore it.
+    /// CRAM needs none when the fields leave out the sequence and `MD`/`NM`
+    /// (`r[cram.stream.fields.reference_optional]`), but a fetch of such a
+    /// reader, which reads the sequence, then fails.
+    pub fn reference(mut self, fasta: impl Into<PathBuf>) -> Self {
+        self.reference = Some(fasta.into());
+        self
+    }
+
+    /// The index to use instead of the one beside the file
+    /// (`r[index.explicit]`).
+    pub fn index(mut self, index: IndexPath) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    fn open_reader(self) -> Result<(IndexedReader, RecordFields), ReaderError> {
+        let Self { path, reference, index, fields, .. } = self;
+        let reader = match formats::detect(&path)? {
+            Format::Bam => {
+                let mut reader = match &index {
+                    Some(index) => IndexedBamReader::open_with_index(&path, index)?,
+                    None => IndexedBamReader::open(&path)?,
+                };
+                reader.set_aux_tags(fields.aux().clone());
+                IndexedReader::Bam(reader)
+            }
+            Format::Sam => {
+                let mut reader = match &index {
+                    Some(index) => IndexedSamReader::open_with_index(&path, index)?,
+                    None => IndexedSamReader::open(&path)?,
+                };
+                reader.set_aux_tags(fields.aux().clone());
+                IndexedReader::Sam(reader)
+            }
+            Format::Cram => {
+                // r[impl cram.stream.fields.reference_optional]
+                // `query_raw` generates MD/NM as htslib does, which reads the
+                // reference as the sequence does; a fetch reads the sequence
+                // whatever was asked, and fails without one.
+                if reference.is_none() && Plan::new(&fields, true).needs_reference() {
+                    return Err(FormatDetectionError::CramRequiresFasta.into());
+                }
+                let index = index.as_ref().map(AsRef::as_ref);
+                let reader = IndexedCramReader::open_inner(
+                    &path,
+                    reference.as_deref(),
+                    index,
+                    fields.clone(),
+                )?;
+                IndexedReader::Cram(Box::new(reader))
+            }
+        };
+        Ok((reader, fields))
+    }
+}
+
+impl IndexedReaderBuilder<Complete> {
+    // r[impl unified.record_fields.indexed]
+    /// Read only `fields`: [`PartialIndexedReader::query_raw`] yields
+    /// [`PartialRecord`]s, which refuse the rest (`r[unified.record_fields]`).
+    pub fn fields(self, fields: RecordFields) -> IndexedReaderBuilder<Partial> {
+        let Self { path, reference, index, .. } = self;
+        IndexedReaderBuilder { path, reference, index, fields, kind: PhantomData }
+    }
+
+    /// Detect the format and open the file and its index.
+    ///
+    /// # Errors
+    /// The file or its index cannot be opened, or it is CRAM and no
+    /// reference was given.
+    pub fn open(self) -> Result<IndexedReader, ReaderError> {
+        Ok(self.open_reader()?.0)
+    }
+}
+
+impl IndexedReaderBuilder<Partial> {
+    /// As [`IndexedReaderBuilder::open`]; CRAM needs no reference when the
+    /// fields leave out the sequence and `MD`/`NM`.
+    ///
+    /// # Errors
+    /// As [`IndexedReaderBuilder::open`], the reference refused only when
+    /// the fields need it.
+    pub fn open(self) -> Result<PartialIndexedReader, ReaderError> {
+        let (inner, fields) = self.open_reader()?;
+        Ok(PartialIndexedReader { inner, fields })
+    }
+}
+
+// r[impl unified.record_fields.indexed]
+/// An [`IndexedReader`] that reads only some fields: its region queries
+/// yield [`PartialRecord`]s. Fetches into a [`RecordStore`] keep the
+/// sequence and qualities, which the pileup needs, and only the requested
+/// tags, on every format.
+#[derive(Debug)]
+pub struct PartialIndexedReader<R: Read + Seek = std::fs::File> {
+    inner: IndexedReader<R>,
+    fields: RecordFields,
+}
+
+impl<R: Read + Seek> PartialIndexedReader<R> {
+    pub fn header(&self) -> &BamHeader {
+        self.inner.header()
+    }
+
+    /// The fields read.
+    pub fn fields(&self) -> &RecordFields {
+        &self.fields
+    }
+
+    /// As [`IndexedReader::estimate_region_bytes`].
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
+        self.inner.estimate_region_bytes(tid, span)
+    }
+
+    /// As [`IndexedReader::fetch_into`].
+    ///
+    /// # Errors
+    /// As [`IndexedReader::fetch_into`].
+    pub fn fetch_into(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+        store: &mut RecordStore,
+    ) -> Result<usize, ReaderError> {
+        self.inner.fetch_into(tid, span, store)
+    }
+
+    /// As [`IndexedReader::fetch_into_customized`].
+    ///
+    /// # Errors
+    /// As [`IndexedReader::fetch_into_customized`].
+    pub fn fetch_into_customized<E: CustomizeRecordStore>(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+        store: &mut RecordStore<E::Extra>,
+        customize: &mut E,
+    ) -> Result<FetchCounts, ReaderError> {
+        self.inner.fetch_into_customized(tid, span, store, customize)
+    }
+
+    /// As [`IndexedReader::query_raw`], each record a [`PartialRecord`].
+    ///
+    /// # Errors
+    /// As [`IndexedReader::query_raw`].
+    pub fn query_raw(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+    ) -> Result<PartialRegionQuery<'_, R>, ReaderError> {
+        Ok(PartialRegionQuery { inner: self.inner.query_raw(tid, span)?, fields: &self.fields })
+    }
+}
+
+impl PartialIndexedReader<std::fs::File> {
+    /// As [`IndexedReader::fork`]; the fork reads the same fields.
+    ///
+    /// # Errors
+    /// As [`IndexedReader::fork`].
+    pub fn fork(&self) -> Result<Self, ReaderError> {
+        Ok(Self { inner: self.inner.fork()?, fields: self.fields.clone() })
+    }
+
+    /// As [`IndexedReader::into_pileup`]: the pileup's fetches keep the
+    /// requested tags only.
+    pub fn into_pileup(self, fasta: IndexedFastaReader) -> Readers<()> {
+        Readers::from_parts(self.inner, fasta)
+    }
+
+    /// [`Self::into_pileup`] with a [`CustomizeRecordStore`].
+    pub fn into_pileup_customized<E: CustomizeRecordStore>(
+        self,
+        fasta: IndexedFastaReader,
+        customize: E,
+    ) -> Readers<E> {
+        Readers::from_parts_customized(self.inner, fasta, customize)
+    }
+}
+
+/// One region's records as [`PartialRecord`]s; see
+/// [`PartialIndexedReader::query_raw`].
+#[derive(Debug)]
+pub struct PartialRegionQuery<'r, R: Read + Seek = std::fs::File> {
+    inner: RawRegionQuery<'r, R>,
+    fields: &'r RecordFields,
+}
+
+impl<R: Read + Seek> PartialRegionQuery<'_, R> {
+    pub fn header(&self) -> &BamHeader {
+        self.inner.header()
+    }
+
+    /// As [`RawRegionQuery::read_record`].
+    ///
+    /// # Errors
+    /// As [`RawRegionQuery::read_record`].
+    pub fn read_record(&mut self, record: &mut PartialRecord) -> Result<bool, ReaderError> {
+        self.inner.read_record(record.raw_mut(self.fields))
+    }
+}
+
+impl<R: Read + Seek> Iterator for PartialRegionQuery<'_, R> {
+    type Item = Result<PartialRecord, ReaderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let fields = self.fields;
+        self.inner.next().map(|r| r.map(|raw| Partial::wrap(raw, fields)))
     }
 }
 

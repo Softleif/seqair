@@ -156,6 +156,11 @@ pub enum GetAuxError {
     /// The requested tag is not present in the auxiliary data.
     #[error("tag not found: {tag}")]
     TagNotFound { tag: AuxTag },
+    /// The record was read without this tag
+    /// ([`RecordFields`](crate::reader::RecordFields)), whether or not the
+    /// file has it.
+    #[error("tag {tag} was not requested")]
+    NotRequested { tag: AuxTag },
     /// Tag name must be exactly 2 bytes (BAM format requirement).
     #[error("invalid tag name length: expected 2, got {len} (bytes: {actual:02x?})")]
     InvalidTagName { len: usize, actual: Vec<u8> },
@@ -707,6 +712,25 @@ pub fn validate_aux(aux: &[u8]) -> Result<(), AuxLayoutError> {
         at = tag_end(aux, at)?;
     }
     Ok(())
+}
+
+/// Append the tags of `aux` that `tags` keeps to `out`, in order. A
+/// malformed tail is copied as it is, so reading it still reports it.
+pub(crate) fn retain_tags_into(aux: &[u8], tags: &crate::reader::AuxTags, out: &mut Vec<u8>) {
+    let mut at = 0usize;
+    while at < aux.len() {
+        let Ok(end) = tag_end(aux, at) else {
+            out.extend_from_slice(aux.get(at..).unwrap_or_default());
+            return;
+        };
+        let tag = aux.get(at..end).unwrap_or_default();
+        if let Some(&[a, b]) = tag.get(..2)
+            && tags.contains([a, b])
+        {
+            out.extend_from_slice(tag);
+        }
+        at = end;
+    }
 }
 
 /// The end of the well-formed tag starting at `at`.

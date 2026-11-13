@@ -92,15 +92,9 @@ impl<R: Read> BgzfStreamBuilder<R> {
     /// Configure the stream. Reads nothing yet, and starts no threads: a
     /// rayon pool starts its own (the global one on first use).
     pub fn build(self) -> BgzfStream<R> {
-        let (pool, depth) = match self.workers {
-            Workers::Inline => (None, 1),
-            Workers::Threads { n, pool } => {
-                let pool = pool.map_or(Pool::Current, Pool::Given);
-                (
-                    Some(pool),
-                    std::num::NonZeroUsize::from(n).get().saturating_mul(BATCHES_PER_THREAD),
-                )
-            }
+        let (pool, depth) = match self.workers.pool() {
+            None => (None, 1),
+            Some((pool, n)) => (Some(pool), n.saturating_mul(BATCHES_PER_THREAD)),
         };
         BgzfStream::with(self.inner, self.eof_marker, pool, depth)
     }
@@ -143,9 +137,23 @@ enum Pending {
     Waiting(mpsc::Receiver<Inflated>),
 }
 
-/// The rayon pool a stream inflates on.
+impl Workers {
+    /// The pool to run jobs on and the number of threads asked for; `None`
+    /// inline.
+    pub(crate) fn pool(self) -> Option<(Pool, usize)> {
+        match self {
+            Self::Inline => None,
+            Self::Threads { n, pool } => Some((
+                pool.map_or(Pool::Current, Pool::Given),
+                std::num::NonZeroUsize::from(n).get(),
+            )),
+        }
+    }
+}
+
+/// The rayon pool a stream inflates (or a CRAM stream decodes) on.
 #[derive(Debug, Clone)]
-enum Pool {
+pub(crate) enum Pool {
     /// One the stream owns or was given.
     Given(Arc<ThreadPool>),
     /// The reading thread's pool, else the global one, decided per batch.
@@ -161,10 +169,33 @@ impl Pool {
         }
     }
 
-    fn spawn(&self, job: impl FnOnce() + Send + 'static) {
+    pub(crate) fn spawn(&self, job: impl FnOnce() + Send + 'static) {
         match self {
             Self::Given(pool) => pool.spawn(job),
             Self::Current => rayon_core::spawn(job),
+        }
+    }
+
+    // r[impl bgzf.stream.shared_pool]
+    /// The reply to a job spawned here. On one of the pool's own threads,
+    /// blocking would take that thread from the pool the job waits for (with
+    /// one thread, forever), so it runs the pool's queued jobs instead until
+    /// the reply is in, as rayon's own `join` does. An error means the job
+    /// dropped its sender unanswered.
+    pub(crate) fn wait<T>(&self, reply: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
+        if !self.is_current() {
+            return reply.recv();
+        }
+        loop {
+            match reply.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvError),
+                Err(mpsc::TryRecvError::Empty) => match rayon_core::yield_now() {
+                    Some(rayon_core::Yield::Executed) => {}
+                    // Our job is on another thread: wait for it there.
+                    _ => return reply.recv(),
+                },
+            }
         }
     }
 }
@@ -433,30 +464,13 @@ impl<R: Read> BgzfStream<R> {
         }
     }
 
-    // r[impl bgzf.stream.shared_pool]
-    /// The reply for a batch. On one of the pool's own threads, blocking would
-    /// take that thread from the pool the batch waits for (with one thread,
-    /// forever), so it runs the pool's queued jobs instead until the reply is
-    /// in, as rayon's own `join` does.
+    /// The reply for a batch (`r[bgzf.stream.shared_pool]`).
     fn wait(&self, reply: &mpsc::Receiver<Inflated>) -> Result<Inflated, BgzfError> {
-        let lost = |_| BgzfError::DecompressionWorkerLost;
-        let on_pool = self.pool.as_ref().is_some_and(Pool::is_current);
-        if !on_pool {
-            return reply.recv().map_err(lost);
+        match &self.pool {
+            Some(pool) => pool.wait(reply),
+            None => reply.recv(),
         }
-        loop {
-            match reply.try_recv() {
-                Ok(inflated) => return Ok(inflated),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(BgzfError::DecompressionWorkerLost);
-                }
-                Err(mpsc::TryRecvError::Empty) => match rayon_core::yield_now() {
-                    Some(rayon_core::Yield::Executed) => {}
-                    // Our batch is on another thread: wait for it there.
-                    _ => return reply.recv().map_err(lost),
-                },
-            }
-        }
+        .map_err(|_| BgzfError::DecompressionWorkerLost)
     }
 
     // r[impl bgzf.eof+2]

@@ -84,3 +84,9 @@ Lines end at `\n`; one `\r` before it is removed, and a last line without `\n` i
 
 r[sam.stream.errors]
 A line that fails to encode MUST fail with `SamStreamError::InvalidRecord` carrying its 1-based line number (counting header lines) and the `SamRecordError`; the stream stays usable and the next read returns the next line. An I/O error from the underlying reader (including a truncated gzip or BGZF stream) and `LineTooLong` MUST fail the stream: every later read MUST return `SamStreamError::Poisoned`.
+
+r[sam.stream.fields.aux]
+`SamRecordEncoder::with_aux_tags(AuxTags)` and `SamStreamReader::with_aux_tags` MUST make the encoder compare each optional field's two-byte tag with the filter before parsing its value and skip an unrequested field entirely: it is not stored, and a fault in it (a bad type, value or subtype) does not fail the line. The line's required fields are validated as ever, as is a requested field. The default is `AuxTags::All`, which parses every field as before. The `CG` tag is parsed whatever the filter, as a long CIGAR lives in it (`r[sam.encode.cg_tag]`). `AlignmentStream` passes its `RecordFields` aux filter to the SAM reader (`r[unified.record_fields.indexed]`'s stream counterpart).
+
+r[sam.reader.fields.aux]
+`IndexedSamReader::fetch_into` and `fetch_into_customized` MUST apply the filter set by `set_aux_tags` the same way: unrequested optional fields are skipped unparsed and not stored. `query_raw` goes through `SamRecordEncoder` with its default filter and so keeps every tag.

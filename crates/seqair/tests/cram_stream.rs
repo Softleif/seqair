@@ -303,7 +303,7 @@ fn alignment_stream_reads_cram() {
     ));
 }
 
-// r[verify unified.stream.into_cram]
+// r[verify unified.stream.into_cram+2]
 /// `into_cram` hands over the reader and a decoder set up with the builder's
 /// reference and name prefix: decoding the containers it yields gives the
 /// records the stream would have read, also after the stream read some. A

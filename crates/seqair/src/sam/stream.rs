@@ -96,6 +96,13 @@ impl<R: BufRead> SamStreamReader<R> {
         Ok(Self { inner, header, encoder: SamRecordEncoder::new(), line, line_no, failed: false })
     }
 
+    /// Parse only the optional fields in `tags` (`r[sam.stream.fields.aux]`).
+    #[must_use]
+    pub fn with_aux_tags(mut self, tags: crate::reader::AuxTags) -> Self {
+        self.encoder = self.encoder.with_aux_tags(tags);
+        self
+    }
+
     /// The header read when the stream was opened.
     pub fn header(&self) -> &BamHeader {
         &self.header

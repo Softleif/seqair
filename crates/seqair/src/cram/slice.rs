@@ -12,7 +12,7 @@
 use core::range::Range;
 
 use super::{
-    block::{self, Block, ContentType},
+    block::{self, Block, ContentType, RawBlock},
     codec_scratch::CodecScratch,
     compression_header::CompressionHeader,
     container::RefSeqId,
@@ -26,7 +26,7 @@ use crate::bam::{
     record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use crate::reader::{FetchedRecord, Tid};
+use crate::reader::{AuxTags, FetchedRecord, RecordFields, Tid};
 use crate::sam::encode::{AlignmentFields, Qualities, Seq};
 use seqair_types::{BamFlags, IupacBase, MappingQuality, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
@@ -353,6 +353,42 @@ pub(crate) struct Synthesis<'a> {
     pub(crate) name_prefix: Option<&'a str>,
 }
 
+// r[impl cram.stream.fields]
+/// What a slice decode reads of each record, from the [`RecordFields`] asked
+/// for and whether `MD`/`NM` are generated.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Plan<'a> {
+    /// Rebuild SEQ, against the reference: asked for, or needed to generate
+    /// `MD`/`NM`.
+    seq: bool,
+    qual: bool,
+    aux: &'a AuxTags,
+    /// Generate `MD`/`NM` where a record stores none: on, and asked for.
+    md_nm: bool,
+}
+
+impl<'a> Plan<'a> {
+    // r[impl cram.stream.fields.md_nm]
+    pub(crate) fn new(fields: &'a RecordFields, md_nm: bool) -> Self {
+        let aux = fields.aux();
+        let md_nm = md_nm && (aux.contains(*b"MD") || aux.contains(*b"NM"));
+        Self { seq: fields.sequence() || md_nm, qual: fields.quality(), aux, md_nm }
+    }
+
+    // r[impl cram.stream.fields.reference_optional]
+    /// Whether the decode reads the reference: only to rebuild SEQ, which
+    /// generating `MD`/`NM` needs too.
+    pub(crate) fn needs_reference(self) -> bool {
+        self.seq
+    }
+
+    /// Whether a stored tag is decoded: asked for, or a `cF` that says
+    /// which of `MD`/`NM` not to generate.
+    fn keeps_tag(self, tag: [u8; 2]) -> bool {
+        self.aux.contains(tag) || (self.md_nm && tag == *b"cF")
+    }
+}
+
 /// Which of a slice's records a decode keeps; the others are read past
 /// without reconstructing their sequence (`r[cram.slice.multi_ref_skip]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,6 +460,9 @@ pub(crate) enum SliceReference<'a> {
     /// A window per reference, sorted by tid, for every reference a
     /// multi-reference slice keeps records of (`r[cram.stream.reference_window+2]`).
     PerTid(&'a [TidWindow]),
+    /// The reader was opened without a reference: only a slice that needs
+    /// none decodes (`r[cram.stream.fields.reference_optional]`).
+    None,
 }
 
 /// The reference a record is reconstructed against.
@@ -481,6 +520,7 @@ pub(crate) fn decode_slice(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    fields: &RecordFields,
     synthesis: Synthesis<'_>,
     scratch: &mut SliceScratch,
 ) -> Result<DecodedSlice, CramError> {
@@ -492,6 +532,7 @@ pub(crate) fn decode_slice(
         header,
         read_group_ids,
         keep,
+        Plan::new(fields, synthesis.md_nm),
         synthesis,
         scratch,
     )
@@ -513,6 +554,7 @@ pub(crate) fn decode_slice_indexed(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    fields: &RecordFields,
     synthesis: Synthesis<'_>,
     scratch: &mut SliceScratch,
 ) -> Result<(DecodedSlice, Vec<u32>), CramError> {
@@ -524,6 +566,7 @@ pub(crate) fn decode_slice_indexed(
         header,
         read_group_ids,
         keep,
+        Plan::new(fields, synthesis.md_nm),
         synthesis,
         scratch,
     )?;
@@ -548,10 +591,12 @@ pub(crate) fn multi_ref_spans(
         ch,
         container_data,
         slice_offset,
-        SliceReference::PerTid(&[]),
+        SliceReference::None,
         header,
         read_group_ids,
         Keep::Nothing,
+        // Every record is read past: no block of SEQ, QUAL or tags is read.
+        Plan::new(&RecordFields::core(), false),
         Synthesis::default(),
         scratch,
     )?;
@@ -583,6 +628,7 @@ fn decode_slice_records(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    plan: Plan<'_>,
     synthesis: Synthesis<'_>,
     scratch: &mut SliceScratch,
 ) -> Result<(DecodedSlice, Vec<SliceMateInfo>), CramError> {
@@ -600,20 +646,36 @@ fn decode_slice_records(
     let sh = SliceHeader::parse(&slice_header_block.data)?;
     let slice_ref = sh.ref_seq_id.resolve(header)?;
 
+    // r[impl cram.record.no_ref_fill+1]
+    // htslib has no reference for a slice of a file written without one
+    // (`RR` false) unless the slice embeds it: no MD/NM, and no bases
+    // copied, even from a FASTA at hand.
+    let no_ref = !ch.preservation.reference_required && sh.embedded_reference < 0;
+    let contig = || {
+        let tid = match (slice_ref, keep) {
+            (RefSeqId::Ref(t), _) | (_, Keep::Tid(t)) => Some(t),
+            _ => None,
+        };
+        SmolStr::from(tid.and_then(|t| header.target_name(t)).unwrap_or("?"))
+    };
     // r[impl cram.edge.missing_reference+2]
     let (reference_seq, ref_start_0based): (&[u8], i64) = match reference {
+        // r[impl cram.stream.fields.seq_off]
+        // No SEQ to rebuild: the reference is not read, nor its MD5 checked.
+        _ if !plan.needs_reference() => (&[], 0),
         SliceReference::Window { bases: Some(seq), start } => (seq, start),
         SliceReference::Window { bases: None, start } if sh.embedded_reference >= 0 => (&[], start),
         SliceReference::Window { bases: None, .. } => {
-            let tid = match (slice_ref, keep) {
-                (RefSeqId::Ref(t), _) | (_, Keep::Tid(t)) => Some(t),
-                _ => None,
-            };
-            return Err(CramError::MissingReference {
-                contig: tid.and_then(|t| header.target_name(t)).unwrap_or("?").into(),
-            });
+            return Err(CramError::MissingReference { contig: contig() });
         }
         SliceReference::PerTid(_) => (&[], 0),
+        // r[impl cram.stream.fields.reference_optional]
+        SliceReference::None
+            if no_ref || sh.embedded_reference >= 0 || slice_ref == RefSeqId::Unmapped =>
+        {
+            (&[], 0)
+        }
+        SliceReference::None => return Err(CramError::NoReference { contig: contig() }),
     };
 
     // r[impl cram.edge.empty_slice]
@@ -664,18 +726,26 @@ fn decode_slice_records(
     // Parse remaining blocks: core data + external data
     let mut core_block: Option<Block> = None;
     let mut external_blocks: SmallVec<(i32, ExternalCursor), 4> = SmallVec::new();
+    let blocks = block_plan(ch, plan);
+    let embedded_needed = plan.needs_reference() && sh.embedded_reference >= 0;
 
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or_else(|| CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block_with(remaining, &mut scratch.codec)?;
+        let (raw, consumed) = RawBlock::parse(remaining)?;
         pos = pos.wrapping_add(consumed);
 
-        match blk.content_type {
+        match raw.content_type {
             ContentType::CoreData => {
-                core_block = Some(blk);
+                core_block = Some(raw.decode(&mut scratch.codec)?);
             }
-            ContentType::ExternalData => {
+            // r[impl cram.stream.fields.dropped_blocks]
+            // A block only skipped series read is never decompressed.
+            ContentType::ExternalData
+                if blocks.needed.contains(&raw.content_id)
+                    || (embedded_needed && raw.content_id == sh.embedded_reference) =>
+            {
+                let blk = raw.decode(&mut scratch.codec)?;
                 external_blocks.push((blk.content_id, ExternalCursor::new(blk.data)));
             }
             _ => {
@@ -694,11 +764,6 @@ fn decode_slice_records(
     } else {
         Vec::new()
     };
-    // r[impl cram.record.no_ref_fill+1]
-    // htslib has no reference for a slice of a file written without one
-    // (`RR` false) unless the slice embeds it: no MD/NM, and no bases
-    // copied, even from a FASTA at hand.
-    let no_ref = !ch.preservation.reference_required && sh.embedded_reference < 0;
     let effective_ref: &[u8] = if sh.embedded_reference >= 0 {
         &embedded_ref_data
     } else if no_ref {
@@ -719,22 +784,24 @@ fn decode_slice_records(
     let record_reference = match reference {
         SliceReference::PerTid(windows) if !no_ref => RecordReference::PerTid(windows),
         SliceReference::PerTid(_) => RecordReference::One { bases: effective_ref.view(), start: 0 },
-        SliceReference::Window { .. } => {
+        SliceReference::Window { .. } | SliceReference::None => {
             RecordReference::One { bases: effective_ref.view(), start: effective_ref_start }
         }
     };
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
     // r[impl cram.stream.md_nm]
-    let decode_md = synthesis.md_nm && !no_ref;
+    let decode_md = plan.md_nm && !no_ref;
     let names = synthesis.name_prefix.map(|prefix| NameRecords {
         prefix,
         first_record: u64::try_from(sh.record_counter).unwrap_or(0),
     });
 
-    order_external_blocks(ch, &mut external_blocks);
+    // r[impl cram.perf.external_order]
+    external_blocks
+        .sort_by_key(|(id, _)| blocks.order.iter().position(|o| o == id).unwrap_or(usize::MAX));
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
-    let tag_lines = resolve_tag_lines(ch);
+    let tag_lines = resolve_tag_lines(ch, plan);
 
     // Decode records, collecting mate cross-reference info for TLEN reconstruction.
     let mut alignment_pos = i64::from(sh.alignment_start);
@@ -754,6 +821,7 @@ fn decode_slice_records(
             slice_ref,
             read_group_ids,
             keep,
+            plan,
             decode_md,
             no_ref,
             &mut out,
@@ -770,14 +838,45 @@ fn decode_slice_records(
     Ok((out, mate_infos))
 }
 
+/// The external blocks of a slice's decode: the ones it reads, and the
+/// order to keep them in.
+struct BlockPlan {
+    /// Content ids in the order a record first reads them.
+    order: SmallVec<i32, 64>,
+    /// Content ids of the blocks a kept series reads; the decode leaves
+    /// every other block out.
+    needed: SmallVec<i32, 64>,
+}
+
+/// How a decode uses a data series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Use {
+    Read,
+    /// A byte array whose lengths are read (they shape the CIGAR), and its
+    /// bytes skipped.
+    Length,
+    Skip,
+}
+
+impl Use {
+    fn read_if(read: bool) -> Self {
+        if read { Self::Read } else { Self::Skip }
+    }
+}
+
 // r[impl cram.perf.external_order]
-/// Orders a slice's external blocks by when a record first reads them —
-/// the data series in decode order, then the tags — so that
-/// [`DecodeContext`]'s linear content-id scan finds the per-record series
-/// in a step or two instead of wading through every tag's block.
-fn order_external_blocks(ch: &CompressionHeader, blocks: &mut [(i32, ExternalCursor)]) {
+// r[impl cram.stream.fields.dropped_blocks]
+/// Walk the data series and tags in the order a record first reads them —
+/// so that [`DecodeContext`]'s linear content-id scan finds the per-record
+/// series in a step or two instead of wading through every tag's block —
+/// and collect the blocks `plan` reads. A skipped series' block is needed
+/// only when a kept one shares it, and then the skipped values are read and
+/// dropped to keep the cursor in step; a skipped byte array's length block
+/// is needed when its bytes' block is, since stepping past them takes the
+/// length.
+fn block_plan(ch: &CompressionHeader, plan: Plan<'_>) -> BlockPlan {
     let ds = &ch.data_series;
-    let mut order: SmallVec<i32, 64> = SmallVec::new();
+    let mut walk = BlockWalk::default();
     for e in [
         &ds.bam_flags,
         &ds.cram_flags,
@@ -786,9 +885,9 @@ fn order_external_blocks(ch: &CompressionHeader, blocks: &mut [(i32, ExternalCur
         &ds.alignment_pos,
         &ds.read_group,
     ] {
-        int_ids(e, &mut order);
+        walk.int(e, Use::Read);
     }
-    byte_array_ids(&ds.read_name, &mut order);
+    walk.byte_array(&ds.read_name, Use::Read);
     for e in [
         &ds.mate_flags,
         &ds.next_segment_ref,
@@ -797,75 +896,118 @@ fn order_external_blocks(ch: &CompressionHeader, blocks: &mut [(i32, ExternalCur
         &ds.next_fragment,
         &ds.tag_line,
     ] {
-        int_ids(e, &mut order);
+        walk.int(e, Use::Read);
     }
-    for enc in ch.preservation.tag_dictionary.iter().flatten().filter_map(|entry| {
-        let key = (i32::from(entry.tag[0]) << 16)
-            | (i32::from(entry.tag[1]) << 8)
-            | i32::from(entry.bam_type);
-        ch.tag_encodings.get(&key)
+    for (entry, enc) in ch.preservation.tag_dictionary.iter().flatten().filter_map(|entry| {
+        ch.tag_encodings.get(&tag_key(entry.tag, entry.bam_type)).map(|enc| (entry, enc))
     }) {
-        byte_array_ids(enc, &mut order);
+        walk.byte_array(enc, Use::read_if(plan.keeps_tag(entry.tag)));
     }
-    int_ids(&ds.feature_count, &mut order);
-    byte_ids(&ds.feature_code, &mut order);
-    int_ids(&ds.feature_pos, &mut order);
+    walk.int(&ds.feature_count, Use::Read);
+    walk.byte(&ds.feature_code, Use::Read);
+    walk.int(&ds.feature_pos, Use::Read);
     for e in [&ds.mapping_quality, &ds.deletion_length, &ds.ref_skip, &ds.padding, &ds.hard_clip] {
-        int_ids(e, &mut order);
+        walk.int(e, Use::Read);
     }
-    for e in [&ds.base, &ds.quality_score, &ds.base_sub] {
-        byte_ids(e, &mut order);
+    walk.byte(&ds.base, Use::read_if(plan.seq));
+    walk.byte(&ds.quality_score, Use::read_if(plan.qual));
+    walk.byte(&ds.base_sub, Use::read_if(plan.seq));
+    // r[impl cram.stream.fields.seq_off]
+    let bases = if plan.seq { Use::Read } else { Use::Length };
+    for e in [&ds.insertion, &ds.soft_clip, &ds.bases_block] {
+        walk.byte_array(e, bases);
     }
-    for e in [&ds.insertion, &ds.soft_clip, &ds.bases_block, &ds.quality_block] {
-        byte_array_ids(e, &mut order);
-    }
-    blocks.sort_by_key(|(id, _)| order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+    walk.byte_array(&ds.quality_block, Use::read_if(plan.qual));
+    walk.finish()
 }
 
-fn int_ids(e: &IntEncoding, order: &mut SmallVec<i32, 64>) {
-    if let IntEncoding::External { content_id } = e {
-        order.push(*content_id);
-    }
+#[derive(Default)]
+struct BlockWalk {
+    order: SmallVec<i32, 64>,
+    needed: SmallVec<i32, 64>,
+    /// `(length block, bytes block)` of skipped length-prefixed arrays.
+    lengths: SmallVec<(i32, i32), 8>,
 }
 
-fn byte_ids(e: &ByteEncoding, order: &mut SmallVec<i32, 64>) {
-    if let ByteEncoding::External { content_id } = e {
-        order.push(*content_id);
-    }
-}
-
-fn byte_array_ids(e: &ByteArrayEncoding, order: &mut SmallVec<i32, 64>) {
-    match e {
-        ByteArrayEncoding::External { content_id }
-        | ByteArrayEncoding::ByteArrayStop { content_id, .. } => order.push(*content_id),
-        ByteArrayEncoding::ByteArrayLen { len_encoding, val_encoding } => {
-            int_ids(len_encoding, order);
-            byte_ids(val_encoding, order);
+impl BlockWalk {
+    fn id(&mut self, id: i32, read: bool) {
+        self.order.push(id);
+        if read && !self.needed.contains(&id) {
+            self.needed.push(id);
         }
-        ByteArrayEncoding::Null => {}
+    }
+
+    fn int(&mut self, e: &IntEncoding, u: Use) {
+        if let IntEncoding::External { content_id } = e {
+            self.id(*content_id, u != Use::Skip);
+        }
+    }
+
+    fn byte(&mut self, e: &ByteEncoding, u: Use) {
+        if let ByteEncoding::External { content_id } = e {
+            self.id(*content_id, u == Use::Read);
+        }
+    }
+
+    fn byte_array(&mut self, e: &ByteArrayEncoding, u: Use) {
+        match e {
+            ByteArrayEncoding::External { content_id } => self.id(*content_id, u != Use::Skip),
+            // The stop byte is the length: stepping past reads the block.
+            ByteArrayEncoding::ByteArrayStop { content_id, .. } => {
+                self.id(*content_id, u != Use::Skip);
+            }
+            ByteArrayEncoding::ByteArrayLen { len_encoding, val_encoding } => {
+                self.int(len_encoding, u);
+                self.byte(val_encoding, u);
+                if let (Use::Skip, IntEncoding::External { content_id: len }) = (u, &**len_encoding)
+                {
+                    match &**val_encoding {
+                        ByteEncoding::External { content_id: val } => {
+                            self.lengths.push((*len, *val));
+                        }
+                        ByteEncoding::Null => {}
+                        // Bytes in the core stream are read whatever: so is their length.
+                        ByteEncoding::Huffman(_) | ByteEncoding::Beta { .. } => self.id(*len, true),
+                    }
+                }
+            }
+            ByteArrayEncoding::Null => {}
+        }
+    }
+
+    fn finish(mut self) -> BlockPlan {
+        for (len, val) in std::mem::take(&mut self.lengths) {
+            if self.needed.contains(&val) {
+                self.id(len, true);
+            }
+        }
+        BlockPlan { order: self.order, needed: self.needed }
     }
 }
 
-/// A tag dictionary line with each tag's BAM head (`tag[0] tag[1] type`)
-/// and encoding, looked up once per slice; a tag without an encoding is
-/// left out, as the per-record lookup skipped it.
-type ResolvedTagLine<'a> = SmallVec<([u8; 3], &'a ByteArrayEncoding), 8>;
+/// A tag's key in the compression header's tag encoding map.
+fn tag_key(tag: [u8; 2], bam_type: u8) -> i32 {
+    (i32::from(tag[0]) << 16) | (i32::from(tag[1]) << 8) | i32::from(bam_type)
+}
+
+/// A tag dictionary line with each tag's BAM head (`tag[0] tag[1] type`),
+/// encoding, and whether the decode keeps it, looked up once per slice; a
+/// tag without an encoding is left out, as the per-record lookup skipped it.
+type ResolvedTagLine<'a> = SmallVec<([u8; 3], &'a ByteArrayEncoding, bool), 8>;
 
 // r[impl cram.perf.tag_lines_resolved]
 /// The compression header's tag lines with their encodings resolved, so a
 /// record's tags cost no hash lookups.
-fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
+fn resolve_tag_lines<'a>(ch: &'a CompressionHeader, plan: Plan<'_>) -> Vec<ResolvedTagLine<'a>> {
     ch.preservation
         .tag_dictionary
         .iter()
         .map(|line| {
             line.iter()
                 .filter_map(|entry| {
-                    let key = (i32::from(entry.tag[0]) << 16)
-                        | (i32::from(entry.tag[1]) << 8)
-                        | i32::from(entry.bam_type);
-                    let enc = ch.tag_encodings.get(&key)?;
-                    Some(([entry.tag[0], entry.tag[1], entry.bam_type], enc))
+                    let enc = ch.tag_encodings.get(&tag_key(entry.tag, entry.bam_type))?;
+                    let [t0, t1] = entry.tag;
+                    Some(([t0, t1, entry.bam_type], enc, plan.keeps_tag(entry.tag)))
                 })
                 .collect()
         })
@@ -892,6 +1034,7 @@ fn decode_record(
     slice_ref: RefSeqId<Tid>,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    plan: Plan<'_>,
     decode_md: bool,
     no_ref: bool,
     out: &mut DecodedSlice,
@@ -1058,18 +1201,23 @@ fn decode_record(
     let mut stored_md = false;
     let mut stored_nm = false;
     if let Some(line) = tag_lines.get(tag_line_idx) {
-        for (head, enc) in line {
+        for &(head, enc, kept) in line {
             stored_md |= head.starts_with(b"MD");
             stored_nm |= head.starts_with(b"NM");
+            // r[impl cram.stream.fields.dropped_blocks]
+            if !kept {
+                enc.skip(ctx)?;
+                continue;
+            }
             // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes.
             // Decoding the value directly into `aux_buf` skips the
             // per-tag `Vec<u8>` allocation that the old `decode` API
             // forced.
             let start = aux_buf.len();
-            aux_buf.extend_from_slice(head);
+            aux_buf.extend_from_slice(&head);
             enc.decode_into(ctx, aux_buf)?;
             // r[impl cram.record.cf_tag]
-            if *head == *b"cFC" && aux_buf.len() == start.wrapping_add(4) {
+            if head == *b"cFC" && aux_buf.len() == start.wrapping_add(4) {
                 let flags = aux_buf.last().copied().unwrap_or(0);
                 stored_md |= flags & 1 != 0;
                 stored_nm |= flags & 2 != 0;
@@ -1100,6 +1248,7 @@ fn decode_record(
             return Err(CramError::ReadGroupOutOfRange { read_group, count: read_group_ids.len() });
         }
     };
+    let rg_id = rg_id.filter(|_| plan.aux.contains(*b"RG"));
     let append_rg = |aux_buf: &mut Vec<u8>| {
         if let Some(rg_id) = rg_id {
             aux_buf.extend_from_slice(b"RGZ");
@@ -1134,19 +1283,38 @@ fn decode_record(
         //
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
+        // r[impl cram.stream.fields.md_nm]
         let generate = GenerateMdNm {
-            md: decode_md && !seq_unknown && !stored_md,
-            nm: decode_md && !seq_unknown && !stored_nm,
+            md: decode_md && !seq_unknown && !stored_md && plan.aux.contains(*b"MD"),
+            nm: decode_md && !seq_unknown && !stored_nm && plan.aux.contains(*b"NM"),
         };
+        if !foreign_tid && !quality_as_array {
+            qual_buf.resize(read_length, 0xFF);
+        }
+        // r[impl cram.stream.fields.qual_off]
+        let feature_quals =
+            (!foreign_tid && plan.qual && !quality_as_array).then_some(qual_buf.as_mut_slice());
         let (ref_consumed, matching_bases, indel_bases) = if foreign_tid {
-            let span =
-                scan_features_for_refspan(ch, ctx, feature_count, read_length, feature_byte_buf)?;
-            (span, 0, 0)
+            let r =
+                scan_features(ch, ctx, feature_count, read_length, None, None, feature_byte_buf)?;
+            (r.ref_consumed, 0, 0)
+        } else if !plan.seq {
+            // r[impl cram.stream.fields.seq_off]
+            // Only the CIGAR; SEQ is filler of the read's length.
+            let r = scan_features(
+                ch,
+                ctx,
+                feature_count,
+                read_length,
+                Some(cigar_ops_buf),
+                feature_quals,
+                feature_byte_buf,
+            )?;
+            pack_cigar(cigar_ops_buf, cigar_buf);
+            bases_buf.resize(read_length, IupacBase::N);
+            (r.ref_consumed, r.matching_bases, r.indel_bases)
         } else {
             let (record_ref, ref_start_0based) = reference.for_tid(record_ref_id);
-            if !quality_as_array {
-                qual_buf.resize(read_length, 0xFF);
-            }
             let result = decode_features_and_reconstruct(
                 ch,
                 ctx,
@@ -1163,7 +1331,7 @@ fn decode_record(
                     md_buf.start();
                     &mut *md_buf
                 }),
-                (!quality_as_array).then_some(qual_buf.as_mut_slice()),
+                feature_quals,
                 no_ref,
             )?;
             if generate.any() {
@@ -1188,11 +1356,13 @@ fn decode_record(
         // per-byte `decode(ctx)` loop that dominated profiles.
         if quality_as_array {
             if foreign_tid {
-                // Drain into a discardable scratch — qual_buf stays empty.
-                feature_byte_buf.clear();
-                ds.quality_score.decode_n_into(ctx, read_length, feature_byte_buf)?;
-            } else {
+                ds.quality_score.skip_n(ctx, read_length)?;
+            } else if plan.qual {
                 ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
+            } else {
+                // r[impl cram.stream.fields.qual_off]
+                ds.quality_score.skip_n(ctx, read_length)?;
+                qual_buf.resize(read_length, 0xFF);
             }
         }
 
@@ -1266,16 +1436,26 @@ fn decode_record(
 
     append_rg(aux_buf);
     // Unmapped read
-    for _ in 0..read_length {
-        let base_byte = ds.base.decode(ctx)?;
-        bases_buf.push(IupacBase::from_ascii(base_byte));
+    if plan.seq && !foreign_tid {
+        for _ in 0..read_length {
+            let base_byte = ds.base.decode(ctx)?;
+            bases_buf.push(IupacBase::from_ascii(base_byte));
+        }
+    } else {
+        // r[impl cram.stream.fields.seq_off]
+        ds.base.skip_n(ctx, read_length)?;
+        bases_buf.resize(read_length, IupacBase::N);
     }
 
     // Quality. See the mapped-read branch above for the bulk-decode
     // rationale.
-    if quality_as_array {
+    if quality_as_array && plan.qual && !foreign_tid {
         ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
     } else {
+        // r[impl cram.stream.fields.qual_off]
+        if quality_as_array {
+            ds.quality_score.skip_n(ctx, read_length)?;
+        }
         qual_buf.resize(read_length, 0xFF);
     }
     // r[impl cram.edge.seq_unknown+3]
@@ -1777,19 +1957,6 @@ fn decode_features_and_reconstruct(
 
     cigar_ops_buf.clear();
 
-    fn push_cigar_op(ops: &mut Vec<(u32, u8)>, len: u32, op: u8) {
-        if len == 0 {
-            return;
-        }
-        if let Some(last) = ops.last_mut()
-            && last.1 == op
-        {
-            last.0 = last.0.saturating_add(len);
-            return;
-        }
-        ops.push((len, op));
-    }
-
     /// Emit `n` matching bases copied from the reference, advancing both
     /// `read_pos` and `ref_pos`: the fill up to the next feature and the tail.
     #[expect(clippy::too_many_arguments, reason = "shared helper for ref-match emit")]
@@ -1947,10 +2114,7 @@ fn decode_features_and_reconstruct(
             // B — base + quality (BA + QS): treated as a 1-base match.
             b'B' => {
                 let base = ds.base.decode(ctx)?;
-                let qual = ds.quality_score.decode(ctx)?;
-                if let Some(quals) = feature_quals.as_deref_mut() {
-                    apply_feature_quals(quals, feat_target, &[qual]);
-                }
+                feature_qual(ch, ctx, feature_quals.as_deref_mut(), feat_target)?;
                 bases_buf.push(IupacBase::from_ascii(base));
                 if let Some(md) = md.as_deref_mut() {
                     md.read_base(reference_seq.get(ref_index).copied());
@@ -1985,20 +2149,17 @@ fn decode_features_and_reconstruct(
             // r[impl cram.feature.quality_only]
             // q — quality block: no base, moves nothing.
             b'q' => {
-                feature_byte_buf.clear();
-                ds.quality_block.decode_into(ctx, feature_byte_buf)?;
-                if let Some(quals) = feature_quals.as_deref_mut() {
-                    apply_feature_quals(quals, feat_target, feature_byte_buf);
-                }
+                feature_qual_block(
+                    ch,
+                    ctx,
+                    feature_quals.as_deref_mut(),
+                    feat_target,
+                    feature_byte_buf,
+                )?;
             }
             // r[impl cram.feature.quality_only]
             // Q — single quality score: same shape as q.
-            b'Q' => {
-                let qual = ds.quality_score.decode(ctx)?;
-                if let Some(quals) = feature_quals.as_deref_mut() {
-                    apply_feature_quals(quals, feat_target, &[qual]);
-                }
-            }
+            b'Q' => feature_qual(ch, ctx, feature_quals.as_deref_mut(), feat_target)?,
             _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
         }
     }
@@ -2020,12 +2181,7 @@ fn decode_features_and_reconstruct(
         );
     }
 
-    // Pack CIGAR ops into typed BAM-layout CigarOps
-    cigar_buf.clear();
-    cigar_buf.reserve(cigar_ops_buf.len());
-    for &(len, op) in cigar_ops_buf.iter() {
-        cigar_buf.push(CigarOp::from_bam_u32((len << 4) | u32::from(op)));
-    }
+    pack_cigar(cigar_ops_buf, cigar_buf);
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -2050,30 +2206,106 @@ fn apply_feature_quals(quals: &mut [u8], at: usize, values: &[u8]) {
     }
 }
 
-/// Scan the feature streams for a record without reconstructing its
-/// sequence or CIGAR. Used for records in multi-ref slices whose
-/// `record_ref_id` does not match the query `tid` — we still need to
-/// advance every per-record data series in lockstep with the other
-/// records in the slice, and we still need `ref_consumed` (for
-/// `SliceMateInfo.end_pos` used by `resolve_mates`), but we don't
-/// need bases/CIGAR/ref-lookup since the record will be discarded.
-///
-/// Stream consumption MUST match `decode_features_and_reconstruct`
-/// exactly — same `ds.X.decode*` calls in the same order for the same
-/// feature codes. Drift here desynchronises every subsequent record in
-/// the slice.
-/// `r[impl cram.slice.multi_ref_skip]`
-fn scan_features_for_refspan(
+/// Append a CIGAR op, merging it into the last one of the same kind; a
+/// zero-length op is dropped.
+fn push_cigar_op(ops: &mut Vec<(u32, u8)>, len: u32, op: u8) {
+    if len == 0 {
+        return;
+    }
+    if let Some(last) = ops.last_mut()
+        && last.1 == op
+    {
+        last.0 = last.0.saturating_add(len);
+        return;
+    }
+    ops.push((len, op));
+}
+
+/// Pack `(length, op)` pairs into BAM-layout [`CigarOp`]s.
+fn pack_cigar(ops: &[(u32, u8)], cigar_buf: &mut Vec<CigarOp>) {
+    cigar_buf.clear();
+    cigar_buf
+        .extend(ops.iter().map(|&(len, op)| CigarOp::from_bam_u32((len << 4) | u32::from(op))));
+}
+
+// r[impl cram.stream.fields.qual_off]
+/// A `B` or `Q` feature's quality: applied to `quals`, else stepped past.
+fn feature_qual(
+    ch: &CompressionHeader,
+    ctx: &mut DecodeContext<'_>,
+    quals: Option<&mut [u8]>,
+    at: usize,
+) -> Result<(), CramError> {
+    let qs = &ch.data_series.quality_score;
+    match quals {
+        Some(quals) => apply_feature_quals(quals, at, &[qs.decode(ctx)?]),
+        None => qs.skip_n(ctx, 1)?,
+    }
+    Ok(())
+}
+
+// r[impl cram.stream.fields.qual_off]
+/// A `q` feature's qualities: applied to `quals`, else stepped past.
+fn feature_qual_block(
+    ch: &CompressionHeader,
+    ctx: &mut DecodeContext<'_>,
+    quals: Option<&mut [u8]>,
+    at: usize,
+    buf: &mut Vec<u8>,
+) -> Result<(), CramError> {
+    let qq = &ch.data_series.quality_block;
+    match quals {
+        Some(quals) => {
+            buf.clear();
+            qq.decode_into(ctx, buf)?;
+            apply_feature_quals(quals, at, buf);
+        }
+        None => {
+            qq.skip(ctx)?;
+        }
+    }
+    Ok(())
+}
+
+// r[impl cram.slice.multi_ref_skip]
+// r[impl cram.stream.fields.seq_off]
+/// Read a record's features without rebuilding its sequence: its reference
+/// span, and with `cigar` its CIGAR ops, the same ones
+/// [`decode_features_and_reconstruct`] gives. For a record a decode leaves
+/// out (`cigar` and `feature_quals` `None`: the other references' records
+/// of a multi-reference slice) and for SEQ not asked for. Every series the
+/// features use is read or stepped past in the same order as the rebuild
+/// reads them, which keeps every later record in step; the bytes of `I`,
+/// `S` and `b` are stepped past, their lengths read.
+fn scan_features(
     ch: &CompressionHeader,
     ctx: &mut DecodeContext<'_>,
     feature_count: usize,
     read_length: usize,
+    mut cigar: Option<&mut Vec<(u32, u8)>>,
+    mut feature_quals: Option<&mut [u8]>,
     feature_byte_buf: &mut Vec<u8>,
-) -> Result<u32, CramError> {
+) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
     let mut read_pos = 0usize;
     let mut ref_pos = 0usize;
     let mut feature_read_pos = 0u32;
+    let mut matching_bases = 0u32;
+    let mut indel_bases = 0u32;
+    if let Some(ops) = cigar.as_deref_mut() {
+        ops.clear();
+    }
+    let mut op = |len: usize, code: u8| {
+        let len = u32::try_from(len).unwrap_or(u32::MAX);
+        match code {
+            0 => matching_bases = matching_bases.saturating_add(len),
+            1 | 2 => indel_bases = indel_bases.saturating_add(len),
+            _ => {}
+        }
+        if let Some(ops) = cigar.as_deref_mut() {
+            push_cigar_op(ops, len, code);
+        }
+    };
 
     for _ in 0..feature_count {
         let fc = ds.feature_code.decode(ctx)?;
@@ -2081,82 +2313,83 @@ fn scan_features_for_refspan(
         feature_read_pos = feature_read_pos.wrapping_add(fp);
         let feat_target = (feature_read_pos as usize).saturating_sub(1);
 
-        // Catch up read_pos and ref_pos to the feature anchor; matching
-        // bases advance both by 1 each.
+        // Catch up to the feature's anchor with matches.
         let fill = feat_target.min(read_length).saturating_sub(read_pos);
+        op(fill, 0);
         read_pos = read_pos.wrapping_add(fill);
         ref_pos = ref_pos.wrapping_add(fill);
 
         match fc {
             b'X' => {
-                let _bs = ds.base_sub.decode(ctx)?;
+                ds.base_sub.skip_n(ctx, 1)?;
+                op(1, 0);
                 read_pos = read_pos.wrapping_add(1);
                 ref_pos = ref_pos.wrapping_add(1);
             }
             b'I' => {
-                feature_byte_buf.clear();
-                ds.insertion.decode_into(ctx, feature_byte_buf)?;
-                read_pos = read_pos.wrapping_add(feature_byte_buf.len());
+                let len = ds.insertion.skip(ctx)?;
+                op(len, 1);
+                read_pos = read_pos.wrapping_add(len);
             }
             b'i' => {
-                let _base = ds.base.decode(ctx)?;
+                ds.base.skip_n(ctx, 1)?;
+                op(1, 1);
                 read_pos = read_pos.wrapping_add(1);
             }
             b'D' => {
                 let len = ds.deletion_length.decode(ctx)? as u32;
+                op(len as usize, 2);
                 ref_pos = ref_pos.wrapping_add(len as usize);
             }
             b'S' => {
-                feature_byte_buf.clear();
-                ds.soft_clip.decode_into(ctx, feature_byte_buf)?;
-                read_pos = read_pos.wrapping_add(feature_byte_buf.len());
+                let len = ds.soft_clip.skip(ctx)?;
+                op(len, 4);
+                read_pos = read_pos.wrapping_add(len);
             }
-            b'H' => {
-                let _len = ds.hard_clip.decode(ctx)?;
-            }
+            b'H' => op(ds.hard_clip.decode(ctx)? as u32 as usize, 5),
             b'N' => {
                 let len = ds.ref_skip.decode(ctx)? as u32;
+                op(len as usize, 3);
                 ref_pos = ref_pos.wrapping_add(len as usize);
             }
-            b'P' => {
-                let _len = ds.padding.decode(ctx)?;
-            }
+            b'P' => op(ds.padding.decode(ctx)? as u32 as usize, 6),
             b'B' => {
-                let _base = ds.base.decode(ctx)?;
-                let _qual = ds.quality_score.decode(ctx)?;
+                ds.base.skip_n(ctx, 1)?;
+                feature_qual(ch, ctx, feature_quals.as_deref_mut(), feat_target)?;
+                op(1, 0);
                 read_pos = read_pos.wrapping_add(1);
                 ref_pos = ref_pos.wrapping_add(1);
             }
             b'b' => {
-                feature_byte_buf.clear();
-                ds.bases_block.decode_into(ctx, feature_byte_buf)?;
-                let len = feature_byte_buf.len();
+                let len = ds.bases_block.skip(ctx)?;
+                op(len, 0);
                 read_pos = read_pos.wrapping_add(len);
                 ref_pos = ref_pos.wrapping_add(len);
             }
             // r[impl cram.feature.quality_only]
-            b'q' => {
-                feature_byte_buf.clear();
-                ds.quality_block.decode_into(ctx, feature_byte_buf)?;
-            }
+            b'q' => feature_qual_block(
+                ch,
+                ctx,
+                feature_quals.as_deref_mut(),
+                feat_target,
+                feature_byte_buf,
+            )?,
             // r[impl cram.feature.quality_only]
-            b'Q' => {
-                let _qual = ds.quality_score.decode(ctx)?;
-            }
+            b'Q' => feature_qual(ch, ctx, feature_quals.as_deref_mut(), feat_target)?,
             _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
         }
     }
 
-    // Tail: matching bases advance read_pos and ref_pos in lockstep up
-    // to read_length.
+    // Tail: matches up to the read length.
     let tail = read_length.saturating_sub(read_pos);
+    op(tail, 0);
     ref_pos = ref_pos.wrapping_add(tail);
 
     #[expect(
         clippy::cast_possible_truncation,
         reason = "ref_pos bounded by reference length which fits in u32; BAM positions are capped at 2^29"
     )]
-    Ok(ref_pos as u32)
+    Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
 }
 
 fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
@@ -2296,6 +2529,7 @@ mod tests {
             &bam_header,
             &[],
             Keep::Tid(tid(0)),
+            &RecordFields::all(),
             Synthesis::default(),
             &mut SliceScratch::default(),
         );

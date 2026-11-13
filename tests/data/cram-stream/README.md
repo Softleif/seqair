@@ -29,3 +29,13 @@ samtools view --no-PG -C --output-fmt-option no_ref=1 -o fidelity_no_ref.cram fi
 samtools view --no-PG -C -T fidelity.fa -o onlyu.cram onlyu.sam
 for f in *.cram; do samtools index "$f"; done
 ```
+
+## Shared blocks (htsjdk)
+
+`ce_5b_java.cram` and `auxf_values_java.cram` (with `auxf.fa`) are htslib's
+test files `test/ce#5b_java.cram` and `test/auxf#values_java.cram`, written by
+htsjdk (CRAM 3.0) and copied from htslib 1.25 (MIT/Expat). Unlike samtools,
+htsjdk puts several series in one block: `BA`, `IN` and `SC` share content id
+0, `NP` and `TS` share 3, and tags of one type share a block. They read
+against `../hts-specs/cram/ce.fa` and `auxf.fa`; they test that a decode that
+skips one of the series in a shared block still reads the others right.
