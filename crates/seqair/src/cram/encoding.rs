@@ -245,11 +245,24 @@ impl HuffmanTable {
 pub struct ExternalCursor {
     data: Vec<u8>,
     pos: usize,
+    /// The slice holds this block and the decode left it compressed
+    /// (`r[cram.stream.fields.dropped_blocks]`): a skip reads nothing, while a
+    /// skip of a block the slice does not hold is the error a read would be.
+    left_out: bool,
 }
 
 impl ExternalCursor {
     pub fn new(data: Vec<u8>) -> Self {
-        Self { data, pos: 0 }
+        Self { data, pos: 0, left_out: false }
+    }
+
+    /// A block the slice holds but the decode does not read.
+    pub(crate) fn left_out() -> Self {
+        Self { data: Vec::new(), pos: 0, left_out: true }
+    }
+
+    pub(crate) fn is_left_out(&self) -> bool {
+        self.left_out
     }
 
     pub fn read_byte(&mut self) -> Option<u8> {
@@ -353,9 +366,14 @@ impl<'a> DecodeContext<'a> {
     // r[impl cram.stream.fields.dropped_blocks]
     /// The cursor for `content_id`, `None` when the slice's decode left that
     /// block out, as it does every block only skipped series read.
+    ///
+    /// # Errors
+    /// [`CramError::ExternalBlockNotFound`] when the slice has no such block:
+    /// a corrupt file fails a skip as it fails a read.
     #[inline]
-    fn kept_external(&mut self, content_id: i32) -> Option<&mut ExternalCursor> {
-        self.external.iter_mut().find(|(id, _)| *id == content_id).map(|(_, cursor)| cursor)
+    fn kept_external(&mut self, content_id: i32) -> Result<Option<&mut ExternalCursor>, CramError> {
+        let cursor = self.get_external(content_id)?;
+        Ok((!cursor.left_out).then_some(cursor))
     }
 }
 
@@ -410,7 +428,7 @@ impl IntEncoding {
     /// or the core stream shared with a kept series stays in step.
     pub fn skip(&self, ctx: &mut DecodeContext<'_>) -> Result<Option<i32>, CramError> {
         match self {
-            Self::External { content_id } if ctx.kept_external(*content_id).is_none() => Ok(None),
+            Self::External { content_id } if ctx.kept_external(*content_id)?.is_none() => Ok(None),
             _ => self.decode(ctx).map(Some),
         }
     }
@@ -558,9 +576,13 @@ impl ByteEncoding {
     /// their external block out, else they are read and dropped, so a block
     /// or the core stream shared with a kept series stays in step.
     pub fn skip_n(&self, ctx: &mut DecodeContext<'_>, n: usize) -> Result<(), CramError> {
+        if n == 0 {
+            // A read of none looks no block up; nor does the skip.
+            return Ok(());
+        }
         match self {
             Self::Null => Ok(()),
-            Self::External { content_id } => match ctx.kept_external(*content_id) {
+            Self::External { content_id } => match ctx.kept_external(*content_id)? {
                 None => Ok(()),
                 Some(cursor) => cursor
                     .skip(n)
@@ -682,12 +704,14 @@ impl ByteArrayEncoding {
                 val_encoding.skip_n(ctx, len)?;
                 Ok(len)
             }
-            Self::ByteArrayStop { stop_byte, content_id } => match ctx.kept_external(*content_id) {
-                None => Ok(0),
-                Some(cursor) => cursor
-                    .skip_until(*stop_byte)
-                    .ok_or_else(|| CramError::Truncated { context: "byte array stop" }),
-            },
+            Self::ByteArrayStop { stop_byte, content_id } => {
+                match ctx.kept_external(*content_id)? {
+                    None => Ok(0),
+                    Some(cursor) => cursor
+                        .skip_until(*stop_byte)
+                        .ok_or_else(|| CramError::Truncated { context: "byte array stop" }),
+                }
+            }
         }
     }
 
@@ -988,6 +1012,46 @@ mod tests {
         let mut ctx = DecodeContext::new(&[], external);
         let enc = ByteEncoding::External { content_id: 3 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 0xAB);
+    }
+
+    // r[verify cram.stream.fields.dropped_blocks]
+    /// A skip reads nothing of a block the decode left out, steps through a
+    /// kept one, and fails on a block the slice does not hold, as a read does.
+    #[test]
+    fn a_skip_tells_a_left_out_block_from_a_missing_one() {
+        let ctx = || {
+            let mut external = SmallVec::new();
+            external.push((3, ExternalCursor::new(vec![0xAB, 0xCD])));
+            external.push((5, ExternalCursor::left_out()));
+            DecodeContext::new(&[], external)
+        };
+        let left_out = ByteEncoding::External { content_id: 5 };
+        let kept = ByteEncoding::External { content_id: 3 };
+        let missing = ByteEncoding::External { content_id: 9 };
+
+        let mut c = ctx();
+        left_out.skip_n(&mut c, 4).unwrap();
+        kept.skip_n(&mut c, 1).unwrap();
+        assert_eq!(kept.decode(&mut c).unwrap(), 0xCD);
+
+        let mut c = ctx();
+        assert!(matches!(
+            missing.skip_n(&mut c, 1),
+            Err(CramError::ExternalBlockNotFound { content_id: 9 })
+        ));
+        assert!(matches!(
+            missing.decode(&mut c),
+            Err(CramError::ExternalBlockNotFound { content_id: 9 })
+        ));
+        missing.skip_n(&mut c, 0).unwrap();
+
+        let mut c = ctx();
+        let ints = |id| IntEncoding::External { content_id: id };
+        assert_eq!(ints(5).skip(&mut c).unwrap(), None);
+        assert!(matches!(ints(9).skip(&mut c), Err(CramError::ExternalBlockNotFound { .. })));
+        let stop = |id| ByteArrayEncoding::ByteArrayStop { stop_byte: 0, content_id: id };
+        assert_eq!(stop(5).skip(&mut c).unwrap(), 0);
+        assert!(matches!(stop(9).skip(&mut c), Err(CramError::ExternalBlockNotFound { .. })));
     }
 
     // r[verify cram.encoding.byte_array_stop]
