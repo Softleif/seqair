@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **Reading only some fields.** `reader::RecordFields` names the per-record fields a consumer reads: read names, sequence, qualities and the aux tags (`AuxTags::All`, `None` or `Only` a list); flags, position, MAPQ, CIGAR, mate fields, TLEN and the read length are always read. `RecordFields::core()` plus `with_names`/`with_sequence`/`with_quality`/`with_aux`, or `all()` (every reader's default), and `union`. A reader given fields yields `PartialRecord`s, the same way on every format: `qname`, `seq` and `qual` are `Err(Skipped)` exactly when not requested, `aux().get` of an unrequested tag is the new `GetAuxError::NotRequested` (distinct from `TagNotFound`), and iteration sees only requested tags. `PartialRecord` has no payload accessor and no writer takes it, since skipped fields hold filler; `into_complete()` gives the `RawBamRecord` back for a record read with every field. A long CIGAR (`CG`) is resolved whatever tags were requested.
+- `AlignmentStreamBuilder::fields(f)` (the stream then yields `PartialRecord`s; `AlignmentStream::fields()` says what is read), `CramContainerDecoder::fields(f)` (with `record_fields()` and `needs_reference()`), and `IndexedReader::builder(path)` with `.reference`, `.index` and `.fields`, which opens a `PartialIndexedReader` whose `query_raw` yields `PartialRecord`s. Its fetches and pileup (`into_pileup`) read names, sequence and qualities whatever the fields say, and store only the requested tags, on BAM, SAM and CRAM alike.
+- **CRAM without a reference**, when the fields need none (no sequence, and no generated `MD`/`NM`): `CramStreamReader::decoder_without_reference()`, `AlignmentStream` built without `reference(..)`, `IndexedReader::builder(..)` without `.reference(..)`. A slice that does need one fails with the new `CramError::NoReference`. `PartialIndexedReader::into_pileup(fasta)` gives such a reader the pileup's FASTA.
+- **Threaded CRAM streams.** `AlignmentStream` built with `threads(n)`/`threads_in(n, pool)` decodes CRAM containers on a rayon pool, `n` forked decoders at a time and up to `2n` containers read ahead, records still in file order and errors as without threads; a panicking job is the new `CramStreamError::WorkerLost` for its container. With or without threads, a container is decoded into the record buffers earlier containers left.
+- `SamRecordEncoder::with_aux_tags` and `SamStreamReader::with_aux_tags` skip unrequested optional fields unparsed (a malformed one no longer fails the line); `CG` is always parsed.
+- `RawBamRecord::take_payload_into(&mut Vec<u8>)` moves the record's bytes out and leaves the record empty in the vector's old allocation: handing records on costs neither a copy nor an allocation.
+
 ### Changed
 
+- `IndexedReader::open`, `open_with_reference` and `open_with_reference_and_index` are shorthands for `IndexedReader::builder`; they open what they opened before.
+
+### Performance
+
+- CRAM decoding leaves compressed every external block only skipped series read: tags not requested, `QS`/`QQ` without qualities, `BA`/`BS` and the bytes of `IN`/`SC`/`BB` without the sequence (the CIGAR is still built from the read features, and no reference is fetched or MD5-checked), and `RN` without names. Skipped values in shared blocks or the core bit stream are read and dropped. A block the slice does not hold at all is still `ExternalBlockNotFound`, as reading it would be, so a corrupt file fails whatever fields are read. Multi-reference slices read past other references' records the same way.
 - Faster SAM parsing. SEQ and QUAL are validated with a branch-free scan LLVM vectorises (was an early-exit byte loop), and `seq::encode_seq_into` packs ASCII bases with one `fearless_simd` kernel instead of a byte-at-a-time table loop. `SamRecordEncoder` finds every TAB and any NUL of a line in one 64-byte-block SIMD pass (was a NUL scan, a field split and a scan per optional field), writes the optional fields straight into the record when the CIGAR is final (was a scratch buffer copied in after; a possible `CG` tag or a CIGAR over 65535 ops still takes that path), and tries the previous line's reference before hashing RNAME. Output and error order are unchanged; about 24% less wall time reading a 4.2M-record SAM through `AlignmentStream` into methylsieve.
+- `SamRecordEncoder` keeps separate last-reference caches for RNAME and RNEXT, so mates on another reference no longer evict RNAME's line after line.
+- `CramContainerDecoder` reserves room for a slice's records before filling them (at most 16 Ki at once).
+
+### Fixed
+
+- A `compile_fail` doctest on `RecordRef` (a store refill while a handle is out) failed for a missing argument to `push_raw`, not for the borrow it claims to reject. CI now runs doctests with `RUSTC_BOOTSTRAP=1`, under which rustdoc checks a `compile_fail,E0xxx` block's error code, and every `compile_fail` block names its code.
 
 ## v0.10.0 (2026-11-11)
 
