@@ -386,8 +386,12 @@ pub struct CramShared {
     /// re-scanning the header text.
     pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
-    /// `None` for a reader opened without a reference
-    /// (`r[cram.stream.fields.reference_optional]`).
+    /// The reference the reader was *opened* with: `None` for one opened
+    /// without (`r[cram.stream.fields.reference_optional]`), and still `None`
+    /// after [`PartialIndexedReader::into_pileup`](crate::reader::PartialIndexedReader::into_pileup)
+    /// gives it the pileup's FASTA, since forks share this. Nothing reads it,
+    /// and no public API hands out a `CramShared`; whether a reader can decode
+    /// sequence is the reader's own `fasta`.
     pub fasta_path: Option<PathBuf>,
     /// Decoded slices, shared by the reader and its forks.
     slice_cache: SliceCache,
