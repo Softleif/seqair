@@ -268,7 +268,16 @@ fn encode_ascii_at(level: Level, bases: &[u8], buf: &mut Vec<u8>) {
 )]
 fn encode_ascii_simd<S: Simd>(simd: S, bases: &[u8], out: &mut [u8]) {
     let n = S::u8s::LEN;
-    let rows = ENCODE_ROWS.map(|row| S::u8s::block_splat(u8x16::from_slice(simd, &row)));
+    // Spelled out, not `ENCODE_ROWS.map(..)`: a vector op in a closure is
+    // compiled for the baseline, a call per op on x86-64.
+    let [r0, r1, r2, r3, r4] = &ENCODE_ROWS;
+    let rows = [
+        S::u8s::block_splat(u8x16::from_slice(simd, r0)),
+        S::u8s::block_splat(u8x16::from_slice(simd, r1)),
+        S::u8s::block_splat(u8x16::from_slice(simd, r2)),
+        S::u8s::block_splat(u8x16::from_slice(simd, r3)),
+        S::u8s::block_splat(u8x16::from_slice(simd, r4)),
+    ];
     let (pairs, odd) = bases.as_chunks::<2>();
     let pairs = pairs.as_flattened();
     let (whole, last) = out.split_at_mut(pairs.len() / 2);
@@ -281,8 +290,9 @@ fn encode_ascii_simd<S: Simd>(simd: S, bases: &[u8], out: &mut [u8]) {
     let overlap = whole.len().checked_sub(n).filter(|_| !tail.is_empty());
     match overlap.and_then(|t| Some((pairs.get(2 * t..)?, whole.get_mut(t..)?))) {
         Some((b, o)) => encode_vector(simd, &rows, b, o),
+        // Shorter than one step: every pair is tail. (No tail at all: done.)
         None => {
-            for (o, &[hi, lo]) in whole.iter_mut().zip(pairs.as_chunks::<2>().0) {
+            for (o, &[hi, lo]) in whole.iter_mut().zip(tail.as_chunks::<2>().0) {
                 *o = (ENCODE_BASE[usize::from(hi)] << 4) | ENCODE_BASE[usize::from(lo)];
             }
         }
