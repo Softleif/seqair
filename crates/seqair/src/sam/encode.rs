@@ -180,6 +180,9 @@ pub struct SamRecordEncoder {
     tabs: Vec<usize>,
     /// The reference RNAME last resolved to.
     last_tid: Option<Tid>,
+    /// The reference RNEXT last resolved to: kept apart from RNAME's, so
+    /// mates on another reference do not evict it line after line.
+    last_mate_tid: Option<Tid>,
     /// The optional fields kept; the rest are skipped unparsed.
     tags: AuxTags,
 }
@@ -278,7 +281,7 @@ impl SamRecordEncoder {
         let mut mate_tid = match rnext {
             b"=" => tid,
             b"*" => None,
-            name => resolve(header, name, &mut self.last_tid).or_else(|| {
+            name => resolve(header, name, &mut self.last_mate_tid).or_else(|| {
                 warn_unknown_mate_reference(name);
                 None
             }),
