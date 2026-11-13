@@ -757,6 +757,10 @@ fn decode_slice_records(
                 let blk = raw.decode(&mut scratch.codec)?;
                 external_blocks.push((blk.content_id, ExternalCursor::new(blk.data)));
             }
+            // Kept as a marker, so a skip can tell it from a block the slice lacks.
+            ContentType::ExternalData => {
+                external_blocks.push((raw.content_id, ExternalCursor::left_out()));
+            }
             _ => {
                 // Ignore unexpected block types
             }
@@ -808,8 +812,10 @@ fn decode_slice_records(
     });
 
     // r[impl cram.perf.external_order]
-    external_blocks
-        .sort_by_key(|(id, _)| blocks.order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+    // Left-out blocks last: only skips of a shared-nothing series look for them.
+    external_blocks.sort_by_key(|(id, cursor)| {
+        (cursor.is_left_out(), blocks.order.iter().position(|o| o == id).unwrap_or(usize::MAX))
+    });
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
     let tag_lines = resolve_tag_lines(ch, plan);
 
