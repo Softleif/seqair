@@ -12,7 +12,7 @@ use crate::cram::{
     slice::Plan,
     stream::{CramContainer, CramContainerDecoder, CramStreamError, CramStreamReader},
 };
-use crate::reader::{Complete, Partial, RecordFields, RecordKind};
+use crate::reader::{Complete, Partial, RecordFields, RecordKind, TOKEN};
 use crate::sam::{SamStreamError, SamStreamReader};
 use seqair_types::SmolStr;
 use std::collections::VecDeque;
@@ -649,7 +649,7 @@ impl<K: RecordKind> AlignmentStream<K> {
     /// threads changes none of this; a worker that panics is one
     /// [`CramStreamError::WorkerLost`] for its container.
     pub fn read_record(&mut self, record: &mut K::Record) -> Result<bool, AlignmentStreamError> {
-        let record = K::raw_mut(record, &self.fields);
+        let record = K::raw_mut(record, &self.fields, TOKEN);
         Ok(match &mut self.inner {
             Inner::Bam(r) => r.read_record(record)?,
             Inner::Sam(r) => r.read_record(record)?,

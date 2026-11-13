@@ -399,7 +399,19 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::Complete {}
     impl Sealed for super::Partial {}
+
+    /// Proof that a call comes from inside seqair. Sealing [`RecordKind`]
+    /// stops other crates implementing it, not calling its methods (generic
+    /// code reaches them through the bound), so a method that must stay
+    /// internal takes one of these, which no other crate can name or make.
+    ///
+    /// [`RecordKind`]: super::RecordKind
+    #[derive(Debug, Clone, Copy)]
+    pub struct Token(pub(super) ());
 }
+
+/// The [`sealed::Token`] the crate's readers pass.
+pub(crate) const TOKEN: sealed::Token = sealed::Token(());
 
 /// What a reader yields: [`Complete`] records ([`RawBamRecord`]), or
 /// [`Partial`] ones ([`PartialRecord`]) once given [`RecordFields`].
@@ -409,8 +421,32 @@ pub trait RecordKind: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn wrap(raw: RawBamRecord, fields: &RecordFields) -> Self::Record;
 
+    /// The record to refill, marked as read with `fields`. Only seqair can
+    /// call it: outside, it would relabel a [`PartialRecord`] as complete,
+    /// and [`PartialRecord::into_complete`] would hand its filler to a writer
+    /// (`r[unified.partial_record.no_payload]`).
+    ///
+    /// The method is there to be named (this compiles); only a token cannot
+    /// be had, so the call below fails for that (`E0277`, `Token: Default`):
+    ///
+    /// ```
+    /// # use seqair::reader::{Partial, RecordFields, RecordKind};
+    /// let _method = <Partial as RecordKind>::raw_mut;
+    /// let _fields = RecordFields::all();
+    /// ```
+    ///
+    /// ```compile_fail,E0277
+    /// # use seqair::reader::{Partial, PartialRecord, RecordFields, RecordKind};
+    /// # fn f(record: &mut PartialRecord) {
+    /// let _ = <Partial as RecordKind>::raw_mut(record, &RecordFields::all(), Default::default());
+    /// # }
+    /// ```
     #[doc(hidden)]
-    fn raw_mut<'r>(record: &'r mut Self::Record, fields: &RecordFields) -> &'r mut RawBamRecord;
+    fn raw_mut<'r>(
+        record: &'r mut Self::Record,
+        fields: &RecordFields,
+        token: sealed::Token,
+    ) -> &'r mut RawBamRecord;
 }
 
 /// Readers yield [`RawBamRecord`]s with every field.
@@ -428,7 +464,11 @@ impl RecordKind for Complete {
         raw
     }
 
-    fn raw_mut<'r>(record: &'r mut RawBamRecord, _: &RecordFields) -> &'r mut RawBamRecord {
+    fn raw_mut<'r>(
+        record: &'r mut RawBamRecord,
+        _: &RecordFields,
+        _: sealed::Token,
+    ) -> &'r mut RawBamRecord {
         record
     }
 }
@@ -440,7 +480,11 @@ impl RecordKind for Partial {
         PartialRecord { raw, fields: fields.clone() }
     }
 
-    fn raw_mut<'r>(record: &'r mut PartialRecord, fields: &RecordFields) -> &'r mut RawBamRecord {
+    fn raw_mut<'r>(
+        record: &'r mut PartialRecord,
+        fields: &RecordFields,
+        _: sealed::Token,
+    ) -> &'r mut RawBamRecord {
         record.raw_mut(fields)
     }
 }
