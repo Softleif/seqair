@@ -362,6 +362,9 @@ pub(crate) struct Plan<'a> {
     /// `MD`/`NM`.
     seq: bool,
     qual: bool,
+    /// Read names: asked for. Off, the name block is not decompressed and a
+    /// record's name is left empty (`PartialRecord::qname` hides it).
+    names: bool,
     aux: &'a AuxTags,
     /// Generate `MD`/`NM` where a record stores none: on, and asked for.
     md_nm: bool,
@@ -372,7 +375,13 @@ impl<'a> Plan<'a> {
     pub(crate) fn new(fields: &'a RecordFields, md_nm: bool) -> Self {
         let aux = fields.aux();
         let md_nm = md_nm && (aux.contains(*b"MD") || aux.contains(*b"NM"));
-        Self { seq: fields.sequence() || md_nm, qual: fields.quality(), aux, md_nm }
+        Self {
+            seq: fields.sequence() || md_nm,
+            qual: fields.quality(),
+            names: fields.names(),
+            aux,
+            md_nm,
+        }
     }
 
     // r[impl cram.stream.fields.reference_optional]
@@ -792,7 +801,8 @@ fn decode_slice_records(
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
     // r[impl cram.stream.md_nm]
     let decode_md = plan.md_nm && !no_ref;
-    let names = synthesis.name_prefix.map(|prefix| NameRecords {
+    // Names off leave every name empty; synthesizing would fill them in.
+    let names = synthesis.name_prefix.filter(|_| plan.names).map(|prefix| NameRecords {
         prefix,
         first_record: u64::try_from(sh.record_counter).unwrap_or(0),
     });
@@ -887,7 +897,7 @@ fn block_plan(ch: &CompressionHeader, plan: Plan<'_>) -> BlockPlan {
     ] {
         walk.int(e, Use::Read);
     }
-    walk.byte_array(&ds.read_name, Use::Read);
+    walk.byte_array(&ds.read_name, Use::read_if(plan.names));
     for e in [
         &ds.mate_flags,
         &ds.next_segment_ref,
@@ -1014,6 +1024,22 @@ fn resolve_tag_lines<'a>(ch: &'a CompressionHeader, plan: Plan<'_>) -> Vec<Resol
         .collect()
 }
 
+// r[impl cram.stream.fields.dropped_blocks]
+/// Read a stored read name into `name_buf`, or with names off step past it
+/// (a no-op when its block was left out) and leave the name empty.
+fn read_or_skip_name(
+    ch: &CompressionHeader,
+    plan: Plan<'_>,
+    ctx: &mut DecodeContext<'_>,
+    name_buf: &mut Vec<u8>,
+) -> Result<(), CramError> {
+    if plan.names {
+        ch.data_series.read_name.decode_into(ctx, name_buf)
+    } else {
+        ch.data_series.read_name.skip(ctx).map(drop)
+    }
+}
+
 /// Decode a single CRAM record from the decode context into `out`, unless
 /// it belongs to another reference of a multi-reference slice.
 ///
@@ -1126,7 +1152,7 @@ fn decode_record(
     // `name_buf` to avoid a per-record `Vec<u8>` allocation.
     name_buf.clear();
     if ch.preservation.read_names_included {
-        ds.read_name.decode_into(ctx, name_buf)?;
+        read_or_skip_name(ch, plan, ctx, name_buf)?;
     }
 
     // r[impl cram.record.mate_detached]
@@ -1141,7 +1167,7 @@ fn decode_record(
         // A detached record's name is stored even when RN is false; it is
         // the record's own, as htslib reads it.
         if !ch.preservation.read_names_included {
-            ds.read_name.decode_into(ctx, name_buf)?;
+            read_or_skip_name(ch, plan, ctx, name_buf)?;
         }
         // r[impl cram.record.ref_ids]
         mate_fields.tid = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)

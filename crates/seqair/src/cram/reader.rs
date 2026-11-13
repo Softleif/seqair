@@ -1137,7 +1137,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // r[impl unified.record_fields.indexed]
         // The pileup reads the sequence and qualities whatever was asked;
         // only the tags are cut down.
-        let fields = self.shared.fields.clone().with_sequence().with_quality();
+        let fields = self.shared.fields.clone().with_names().with_sequence().with_quality();
         // r[impl cram.edge.coordinate_clamp]
         slice::decode_slice(
             &container.compression,

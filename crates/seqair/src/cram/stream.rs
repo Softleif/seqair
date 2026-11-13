@@ -755,6 +755,7 @@ pub(crate) mod tests {
     /// tags, read from every container's compression header.
     #[derive(Debug, Default)]
     pub(crate) struct SeriesBlocks {
+        pub(crate) names: Vec<i32>,
         pub(crate) qual: Vec<i32>,
         pub(crate) bases: Vec<i32>,
         pub(crate) tags: Vec<i32>,
@@ -772,6 +773,11 @@ pub(crate) mod tests {
             let mut out = Self::default();
             while let Some(container) = reader.next_container().unwrap() {
                 let ch = slices.compression_header(&container.data).unwrap();
+                if let ByteArrayEncoding::External { content_id }
+                | ByteArrayEncoding::ByteArrayStop { content_id, .. } = &ch.data_series.read_name
+                {
+                    out.names.push(*content_id);
+                }
                 byte(&ch.data_series.quality_score, &mut out.qual);
                 byte(&ch.data_series.base, &mut out.bases);
                 byte(&ch.data_series.base_sub, &mut out.bases);
@@ -840,6 +846,20 @@ pub(crate) mod tests {
             let (records, without) = decode(&cram, Some(&fasta), fields).unwrap();
             assert!(!records.is_empty());
             assert_eq!(hits(&without, &qual), 0, "{}: QS decompressed", cram.display());
+        }
+    }
+
+    // r[verify cram.stream.fields.dropped_blocks]
+    #[test]
+    fn names_off_never_decompress_the_name_block() {
+        for (cram, fasta) in fixtures() {
+            let names = SeriesBlocks::of(&cram).names;
+            let (_, all) = decode(&cram, Some(&fasta), RecordFields::all()).unwrap();
+            assert!(hits(&all, &names) > 0, "{}: RN is read at all", cram.display());
+            let fields = RecordFields::core().with_sequence().with_quality().with_aux(AuxTags::All);
+            let (records, without) = decode(&cram, Some(&fasta), fields).unwrap();
+            assert!(!records.is_empty());
+            assert_eq!(hits(&without, &names), 0, "{}: RN decompressed", cram.display());
         }
     }
 
