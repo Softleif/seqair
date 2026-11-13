@@ -100,10 +100,15 @@ jobs:
           report_paths: target/nextest/ci/junit.xml
           annotate_only: true
           detailed_summary: true
-      # nextest does not run doctests.
+      # nextest does not run doctests. RUSTC_BOOTSTRAP makes rustdoc check a
+      # `compile_fail,E0xxx` block's error code, which stable ignores: a block
+      # that fails for another reason (a renamed method, a wrong argument
+      # count) is then a failure, not a vacuous pass.
       - name: Doctests
         id: doctest
         continue-on-error: true
+        env:
+          RUSTC_BOOTSTRAP: "1"
         run: cargo test --locked --workspace --doc
       - name: Fuzz compiles
         id: fuzz

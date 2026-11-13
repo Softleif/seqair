@@ -177,14 +177,28 @@ pub enum Field {
 /// filler. [`Self::into_complete`] gives the [`RawBamRecord`] back for a
 /// record read with every field.
 ///
-/// ```compile_fail
+/// The rejections below (their error codes are checked where doctests run
+/// with `RUSTC_BOOTSTRAP=1`, as CI's do) use the names this one does, which
+/// compiles: a rename fails here rather than letting them pass for it.
+///
+/// ```
+/// # use seqair::{bam::{BamWriter, RawBamRecord}, reader::PartialRecord};
+/// # fn f<W: std::io::Write>(writer: &mut BamWriter<W>, record: PartialRecord) {
+/// if let Ok(complete) = record.into_complete() {
+///     let _: &[u8] = complete.as_payload();
+///     writer.write_raw(&complete).unwrap();
+/// }
+/// # }
+/// ```
+///
+/// ```compile_fail,E0308
 /// # use seqair::{bam::BamWriter, reader::PartialRecord};
 /// # fn f<W: std::io::Write>(writer: &mut BamWriter<W>, record: &PartialRecord) {
 /// writer.write_raw(record);
 /// # }
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// # fn f(record: &seqair::reader::PartialRecord) {
 /// let _ = record.as_payload();
 /// # }

@@ -83,8 +83,9 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 ///
 /// These are the guarantees the two separate types exist for, and the only way
 /// to test a compile error is to fail to compile. Note what that does and does
-/// not buy: rustdoc checks that the block *fails*, but it does not check the
-/// error code — `compile_fail,E0999` passes just as happily. So a block goes
+/// not buy: rustdoc checks that the block *fails*, but on a stable toolchain it
+/// does not check the error code — `compile_fail,E0999` passes just as
+/// happily (CI runs doctests with `RUSTC_BOOTSTRAP=1`, which checks it). So a block goes
 /// vacuous the moment its example stops compiling for some unrelated reason,
 /// a renamed constructor being the obvious one.
 ///

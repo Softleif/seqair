@@ -382,7 +382,7 @@ pub struct Samples;
 ///
 /// Out-of-order registration is a compile error:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use seqair::vcf::{VcfHeader, Number, ValueType};
 /// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
 ///

@@ -152,10 +152,10 @@ impl std::fmt::Display for RecordIdx {
 /// ```
 ///
 /// ```compile_fail,E0502
-/// # use seqair::bam::{RecordIdx, RecordStore};
-/// # fn demo(store: &mut RecordStore, raw: &[u8]) -> Option<()> {
+/// # use seqair::bam::{BamHeader, RecordIdx, RecordStore};
+/// # fn demo(store: &mut RecordStore, raw: &[u8], header: &BamHeader) -> Option<()> {
 /// let rec = store.record(RecordIdx::ZERO)?;
-/// store.push_raw(raw, &mut ()).ok()?;   // a refill would move the slabs
+/// store.push_raw(raw, header, &mut ()).ok()?;   // a refill would move the slabs
 /// let _ = rec.seq();
 /// # Some(())
 /// # }
