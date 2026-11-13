@@ -9,6 +9,8 @@
 //!
 //! `cargo run -p compair --release --example candidates`
 
+#![allow(clippy::print_stdout, reason = "example")]
+
 use compair::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace};
 
 const LEFT_FLANK: &str = "CCGTAATGCCTTTCCCTAAC";

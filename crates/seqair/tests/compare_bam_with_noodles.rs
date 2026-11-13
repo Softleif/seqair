@@ -238,10 +238,9 @@ fn bam_sequence_matches_noodles() {
 
             assert_eq!(r.seq_len as usize, n.seq_len, "{contig} rec {i}: seq_len");
 
-            for pos in 0..n.seq_len {
+            for (pos, &noodles_byte) in n.seq.iter().enumerate() {
                 let seqair_base =
                     store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
-                let noodles_byte = n.seq[pos];
                 // Both keep every IUPAC code.
                 assert_eq!(
                     seqair_base,

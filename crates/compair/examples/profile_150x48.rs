@@ -26,6 +26,7 @@
 //! through the strip kernel, through `align_reads`, and through `align_pairs`
 //! whatever the fill. A pass is 192 alignments, and the rounds are scaled so a
 //! run is as many alignments as the other arms' (`rounds * 8 / 192` passes).
+#![allow(clippy::arithmetic_side_effects, reason = "example")]
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
 
 #[path = "../benches/fixture.rs"]

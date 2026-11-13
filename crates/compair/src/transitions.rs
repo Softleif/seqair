@@ -216,7 +216,7 @@ impl Growth {
                     (t.match_to_match + t.match_to_insertion + above.match_to_deletion * carry)
                         .max(1.0);
                 total *= gamma;
-                if (row - 1) % WINDOW == 0 {
+                if row % WINDOW == 1 {
                     window = 1.0;
                 } else {
                     window *= gamma;

@@ -365,7 +365,10 @@ impl PcrIndelModel {
     /// equals the one `u` before it, together with the `u` bases it repeats.
     fn runs(&self, bases: &[Base], mut visit: impl FnMut(std::ops::Range<usize>, usize)) {
         for unit in 1..=self.max_unit {
-            let repeats_back = |k: usize| k.checked_sub(unit).and_then(|j| bases.get(j));
+            let repeats_back = |k: usize| {
+                let j = k.checked_sub(unit)?;
+                bases.get(j)
+            };
             let mut i = unit;
             while i < bases.len() {
                 if bases.get(i) != repeats_back(i) {

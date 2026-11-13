@@ -12,8 +12,10 @@
 //!   have of that direction holding.
 //! - what the band actually costs and saves on realistic inputs, reported
 //!   rather than asserted, because the number is the output.
-//! - on x86_64, agreement with gkl -- an independent Rust port of the kernel
+//! - on `x86_64`, agreement with gkl -- an independent Rust port of the kernel
 //!   GATK calls through JNI, on exactly the bytes gkl's own harness would get.
+
+#![allow(clippy::print_stdout, reason = "test code")]
 
 #[cfg(target_arch = "x86_64")]
 use compair::align_full_gatk;

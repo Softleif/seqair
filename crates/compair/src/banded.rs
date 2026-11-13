@@ -1140,6 +1140,7 @@ impl<'a> Sink<'a> {
     clippy::cast_possible_wrap,
     reason = "the f32 narrowing is the point of this kernel, and every index cast is clamped above"
 )]
+#[allow(clippy::indexing_slicing, reason = "`lo_history` is a `[_; RING]` indexed `% RING`")]
 #[inline(always)]
 pub(crate) fn banded_kernel<L: Lane>(
     token: L::Token,

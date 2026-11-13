@@ -14,6 +14,8 @@
 //! own band, against three haplotypes, 192 alignments per iteration. The
 //! per-alignment cost is the reported time over 192.
 
+#![allow(clippy::arithmetic_side_effects, reason = "benches")]
+
 mod fixture;
 
 use compair::{

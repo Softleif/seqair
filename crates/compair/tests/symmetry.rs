@@ -10,6 +10,8 @@
 //! it by up to `log10(1 + match_to_insertion / (eps / 3))` on any read whose
 //! last base disagrees with the haplotype.
 
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 

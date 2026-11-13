@@ -8,6 +8,13 @@
 //! `align_reads` route a short group through the strip kernel without changing
 //! an answer, so the dispatch is tested at every group size too.
 
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+
 #[path = "../src/pinned.rs"]
 mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]

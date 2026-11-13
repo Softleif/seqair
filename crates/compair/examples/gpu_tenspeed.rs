@@ -9,6 +9,14 @@
 //! blocked) and `@N` (workgroup size), e.g. `unrolled+blocked@32`. With none,
 //! the default kernel. Every variant prints its parity line and its timings.
 
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::cast_possible_wrap,
+    clippy::print_stdout,
+    reason = "example"
+)]
+
 use compair::{
     Band, Haplotype, Log10Likelihood, StandardEmission, Workspace,
     gpu::{Contraction, GpuAligner, GpuContext, GpuPairs, KernelOptions, Style, Wait},

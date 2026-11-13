@@ -128,7 +128,7 @@
 //! (`D[0][j] = 1 / |H|`, the match and insertion rows zero) and sums the last
 //! row's match *and* insertion cells. So a read's first base must be matched,
 //! but its last base may be an insertion. GATK's own write-up of the model
-//! (David Benjamin, *Pair HMM probabilistic realignment in HaplotypeCaller and
+//! (David Benjamin, *Pair HMM probabilistic realignment in `HaplotypeCaller` and
 //! Mutect*, `docs/pair_hmm.pdf` in the GATK repository, footnote 4) notes that
 //! an alignment cannot start with an insertion though it may end with one,
 //! and that "this limitation is unnecessary and could be fixed".
@@ -207,6 +207,12 @@
 //! mismapping rate and clips low-quality read tails, and its recurrence is
 //! reproduced bit for bit by the Java code, Intel's vectorised native kernels,
 //! FPGA and GPU ports, all of which a change would have to follow.
+
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "numeric kernels: float and `Lane` arithmetic, and index arithmetic bounded by slice \
+              lengths; nothing here parses untrusted input"
+)]
 
 mod banded;
 mod batch;

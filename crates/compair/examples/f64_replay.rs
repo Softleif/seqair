@@ -11,6 +11,7 @@
 //! the haplotype's site weights. The second argument is `all` (every pair)
 //! or `below` (only the pairs whose strip score is below `trusted`'s
 //! floor, the rescue's real workload), the third the number of rounds.
+#![allow(clippy::arithmetic_side_effects, reason = "example")]
 #![allow(
     clippy::print_stdout,
     clippy::indexing_slicing,

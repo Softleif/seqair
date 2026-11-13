@@ -1,4 +1,4 @@
-//! compair against gkl on the "10s" benchmark, which is the only PairHMM
+//! compair against gkl on the "10s" benchmark, which is the only `PairHMM`
 //! benchmark that is both small enough to ship and published enough to compare
 //! against.
 //!
@@ -53,6 +53,8 @@
 //!
 //! Do not read numbers off a laptop, and do not read the gkl arms off Apple
 //! Silicon at all: they compile out. This wants the Linux box.
+
+#![allow(clippy::print_stdout, reason = "benches")]
 
 use compair::{
     Band, Haplotype, Log10Likelihood, Pair, Read, StandardEmission, Workspace, align_full,

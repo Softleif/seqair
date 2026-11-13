@@ -9,6 +9,8 @@
 //!
 //! `cargo run -p compair --release --example bandsweep`
 
+#![allow(clippy::arithmetic_side_effects, clippy::print_stdout, reason = "example")]
+
 use compair::{Band, StandardEmission, align_full, align_strips_simd};
 
 #[path = "../tests/support/tenspeed.rs"]

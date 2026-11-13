@@ -7,6 +7,8 @@
 //!
 //! `cargo run -p compair --release --features gpu --example gpu`
 
+#![allow(clippy::arithmetic_side_effects, clippy::print_stdout, reason = "example")]
+
 use std::time::Instant;
 
 use compair::{

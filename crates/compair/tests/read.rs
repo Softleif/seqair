@@ -1,5 +1,7 @@
 //! What `Read` and `Haplotype` accept, and what they say when they do not.
 
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+
 use compair::{Base, BaseQuality, Error, Haplotype, Read, Strand};
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -137,7 +139,7 @@ fn a_read_precomputes_what_its_qualities_say(tc: TestCase) {
     assert!(read.observation(n).is_none());
 }
 
-/// An allele applied after the anchor base, with the CpGs of the new sequence:
+/// An allele applied after the anchor base, with the `CpGs` of the new sequence:
 /// inserting `G` after a `C` makes one, deleting the base between `C` and `G`
 /// makes one, and a deletion running off the end is no haplotype.
 #[test]

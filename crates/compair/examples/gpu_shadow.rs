@@ -9,6 +9,7 @@
 //! qualities, bands of width 48 centred near where each read was cut.
 //!
 //! `cargo run -p compair --release --features gpu --example gpu_shadow -- [windows per launch...]`
+#![allow(clippy::arithmetic_side_effects, reason = "example")]
 #![allow(clippy::print_stdout, reason = "this example exists to print a table")]
 
 use std::time::{Duration, Instant};

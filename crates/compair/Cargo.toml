@@ -88,3 +88,6 @@ required-features = ["gpu"]
 [[example]]
 name = "gpu"
 required-features = ["gpu"]
+
+[lints]
+workspace = true

@@ -188,10 +188,10 @@ fn sam_record_fields_match_htslib() {
             );
 
             // Sequence: every code, as htslib's `seq_nt16_str` spells it
-            for pos in 0..h.seq_len {
+            for (pos, &htslib_base) in h.seq.iter().enumerate() {
                 let base =
                     store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
-                assert_eq!(base.to_ascii(), h.seq[pos], "{contig} rec {i} pos {pos}: base");
+                assert_eq!(base.to_ascii(), htslib_base, "{contig} rec {i} pos {pos}: base");
             }
         }
     }

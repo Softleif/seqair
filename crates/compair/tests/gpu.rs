@@ -14,6 +14,7 @@
 //!   and within `1e-4` in log10 of the strip kernel, like the GATK vectors.
 //!   These skip, loudly, where wgpu finds no adapter.
 
+#![allow(clippy::arithmetic_side_effects, clippy::unwrap_in_result, reason = "test code")]
 #![cfg(feature = "gpu")]
 
 #[path = "../src/pinned.rs"]

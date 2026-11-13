@@ -11,6 +11,7 @@
 //! the number of rounds over the whole dataset. Both score the same 3,550
 //! pairs with `StandardEmission` through the default band and print the same
 //! checksum: each score is added on its own, in the same order.
+#![allow(clippy::arithmetic_side_effects, reason = "example")]
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
 
 #[path = "../tests/support/tenspeed.rs"]

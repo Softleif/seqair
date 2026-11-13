@@ -379,7 +379,7 @@ struct Timing {
 
 impl Timing {
     fn new(device: &wgpu::Device) -> Self {
-        let size = 2 * size_of::<u64>() as u64;
+        let size = size_of::<[u64; 2]>() as u64;
         Self {
             queries: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("compair::gpu::timing"),
@@ -470,7 +470,10 @@ impl GpuAligner {
                 .filter(|(_, pending)| pending.class.is_some())
                 .filter_map(|(index, _)| u32::try_from(index).ok()),
         );
-        self.order.sort_by_key(|&index| pairs.pairs.get(index as usize).and_then(|p| p.class));
+        self.order.sort_by_key(|&index| {
+            let p = pairs.pairs.get(index as usize)?;
+            p.class
+        });
         self.records.clear();
         self.records.extend(
             self.order
@@ -536,7 +539,12 @@ impl GpuAligner {
             usize::try_from(alignment).map_err(|_| GpuError::TooLarge { what: "params" })?;
 
         self.params.clear();
-        self.params.resize(self.dispatches.len() * stride, 0);
+        let params_len = self
+            .dispatches
+            .len()
+            .checked_mul(stride)
+            .ok_or(GpuError::TooLarge { what: "params" })?;
+        self.params.resize(params_len, 0);
         for (slot, &(_, first, count)) in self.dispatches.iter().enumerate() {
             let params = Params { first, count, zero: 0, pad: 0 };
             if let Some(target) =
@@ -676,7 +684,7 @@ impl GpuAligner {
                 0,
                 &timing.readback,
                 0,
-                2 * size_of::<u64>() as u64,
+                size_of::<[u64; 2]>() as u64,
             );
         }
         Ok(queue.submit(Some(encoder.finish())))
@@ -714,7 +722,7 @@ fn grow<'a>(
             // Half again as much, so a caller whose launches creep upwards
             // does not reallocate every time -- but never past what the
             // device allows, which `size` itself was checked against.
-            let limit = device.limits().max_buffer_size / 4 * 4;
+            let limit = device.limits().max_buffer_size & !3;
             let capacity = size.saturating_add(size / 2).next_multiple_of(4).min(limit).max(size);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),

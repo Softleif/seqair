@@ -205,10 +205,9 @@ fn assert_bam_parity(sam_name: &str) {
 
             // Sequence: both keep every IUPAC code
             assert_eq!(r.seq_len as usize, n.seq_len, "{ctx}: seq_len");
-            for pos in 0..n.seq_len {
+            for (pos, &noodles_base) in n.seq.iter().enumerate() {
                 let seqair_base =
                     store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
-                let noodles_base = n.seq[pos];
                 assert_eq!(
                     seqair_base,
                     IupacBase::from_ascii(noodles_base),

@@ -4,6 +4,7 @@
 //! And a shadow-scoring locus, the shape a variant caller scores many reads
 //! against a few haplotypes in.
 
+#![allow(clippy::arithmetic_side_effects, reason = "benches")]
 #![allow(dead_code, reason = "each consumer uses a different part of this")]
 
 use compair::{Band, Base, BaseQuality, Haplotype, Probability, Read, Strand};

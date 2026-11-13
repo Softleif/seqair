@@ -1,5 +1,7 @@
 //! `Workspace::candidates` against the per-pair path it caches setup for.
 
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+
 #[path = "../src/pinned.rs"]
 mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]

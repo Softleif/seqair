@@ -11,6 +11,8 @@
 //!
 //! `cargo run -p compair --release --features gpu --example gpu_flush [pairs]`
 
+#![allow(clippy::arithmetic_side_effects, clippy::print_stdout, reason = "example")]
+
 #[allow(dead_code, reason = "the example uses two of the generators")]
 #[path = "../tests/support/mod.rs"]
 mod support;

@@ -1,3 +1,5 @@
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, reason = "test code")]
+
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 

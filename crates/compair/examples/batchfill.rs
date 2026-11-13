@@ -13,6 +13,8 @@
 //!
 //! `cargo run -p compair --release --example batchfill`
 
+#![allow(clippy::arithmetic_side_effects, clippy::print_stdout, reason = "example")]
+
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Log10Likelihood, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace,

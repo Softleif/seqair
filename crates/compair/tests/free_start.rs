@@ -4,6 +4,8 @@
 //! `align_banded_f64_rows` over a band) are the reference; the kernels agree
 //! with one another bit for bit elsewhere.
 
+#![allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, reason = "test code")]
+
 #[path = "../src/pinned.rs"]
 mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]

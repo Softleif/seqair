@@ -3,6 +3,8 @@
 //!
 //! `cargo run -p compair --release --example quickstart`
 
+#![allow(clippy::print_stdout, reason = "example")]
+
 use compair::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace};
 
 /// One aligned read as a BAM record gives it: SEQ, QUAL as SAM prints it

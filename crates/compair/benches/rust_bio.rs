@@ -11,6 +11,8 @@
 //! The fixture is `benches/align.rs`'s, copied rather than shared so that
 //! neither bench can quietly change the other's numbers.
 
+#![allow(clippy::arithmetic_side_effects, reason = "benches")]
+
 use bio::stats::{
     LogProb, Prob,
     pairhmm::{EmissionParameters, GapParameters, PairHMM, StartEndGapParameters, XYEmission},

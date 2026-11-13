@@ -1,4 +1,4 @@
-//! The "10s" PairHMM benchmark, parsed.
+//! The "10s" `PairHMM` benchmark, parsed.
 //!
 //! This is the dataset the gpuPairHMM and Endeavor papers both report times on,
 //! so it is the one place compair's numbers can be put next to a published
@@ -9,6 +9,7 @@
 //! fixtures, which are deliberately copied, this is a parser for a fixed file
 //! and there is nothing here for one consumer to tune out from under the other.
 
+#![allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap, reason = "test code")]
 #![allow(dead_code, reason = "each consumer uses a different part of this")]
 
 use compair::{Band, Base, BaseQuality, Haplotype, Read, Strand};

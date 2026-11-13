@@ -1,3 +1,11 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code"
+)]
+
 use compair::{
     Base, BaseQuality, Error, HapSite, Haplotype, Observation, Read, StandardEmission, Strand,
     align_full, error_probability,

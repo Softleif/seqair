@@ -34,6 +34,7 @@
 //!   path, on every pair.
 //!
 //! The second argument is the number of rounds.
+#![allow(clippy::arithmetic_side_effects, reason = "example")]
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
 
 use std::{hint::black_box, time::Instant};

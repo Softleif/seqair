@@ -106,6 +106,8 @@
 //! rigorous and is asserted everywhere; the lower bound is empirical, and tight
 //! only where the reads align cleanly.
 
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+
 use bio::stats::{
     LogProb, Prob,
     pairhmm::{EmissionParameters, GapParameters, PairHMM, StartEndGapParameters, XYEmission},

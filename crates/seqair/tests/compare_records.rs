@@ -291,12 +291,11 @@ fn sequence_matches() {
         let rio = store.record(ri(u32::try_from(i).unwrap())).unwrap();
         assert_eq!(rio.seq_len as usize, hts.seq_len, "seq_len mismatch at record {i}");
 
-        for pos in 0..hts.seq_len {
+        for (pos, &hts_base) in hts.seq.iter().enumerate() {
             let base = store
                 .record(ri(u32::try_from(i).unwrap()))
                 .unwrap()
                 .base_at(QPos::new(u32::try_from(pos).unwrap()));
-            let hts_base = hts.seq[pos];
             assert_eq!(
                 base.to_ascii(),
                 hts_base,

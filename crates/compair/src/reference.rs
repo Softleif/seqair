@@ -477,12 +477,12 @@ fn row_columns(band: Band, limit: usize) -> usize {
 /// The row-0 columns inside the band that feed row 1, `0..=h`: the cells the
 /// free start goes into. Columns `0..h` feed row 1's match cells and `1..=h`
 /// its insertion cells, so this counts one column more than either.
-#[allow(clippy::cast_sign_loss, reason = "clamped at zero")]
 fn free_starts(band: Band, h: usize) -> usize {
     let last = i64::try_from(h).unwrap_or(i64::MAX);
     let low = band.offset.saturating_sub(band.half_width).max(0);
     let high = band.offset.saturating_add(band.half_width).min(last);
-    high.saturating_sub(low).saturating_add(1).max(0) as usize
+    // Negative when the band misses `0..=h`: no columns.
+    usize::try_from(high.saturating_sub(low).saturating_add(1)).unwrap_or(0)
 }
 
 #[cfg(test)]

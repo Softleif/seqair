@@ -10,6 +10,8 @@
 //!
 //! `cargo run -p compair --release --example taps`
 
+#![allow(clippy::print_stdout, reason = "example")]
+
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace,
