@@ -237,11 +237,17 @@ impl RawBamRecord {
         )
     }
 
+    /// Become [`Self::default`], keeping the payload's allocation.
     fn reset(&mut self) {
-        let mut payload = std::mem::take(&mut self.payload);
-        payload.clear();
-        payload.extend_from_slice(&EMPTY_RECORD);
-        *self = Self { payload, ..Self::default() };
+        self.payload.clear();
+        self.payload.extend_from_slice(&EMPTY_RECORD);
+        self.tid = None;
+        self.pos = None;
+        self.mate = MateFields::default();
+        self.cigar_start = EMPTY_RECORD.len();
+        self.cigar_end = EMPTY_RECORD.len();
+        self.seq_end = EMPTY_RECORD.len();
+        self.qual_end = EMPTY_RECORD.len();
     }
 
     /// The record's bytes as BAM stores them, without `block_size`.
@@ -252,6 +258,16 @@ impl RawBamRecord {
     /// Give up the payload bytes.
     pub fn into_payload(self) -> Vec<u8> {
         self.payload
+    }
+
+    // r[impl bam.raw_record.take_payload]
+    /// Move the payload into `out`, whose old contents are dropped, and
+    /// become [`Self::default`] in `out`'s old allocation: a reader refilling
+    /// this record reuses it, so handing records on costs neither a copy nor
+    /// an allocation.
+    pub fn take_payload_into(&mut self, out: &mut Vec<u8>) {
+        std::mem::swap(&mut self.payload, out);
+        self.reset();
     }
 
     /// The reference, or `None` for an unplaced record.
@@ -625,6 +641,20 @@ mod tests {
 
     fn header() -> BamHeader {
         BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n").unwrap()
+    }
+
+    // r[verify bam.raw_record.take_payload]
+    #[test]
+    fn take_payload_into_hands_over_the_bytes_and_keeps_the_allocation() {
+        let bytes = payload(true, 0, &[4 << 4], &[1, 2, 4, 8], b"");
+        let mut record = RawBamRecord::from_payload(bytes.clone(), &header()).unwrap();
+        let mut out = Vec::with_capacity(4096);
+        out.extend_from_slice(b"old");
+        let spare = out.as_ptr();
+        record.take_payload_into(&mut out);
+        assert_eq!(out, bytes);
+        assert_eq!(record, RawBamRecord::default());
+        assert_eq!(record.as_payload().as_ptr(), spare);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use super::{
     record_idx::{RecordIdx, RecordRef},
     seq,
 };
-use crate::reader::Tid;
+use crate::reader::{AuxTags, Tid};
 use hashbrown::HashTable;
 use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::num::NonZeroU64;
@@ -623,6 +623,19 @@ impl<U> RecordStore<U> {
         header: &super::BamHeader,
         customize: &mut E,
     ) -> Result<Option<RecordIdx>, DecodeError> {
+        self.push_raw_with(raw, header, customize, &AuxTags::All)
+    }
+
+    // r[impl unified.record_fields.fetch_into]
+    /// [`Self::push_raw`], keeping only the tags `tags` names, so a fetch
+    /// stores the same tags whatever the format.
+    pub(crate) fn push_raw_with<E: CustomizeRecordStore<Extra = U>>(
+        &mut self,
+        raw: &[u8],
+        header: &super::BamHeader,
+        customize: &mut E,
+        tags: &AuxTags,
+    ) -> Result<Option<RecordIdx>, DecodeError> {
         let h = record::parse_header(raw)?;
         let refs = h.refs.resolve(header)?;
         // A store holds placed records only: pileups and region queries need a
@@ -732,7 +745,11 @@ impl<U> RecordStore<U> {
         // Aux data (everything after qual)
         #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
         let aux_slice = &raw[h.qual_end..];
-        self.aux.extend_from_slice(aux_slice);
+        match tags {
+            AuxTags::All => self.aux.extend_from_slice(aux_slice),
+            tags => super::aux::retain_tags_into(aux_slice, tags, &mut self.aux),
+        }
+        let aux_len = self.aux.len().saturating_sub(aux_off as usize);
 
         #[allow(clippy::indexing_slicing, reason = "qname_actual_len ≤ qname_raw.len()")]
         // r[impl record_store.qname_hash]
@@ -766,7 +783,7 @@ impl<U> RecordStore<U> {
                 clippy::cast_possible_truncation,
                 reason = "aux data is bounded by slab limits (u32); slab overflow checked above via SlabOverflow"
             )]
-            aux_len: aux_slice.len() as u32,
+            aux_len: aux_len as u32,
             extras_idx: idx.get(),
             qname_hash: name_hash,
             mate_idx: None,

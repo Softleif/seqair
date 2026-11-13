@@ -15,4 +15,8 @@ pub(crate) struct CodecScratch {
     pub(crate) rans_4x8: Rans4x8Buf,
     pub(crate) nx16_order1: Nx16Order1Buf,
     pub(crate) bz2: bz2ngrs::Decoder,
+    /// The content id of every external block decompressed, in order, so
+    /// tests can see which blocks a decode skipped.
+    #[cfg(test)]
+    pub(crate) decompressed: Vec<i32>,
 }

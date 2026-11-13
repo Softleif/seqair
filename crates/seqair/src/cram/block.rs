@@ -60,6 +60,63 @@ pub(crate) fn parse_block_with(
     buf: &[u8],
     scratch: &mut CodecScratch,
 ) -> Result<(Block, usize), CramError> {
+    let (raw, consumed) = RawBlock::parse(buf)?;
+    Ok((raw.decode(scratch)?, consumed))
+}
+
+/// A block's header, CRC-checked, and its data as stored: decoding is a
+/// separate step, so a block nobody reads is never decompressed
+/// (`r[cram.stream.fields.dropped_blocks]`).
+pub(crate) struct RawBlock<'a> {
+    method: u8,
+    content_type_byte: u8,
+    pub(crate) content_type: ContentType,
+    pub(crate) content_id: i32,
+    compressed: &'a [u8],
+    uncompressed_size: usize,
+}
+
+impl<'a> RawBlock<'a> {
+    /// Parse the block at the start of `buf`, with the bytes it takes.
+    pub(crate) fn parse(buf: &'a [u8]) -> Result<(Self, usize), CramError> {
+        parse_raw(buf)
+    }
+
+    /// Decompress the block's data.
+    pub(crate) fn decode(self, scratch: &mut CodecScratch) -> Result<Block, CramError> {
+        let Self {
+            method,
+            content_type_byte,
+            content_type,
+            content_id,
+            compressed,
+            uncompressed_size,
+        } = self;
+        // r[impl cram.block.decoded_size]
+        // htslib skips decoding a block that declares no data, whatever its method.
+        let data = if uncompressed_size == 0 {
+            Vec::new()
+        } else {
+            #[cfg(test)]
+            if content_type == ContentType::ExternalData {
+                scratch.decompressed.push(content_id);
+            }
+            let data = decompress_block(
+                method,
+                compressed,
+                uncompressed_size,
+                content_type_byte,
+                content_id,
+                scratch,
+            )?;
+            check_decoded_size(method, uncompressed_size, data.len())?;
+            data
+        };
+        Ok(Block { content_type, content_id, data })
+    }
+}
+
+fn parse_raw(buf: &[u8]) -> Result<(RawBlock<'_>, usize), CramError> {
     let mut pos = 0;
 
     let &method = buf.get(pos).ok_or_else(|| CramError::Truncated { context: "block method" })?;
@@ -140,24 +197,15 @@ pub(crate) fn parse_block_with(
     let uncompressed_size = uncompressed_size as usize;
     super::reader::check_codec_output(uncompressed_size, "block uncompressed size")?;
 
-    // r[impl cram.block.decoded_size]
-    // htslib skips decoding a block that declares no data, whatever its method.
-    let data = if uncompressed_size == 0 {
-        Vec::new()
-    } else {
-        let data = decompress_block(
-            method,
-            compressed_data,
-            uncompressed_size,
-            content_type_byte,
-            content_id,
-            scratch,
-        )?;
-        check_decoded_size(method, uncompressed_size, data.len())?;
-        data
+    let raw = RawBlock {
+        method,
+        content_type_byte,
+        content_type,
+        content_id,
+        compressed: compressed_data,
+        uncompressed_size,
     };
-
-    Ok((Block { content_type, content_id, data }, pos))
+    Ok((raw, pos))
 }
 
 fn decompress_block(

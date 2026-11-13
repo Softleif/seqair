@@ -50,6 +50,28 @@ r[cram.stream.md_nm]
 r[cram.stream.md_nm.option]
 `CramContainerDecoder::decode_md(false)` MUST turn the generation off, as `samtools view --input-fmt-option decode_md=0` does; forks keep the setting. The indexed reader (`r[cram.index.query+2]`) does not generate either tag: its records feed the pileup, which reads neither.
 
+## Reading only some fields
+
+r[cram.stream.fields]
+`CramContainerDecoder::fields(f)` MUST give a decoder that yields `PartialRecord`s read with `f` (`r[unified.record_fields]`); its forks read the same fields. Every requested field MUST be what a decoder without `fields` gives.
+
+What a decode does not need, it does not do. CRAM keeps each data series and each tag in blocks of its own (samtools gives every series and every tag its own content id), so leaving a field out can leave its blocks compressed. The indexed reader's `query_raw` decodes with the reader's fields like the stream; its `fetch_into` decodes them with the sequence and qualities added (`r[unified.record_fields.indexed]`).
+
+r[cram.stream.fields.dropped_blocks]
+A slice decode MUST NOT decompress an external block that no series or tag it reads uses: the tags not requested (`TL` and the `RG` series are always read; `cF` too when `MD`/`NM` may be generated), `QS` and `QQ` with qualities off, `BA` and `BS` and the bytes of `IN`, `SC` and `BB` with the sequence off. A value of a skipped series MUST be stepped past without being copied: nothing is read when its block was left out; where a kept series shares the block, or the value lies in the core bit stream, it is read and dropped, so every later value stays where the full decode finds it. A skipped length-prefixed array whose bytes' block is read MUST have its length read too. The CRC of every block is still checked.
+
+r[cram.stream.fields.qual_off]
+With qualities off, the decode MUST NOT read the quality array (`QS`) nor the qualities of `B`, `Q` and `q` features; QUAL then holds filler of the read's length (`0xFF`s), which `PartialRecord` keeps out of sight.
+
+r[cram.stream.fields.seq_off]
+With the sequence off (and no `MD`/`NM` to generate, `r[cram.stream.fields.md_nm]`), the decode MUST NOT read `BA` or `BS`, fetch the reference, check the slice's reference MD5, or rebuild bases. It MUST still build the exact CIGAR from the read features (`FN`, `FC`, `FP`, `DL`, `RS`, `HC`, `PD`, and the lengths of `IN`, `SC` and `BB`), with the same reference span, in the one function that also reads past the other references' records of a multi-reference slice (`r[cram.slice.multi_ref_skip]`). SEQ then holds filler of the read's length (`N`s, not htslib's `=`); a record whose CRAM flags say SEQ is `*` keeps an empty SEQ and QUAL, as in the full decode.
+
+r[cram.stream.fields.md_nm]
+`MD` and `NM` MUST be generated (`r[cram.stream.md_nm]`) only when `decode_md` is on, the requested tags include them (`AuxTags::All`, or listed in `AuxTags::Only`), and the record stores none; each is generated only if requested. Requesting them with `decode_md` on MUST rebuild the sequence, and so read the reference, even with the sequence off. `decode_md(false)` with `NM` requested gives only stored `NM` tags and needs no reference.
+
+r[cram.stream.fields.reference_optional]
+A CRAM reader MUST open without a reference when its fields need none: the sequence is off, and `MD`/`NM` are not requested or (for `CramContainerDecoder`) `decode_md` is off. `AlignmentStream` MUST refuse to build with `CramNeedsReference`, and `IndexedReader::builder` with `CramRequiresFasta`, when no reference is given and the fields need one, before reading any container (the indexed reader's `query_raw` generates `MD`/`NM`). `CramStreamReader::decoder_without_reference()` gives a decoder without one; `CramContainerDecoder::needs_reference()` says whether its fields and `decode_md` need one. A slice that needs a reference (it is mapped, its file was written with one, `RR`, and it embeds none) MUST fail to decode without one with `CramError::NoReference`, which is how a `fetch_into` of a reader opened without a reference fails; a slice that needs none (`RR` false, an embedded reference, unmapped records) decodes as with one.
+
 ## Fidelity
 
 r[cram.stream.fidelity+2]

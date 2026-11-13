@@ -81,8 +81,8 @@ fn stream(
     Ok((stream.format(), header, records))
 }
 
-// r[verify unified.stream.detect+2]
-// r[verify unified.stream.records]
+// r[verify unified.stream.detect+4]
+// r[verify unified.stream.records+2]
 // r[verify unified.stream.iter]
 /// Every wrapping of the same SAM is detected as what it is, however the
 /// bytes arrive, and yields the same header and records.
@@ -132,7 +132,7 @@ fn records_end_after_an_error_that_ends_the_stream() {
     assert!(stream.records().next().is_none());
 }
 
-// r[verify unified.stream.detect+2]
+// r[verify unified.stream.detect+4]
 #[test]
 fn empty_input_is_an_empty_sam() {
     let (format, header, records) = stream(Vec::new(), 1, 0).unwrap();
@@ -141,7 +141,7 @@ fn empty_input_is_an_empty_sam() {
     assert!(records.is_empty());
 }
 
-// r[verify unified.stream.detect+2]
+// r[verify unified.stream.detect+4]
 #[test]
 fn unsupported_formats_are_named() {
     let sam = format!("{}r\t4\t*\t0\t0\t*\t*\t0\t0\tA\tI\n", header_text()).into_bytes();
@@ -158,7 +158,7 @@ fn unsupported_formats_are_named() {
     ));
 }
 
-// r[verify unified.stream.detect+2]
+// r[verify unified.stream.detect+4]
 /// A BAM cut at a block boundary ends in `MissingEofMarker` by default, and
 /// reads to the end with `EofMarker::Optional`.
 #[test]

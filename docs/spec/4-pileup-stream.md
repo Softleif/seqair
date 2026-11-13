@@ -8,7 +8,7 @@ unindexed input — has neither, and wants the columns of every contig, in
 order, as the records go past.
 
 `StreamPileup` is that pileup. It reads an `AlignmentStream`
-(`r[unified.stream.records]`) front to back and yields the same columns the
+(`r[unified.stream.records+2]`) front to back and yields the same columns the
 indexed pileup yields, driving the existing `RecordStore` and `PileupEngine`
 over a sliding window of positions.
 

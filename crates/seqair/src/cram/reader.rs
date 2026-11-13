@@ -18,7 +18,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use crate::reader::Tid;
+use crate::reader::{RecordFields, Tid};
 use crate::sam::encode::encode_alignment;
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, Pos1, SmallVec, SmolStr};
@@ -90,6 +90,13 @@ pub enum CramError {
              Consider setting REF_PATH/REF_CACHE for automatic reference download."
     )]
     MissingReference { contig: SmolStr },
+
+    // r[impl cram.stream.fields.reference_optional]
+    /// The reader was opened without a reference, and a slice of `contig`
+    /// needs one: its records' sequence was asked for, or a fetch, which
+    /// always reads it.
+    #[error("a slice of {contig} needs the reference, and the CRAM reader was opened without one")]
+    NoReference { contig: SmolStr },
 
     #[error("multi-ref slices not yet supported (Phase 2)")]
     MultiRefNotSupported,
@@ -379,9 +386,14 @@ pub struct CramShared {
     /// re-scanning the header text.
     pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
-    pub fasta_path: PathBuf,
+    /// `None` for a reader opened without a reference
+    /// (`r[cram.stream.fields.reference_optional]`).
+    pub fasta_path: Option<PathBuf>,
     /// Decoded slices, shared by the reader and its forks.
     slice_cache: SliceCache,
+    /// What every fetch and query of the reader and its forks decodes. Fixed
+    /// at open, since the cache's slices hold only these fields.
+    pub(crate) fields: RecordFields,
 }
 
 /// Parse `@RG ID:` values from SAM header text in declaration order.
@@ -403,7 +415,9 @@ pub(crate) fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
 
 pub struct IndexedCramReader<R: Read + Seek = File> {
     file: R,
-    fasta: IndexedFastaReader<R>,
+    /// `None` when opened without a reference: then only slices that need
+    /// none decode.
+    fasta: Option<IndexedFastaReader<R>>,
     shared: Arc<CramShared>,
     // Scratch buffers reused across fetch_into calls, so the second record
     // onward pays no allocation.
@@ -425,7 +439,7 @@ impl IndexedCramReader<File> {
     /// and the `.crai` beside it (`r[index.locate]`).
     #[instrument(level = "debug", fields(cram = %cram_path.display(), fasta = %fasta_path.display()))]
     pub fn open(cram_path: &Path, fasta_path: &Path) -> Result<Self, CramError> {
-        Self::open_inner(cram_path, fasta_path, None)
+        Self::open_inner(cram_path, Some(fasta_path), None, RecordFields::all())
     }
 
     // r[impl index.explicit]
@@ -437,13 +451,19 @@ impl IndexedCramReader<File> {
         fasta_path: &Path,
         index: &crate::reader::IndexPath,
     ) -> Result<Self, CramError> {
-        Self::open_inner(cram_path, fasta_path, Some(index.as_ref()))
+        Self::open_inner(cram_path, Some(fasta_path), Some(index.as_ref()), RecordFields::all())
     }
 
-    fn open_inner(
+    /// Open with the reference at `fasta_path` and the index at `index` if
+    /// given, else the one beside the CRAM, decoding only `fields`. Without
+    /// a reference, a query decodes only the slices that need none
+    /// (`r[cram.stream.fields.reference_optional]`); the caller checks that
+    /// `fields` need none.
+    pub(crate) fn open_inner(
         cram_path: &Path,
-        fasta_path: &Path,
+        fasta_path: Option<&Path>,
         index: Option<&Path>,
+        fields: RecordFields,
     ) -> Result<Self, CramError> {
         let mut file = File::open(cram_path)
             .map_err(|source| CramError::Open { path: cram_path.to_path_buf(), source })?;
@@ -480,7 +500,7 @@ impl IndexedCramReader<File> {
 
         // r[impl cram.scope.reference_required]
         // Open FASTA reader
-        let fasta = IndexedFastaReader::open(fasta_path)?;
+        let fasta = fasta_path.map(IndexedFastaReader::open).transpose()?;
 
         let read_group_ids = parse_read_group_ids(header.header_text());
 
@@ -492,8 +512,9 @@ impl IndexedCramReader<File> {
                 header,
                 read_group_ids,
                 cram_path: cram_path.to_path_buf(),
-                fasta_path: fasta_path.to_path_buf(),
+                fasta_path: fasta_path.map(Path::to_path_buf),
                 slice_cache: SliceCache::new(SliceCacheBudget::Auto),
+                fields,
             }),
             container_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
@@ -505,7 +526,7 @@ impl IndexedCramReader<File> {
     pub fn fork(&self) -> Result<Self, CramError> {
         let file = File::open(&self.shared.cram_path)
             .map_err(|source| CramError::Open { path: self.shared.cram_path.clone(), source })?;
-        let fasta = self.fasta.fork()?;
+        let fasta = self.fasta.as_ref().map(IndexedFastaReader::fork).transpose()?;
         self.shared.slice_cache.handle_opened();
         Ok(IndexedCramReader {
             file,
@@ -563,7 +584,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             std::str::from_utf8(crai_data).map_err(|source| CramError::HeaderNotUtf8 { source })?;
         let cram_index = CramIndex::from_text(crai_text)?;
 
-        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)?;
+        let fasta = Some(IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)?);
 
         let read_group_ids = parse_read_group_ids(header.header_text());
 
@@ -575,8 +596,9 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
                 header,
                 read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
-                fasta_path: PathBuf::from("<fuzz>"),
+                fasta_path: Some(PathBuf::from("<fuzz>")),
                 slice_cache: SliceCache::new(SliceCacheBudget::Auto),
+                fields: RecordFields::all(),
             }),
             container_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
@@ -589,6 +611,11 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
 impl<R: Read + Seek> IndexedCramReader<R> {
     pub fn header(&self) -> &BamHeader {
         &self.shared.header
+    }
+
+    /// What this reader decodes (`r[unified.record_fields]`).
+    pub fn fields(&self) -> &RecordFields {
+        &self.shared.fields
     }
 
     // r[impl cram.slice_cache.budget+3]
@@ -736,11 +763,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 shared.header.clone(),
                 shared.read_group_ids.clone(),
                 SmolStr::new(prefix),
+                shared.fields.clone(),
             )
         });
         CramRawQuery {
             file,
-            fasta,
+            fasta: fasta.as_mut(),
             decoder,
             slices: slices.into_iter(),
             container: None,
@@ -782,7 +810,7 @@ fn wanted_slices(
 /// [`IndexedCramReader::query_raw`]. Borrows the reader until dropped.
 pub struct CramRawQuery<'r, R: Read + Seek> {
     file: &'r mut R,
-    fasta: &'r mut IndexedFastaReader<R>,
+    fasta: Option<&'r mut IndexedFastaReader<R>>,
     decoder: &'r mut SliceDecoder,
     /// `(container offset, slice offset)` of the slices still to decode.
     slices: std::vec::IntoIter<(u64, u64)>,
@@ -909,7 +937,7 @@ impl<R: Read + Seek> CramRawQuery<'_, R> {
         let offset = usize::try_from(slice_offset)
             .map_err(|_| CramError::Truncated { context: "slice offset" })?;
         self.slice = self.decoder.decode_slice(
-            self.fasta,
+            self.fasta.as_deref_mut(),
             compression,
             &self.data,
             offset,
@@ -1034,7 +1062,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // A contig the FASTA lacks is only an error for a slice that
         // needs it; one that embeds its reference does not.
         let mut reference_missing = false;
-        if ref_start < ref_end_clamped {
+        if let Some(fasta) = self.fasta.as_mut()
+            && ref_start < ref_end_clamped
+        {
             // `ref_end_clamped` is one past the last base the slices
             // reach, and it is above `ref_start`, so the last base is
             // `ref_end_clamped - 1`. Fetching that closed span means a
@@ -1051,7 +1081,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 last: position(ref_end_clamped.saturating_sub(1))?,
             };
             // r[impl cram.edge.missing_reference+2]
-            match self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
+            match fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
                 Ok(()) => {}
                 Err(FastaError::SequenceNotFound { .. }) => reference_missing = true,
                 Err(e) => return Err(e.into()),
@@ -1089,15 +1119,25 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let slice_offset = usize::try_from(slice_offset)
             .map_err(|_| CramError::Truncated { context: "slice offset" })?;
         let bases = (!container.reference_missing).then_some(self.ref_seq_buf.as_slice());
+        let reference = match self.fasta {
+            Some(_) => SliceReference::Window { bases, start: container.ref_start.cast_signed() },
+            // r[impl cram.stream.fields.reference_optional]
+            None => SliceReference::None,
+        };
+        // r[impl unified.record_fields.indexed]
+        // The pileup reads the sequence and qualities whatever was asked;
+        // only the tags are cut down.
+        let fields = self.shared.fields.clone().with_sequence().with_quality();
         // r[impl cram.edge.coordinate_clamp]
         slice::decode_slice(
             &container.compression,
             &self.container_buf,
             slice_offset,
-            SliceReference::Window { bases, start: container.ref_start.cast_signed() },
+            reference,
             &self.shared.header,
             &self.shared.read_group_ids,
             Keep::Tid(tid),
+            &fields,
             // r[impl cram.record.read_name+2]
             slice::Synthesis {
                 md_nm: false,
@@ -1175,6 +1215,70 @@ mod tests {
 
     fn fasta_path() -> &'static Path {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+    }
+
+    /// The whole of the first reference of `reader`.
+    fn whole_first_reference<R: Read + Seek>(
+        reader: &IndexedCramReader<R>,
+    ) -> (Tid, RangeInclusive<Pos0>) {
+        let tid = crate::bam::test_util::tid(0);
+        let len = reader.header().target_len(tid).unwrap();
+        let last = Pos0::new(u32::try_from(len.saturating_sub(1)).unwrap()).unwrap();
+        (tid, RangeInclusive { start: Pos0::ZERO, last })
+    }
+
+    // r[verify cram.stream.fields.dropped_blocks]
+    // r[verify unified.record_fields.fetch_into]
+    /// A fetch of a reader opened for no tags decompresses no tag block, and
+    /// stores no tag but nothing else less.
+    #[test]
+    fn a_fetch_without_tags_decompresses_no_tag_block() {
+        use crate::reader::AuxTags;
+        let cram = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram"));
+        let tags = super::stream::tests::SeriesBlocks::of(cram).tags;
+        let fetch = |fields: RecordFields| {
+            let mut reader =
+                IndexedCramReader::open_inner(cram, Some(fasta_path()), None, fields).unwrap();
+            let (tid, span) = whole_first_reference(&reader);
+            let mut store = RecordStore::new();
+            reader.fetch_into(tid, span, &mut store).unwrap();
+            (store, reader.scratch.codec.decompressed.clone())
+        };
+        let (full, all) = fetch(RecordFields::all());
+        assert!(all.iter().any(|id| tags.contains(id)), "tags are read at all");
+        // Sequence and qualities are kept whatever the fields say.
+        let (store, decompressed) = fetch(RecordFields::core().with_aux(AuxTags::None));
+        assert!(!decompressed.iter().any(|id| tags.contains(id)), "a tag block decompressed");
+        assert_eq!(store.len(), full.len());
+        for (i, j) in store.indices().zip(full.indices()) {
+            let (got, want) = (store.record(i).unwrap(), full.record(j).unwrap());
+            assert!(got.aux().is_empty());
+            assert_eq!(got.seq(), want.seq());
+            assert_eq!(got.qual(), want.qual());
+            assert_eq!(got.cigar(), want.cigar());
+        }
+    }
+
+    // r[verify cram.stream.fields.reference_optional]
+    /// Opened without a reference for fields that need none, a raw query
+    /// decodes; a fetch, which reads the sequence, fails with its own error.
+    #[test]
+    fn without_a_reference_queries_decode_and_fetches_fail() {
+        let cram = cram_path();
+        let mut with = IndexedCramReader::open(cram, fasta_path()).unwrap();
+        let mut without =
+            IndexedCramReader::open_inner(cram, None, None, RecordFields::core()).unwrap();
+        let (tid, span) = whole_first_reference(&with);
+        let full: Vec<RawBamRecord> = with.query_raw(tid, span).map(Result::unwrap).collect();
+        let core: Vec<RawBamRecord> = without.query_raw(tid, span).map(Result::unwrap).collect();
+        assert!(!full.is_empty());
+        assert_eq!(core.len(), full.len());
+        for (c, f) in core.iter().zip(&full) {
+            assert_eq!(c.cigar().collect::<Vec<_>>(), f.cigar().collect::<Vec<_>>());
+            assert_eq!((c.pos(), c.flags(), c.seq_len()), (f.pos(), f.flags(), f.seq_len()));
+        }
+        let err = without.fetch_into(tid, span, &mut RecordStore::new()).unwrap_err();
+        assert!(matches!(err, CramError::NoReference { .. }), "{err:?}");
     }
 
     // r[verify cram.query_raw.errors]

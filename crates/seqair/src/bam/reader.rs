@@ -2,7 +2,7 @@
 //! for a region into a [`RecordStore`]. Call [`IndexedBamReader::fork`] to get a cheap
 //! per-thread reader that shares the parsed index and header via [`Arc<BamShared>`].
 
-use crate::reader::{FetchCounts, FetchedRecord, IndexPath, Tid};
+use crate::reader::{AuxTags, FetchCounts, FetchedRecord, IndexPath, Tid};
 
 use super::{
     bgzf::{BgzfError, BgzfReader, VirtualOffset},
@@ -117,6 +117,8 @@ pub struct IndexedBamReader<R: Read + Seek = File> {
     block_cache: BlockCache,
     /// The latest query, for `r[bam.reader.resume]`.
     last_query: Option<LastQuery>,
+    /// The tags a fetch stores (`r[unified.record_fields.fetch_into]`).
+    aux: AuxTags,
 }
 
 /// What a query leaves behind for the next one (`r[bam.reader.resume]`).
@@ -168,6 +170,7 @@ impl IndexedBamReader<File> {
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
             block_cache: BlockCache::new(),
             last_query: None,
+            aux: AuxTags::All,
         })
     }
 
@@ -185,6 +188,7 @@ impl IndexedBamReader<File> {
             shared: Arc::clone(&self.shared),
             block_cache: BlockCache::new(),
             last_query: None,
+            aux: self.aux.clone(),
         })
     }
 }
@@ -202,11 +206,17 @@ impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
             shared: Arc::new(BamShared { index, header, bam_path: PathBuf::from("<fuzz>") }),
             block_cache: BlockCache::new(),
             last_query: None,
+            aux: AuxTags::All,
         })
     }
 }
 
 impl<R: Read + Seek> IndexedBamReader<R> {
+    /// Store only `aux` on fetches; set once, when opened.
+    pub(crate) fn set_aux_tags(&mut self, aux: AuxTags) {
+        self.aux = aux;
+    }
+
     // r[impl bam.reader.fork_arc_identity]
     pub fn shared(&self) -> &Arc<BamShared> {
         &self.shared
@@ -241,12 +251,13 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
         let shared = Arc::clone(&self.shared);
+        let aux = self.aux.clone();
         let mut query = self.query(tid, span)?;
         store.clear();
 
         let mut kept = 0usize;
         query.for_each_result::<_, BamError>(|raw| {
-            if store.push_raw(raw, &shared.header, &mut ())?.is_some() {
+            if store.push_raw_with(raw, &shared.header, &mut (), &aux)?.is_some() {
                 kept = kept.saturating_add(1);
             }
             Ok(())
@@ -272,10 +283,11 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         store.clear();
 
         let shared = Arc::clone(&self.shared);
+        let aux = self.aux.clone();
         let mut query = self.query(tid, span)?;
         let mut counts = FetchCounts::default();
         query.for_each_result::<_, BamError>(|raw| {
-            let kept = store.push_raw(raw, &shared.header, customize)?.is_some();
+            let kept = store.push_raw_with(raw, &shared.header, customize, &aux)?.is_some();
             // `push_raw` has parsed the header, so these fields are there.
             let flags = raw.get(14..16).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
             let pos = raw.get(4..8).and_then(|b| b.try_into().ok()).map(i32::from_le_bytes);

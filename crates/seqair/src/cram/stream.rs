@@ -9,18 +9,19 @@ use super::{
     container::{ContainerHeader, RefSeqId},
     reader::{self, CramError},
     slice::{
-        self, DecodedSlice, Keep, RefBases, SliceHeader, SliceReference, SliceScratch, Synthesis,
-        TidWindow,
+        self, DecodedSlice, Keep, Plan, RefBases, SliceHeader, SliceReference, SliceScratch,
+        Synthesis, TidWindow,
     },
     varint,
 };
-use crate::bam::{BamHeader, DecodeError, RawBamRecord};
+use crate::bam::{BamHeader, DecodeError, RawBamRecord, raw_record::Refill};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use crate::reader::Tid;
+use crate::reader::{Complete, Partial, RecordFields, RecordKind, Tid};
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
 use std::io::{self, Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -63,6 +64,11 @@ pub enum CramStreamError {
     /// An earlier error left the stream misaligned; nothing more can be read.
     #[error("CRAM stream already failed; an earlier read returned the error")]
     Poisoned,
+
+    /// The worker decoding a container panicked (a bug in seqair); the
+    /// container's records are lost, the stream goes on with the next.
+    #[error("the worker decoding CRAM container {container} panicked")]
+    WorkerLost { container: u64 },
 }
 
 /// The parsed file header, shared by a reader and its decoders.
@@ -183,7 +189,27 @@ impl<R: Read> CramStreamReader<R> {
     /// The FASTA or its index cannot be opened.
     pub fn decoder(&self, fasta: &Path) -> Result<CramContainerDecoder, CramStreamError> {
         let fasta = IndexedFastaReader::open(fasta).map_err(CramError::from)?;
-        Ok(CramContainerDecoder { fasta, slices: SliceDecoder::new(Arc::clone(&self.shared)) })
+        Ok(CramContainerDecoder {
+            fasta: Some(fasta),
+            slices: SliceDecoder::new(Arc::clone(&self.shared)),
+            kind: PhantomData,
+        })
+    }
+
+    // r[impl cram.stream.fields.reference_optional]
+    /// A decoder for this file's containers without a reference: for a
+    /// decoder whose [`fields`](CramContainerDecoder::fields) leave out the
+    /// sequence (and `MD`/`NM`, or with [`decode_md(false)`](CramContainerDecoder::decode_md)),
+    /// or for a file whose slices need none (written without a reference, or
+    /// embedding theirs). A slice that needs one fails to decode with
+    /// [`CramError::NoReference`]; [`CramContainerDecoder::needs_reference`]
+    /// says beforehand whether any might.
+    pub fn decoder_without_reference(&self) -> CramContainerDecoder {
+        CramContainerDecoder {
+            fasta: None,
+            slices: SliceDecoder::new(Arc::clone(&self.shared)),
+            kind: PhantomData,
+        }
     }
 
     // r[impl cram.stream.framing+2]
@@ -342,33 +368,70 @@ pub(crate) fn read_container<R: Read>(
 }
 
 // r[impl cram.stream.decoder]
-/// Decodes [`CramContainer`]s of one file into [`RawBamRecord`]s. Keep one
-/// per thread ([`Self::fork`]); its buffers and codec tables are reused from
-/// container to container.
-pub struct CramContainerDecoder {
-    fasta: IndexedFastaReader,
+/// Decodes [`CramContainer`]s of one file into [`RawBamRecord`]s, or into
+/// [`PartialRecord`](crate::reader::PartialRecord)s once given
+/// [`Self::fields`]. Keep one per thread ([`Self::fork`]); its buffers and
+/// codec tables are reused from container to container.
+pub struct CramContainerDecoder<K: RecordKind = Complete> {
+    fasta: Option<IndexedFastaReader>,
     slices: SliceDecoder,
+    kind: PhantomData<K>,
 }
 
-impl std::fmt::Debug for CramContainerDecoder {
+impl<K: RecordKind> std::fmt::Debug for CramContainerDecoder<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CramContainerDecoder").finish_non_exhaustive()
     }
 }
 
-impl CramContainerDecoder {
+impl CramContainerDecoder<Complete> {
+    // r[impl cram.stream.fields]
+    /// Decode only `fields`, and yield [`PartialRecord`](crate::reader::PartialRecord)s
+    /// that refuse the rest (`r[unified.record_fields]`).
+    pub fn fields(self, fields: RecordFields) -> CramContainerDecoder<Partial> {
+        self.with_fields(fields).retype()
+    }
+}
+
+impl<K: RecordKind> CramContainerDecoder<K> {
+    /// The fields this decoder decodes.
+    pub fn record_fields(&self) -> &RecordFields {
+        &self.slices.fields
+    }
+
+    /// Decode only `fields`, keeping the record type: for a stream, which
+    /// wraps the records itself.
+    pub(crate) fn with_fields(mut self, fields: RecordFields) -> Self {
+        self.slices.fields = fields;
+        self
+    }
+
+    pub(crate) fn retype<K2: RecordKind>(self) -> CramContainerDecoder<K2> {
+        CramContainerDecoder { fasta: self.fasta, slices: self.slices, kind: PhantomData }
+    }
+
+    // r[impl cram.stream.fields.reference_optional]
+    /// Whether decoding may read the reference: the sequence is asked for,
+    /// or `MD`/`NM` with [`Self::decode_md`] on. A decoder made without one
+    /// then decodes only the slices that need none.
+    pub fn needs_reference(&self) -> bool {
+        Plan::new(&self.slices.fields, self.slices.decode_md).needs_reference()
+    }
+
     /// A decoder for another thread, sharing the header and the FASTA index.
     ///
     /// # Errors
     /// The FASTA cannot be reopened.
     pub fn fork(&self) -> Result<Self, CramStreamError> {
-        let fasta = self.fasta.fork().map_err(CramError::from)?;
+        let fasta = self.fasta.as_ref().map(IndexedFastaReader::fork).transpose();
+        let fasta = fasta.map_err(CramError::from)?;
         let slices = SliceDecoder {
             decode_md: self.slices.decode_md,
             name_prefix: self.slices.name_prefix.clone(),
+            fields: self.slices.fields.clone(),
             ..SliceDecoder::new(Arc::clone(&self.slices.shared))
         };
-        Ok(Self { fasta, slices })
+        Ok(Self { fasta, slices, kind: PhantomData })
     }
 
     // r[impl cram.stream.md_nm.option]
@@ -406,44 +469,66 @@ impl CramContainerDecoder {
     pub fn decode(
         &mut self,
         container: &CramContainer,
-        out: &mut Vec<RawBamRecord>,
+        out: &mut Vec<K::Record>,
     ) -> Result<(), CramStreamError> {
         let start = out.len();
-        let result = self.decode_inner(container, out);
+        let result = self.decode_reusing(container, out, start);
+        // Nothing past `start` to reuse: `out` now ends at the last record.
         if result.is_err() {
             out.truncate(start);
         }
-        result
+        result.map(|_| ())
     }
 
-    fn decode_inner(
+    /// Decode `container` into `out[start..]`, in file order: records already
+    /// there are refilled in place, reusing their buffers, and more are pushed
+    /// as needed. Returns where its records end; those past it are left as
+    /// they were, for the next container to reuse. On error the records from
+    /// `start` on are unspecified (but valid).
+    pub(crate) fn decode_reusing(
         &mut self,
         container: &CramContainer,
-        out: &mut Vec<RawBamRecord>,
-    ) -> Result<(), CramStreamError> {
+        out: &mut Vec<K::Record>,
+        start: usize,
+    ) -> Result<usize, CramStreamError> {
         let data = container.data.as_slice();
         let ch = self.slices.compression_header(data)?;
+        let mut at = start;
         for &landmark in &container.header.landmarks {
             let offset = usize::try_from(landmark)
                 .map_err(|_| CramError::InvalidLength { value: landmark })?;
             let decoded =
-                self.slices.decode_slice(&mut self.fasta, &ch, data, offset, Keep::All)?;
+                self.slices.decode_slice(self.fasta.as_mut(), &ch, data, offset, Keep::All)?;
             let header = self.slices.header();
+            let fields_read = &self.slices.fields;
 
             // r[impl cram.stream.raw_records]
             // r[impl cram.stream.fidelity+2]
-            out.reserve(decoded.records.alignments().len());
             for (i, fields) in decoded.records.alignments().enumerate() {
                 let record = decoded.number(i);
-                let mut payload = Vec::new();
-                encode_alignment(&mut payload, &fields)
-                    .map_err(|source| CramStreamError::RecordEncode { record, source })?;
-                let raw = RawBamRecord::from_payload(payload, header)
-                    .map_err(|source| CramStreamError::InvalidRecord { record, source })?;
-                out.push(raw);
+                let fill = |raw: &mut RawBamRecord| {
+                    raw.refill(header, |payload| encode_alignment(payload, &fields)).map_err(|e| {
+                        match e {
+                            Refill::Fill(source) => {
+                                CramStreamError::RecordEncode { record, source }
+                            }
+                            Refill::Invalid(source) => {
+                                CramStreamError::InvalidRecord { record, source }
+                            }
+                        }
+                    })
+                };
+                if let Some(slot) = out.get_mut(at) {
+                    fill(K::raw_mut(slot, fields_read))?;
+                } else {
+                    let mut raw = RawBamRecord::default();
+                    fill(&mut raw)?;
+                    out.push(K::wrap(raw, fields_read));
+                }
+                at = at.saturating_add(1);
             }
         }
-        Ok(())
+        Ok(at)
     }
 }
 
@@ -476,6 +561,8 @@ pub(crate) struct SliceDecoder {
     windows: Vec<TidWindow>,
     decode_md: bool,
     name_prefix: SmolStr,
+    /// What to decode; set once, before the first slice.
+    pub(crate) fields: RecordFields,
 }
 
 impl SliceDecoder {
@@ -487,6 +574,7 @@ impl SliceDecoder {
             windows: Vec::new(),
             decode_md: true,
             name_prefix: SmolStr::new_static("-"),
+            fields: RecordFields::all(),
         }
     }
 
@@ -496,8 +584,9 @@ impl SliceDecoder {
         header: BamHeader,
         read_group_ids: Vec<SmolStr>,
         name_prefix: SmolStr,
+        fields: RecordFields,
     ) -> Self {
-        Self { name_prefix, ..Self::new(Arc::new(StreamShared { header, read_group_ids })) }
+        Self { name_prefix, fields, ..Self::new(Arc::new(StreamShared { header, read_group_ids })) }
     }
 
     pub(crate) fn header(&self) -> &BamHeader {
@@ -517,10 +606,11 @@ impl SliceDecoder {
     }
 
     /// Decode the records `keep` names of the slice at `offset` in a
-    /// container's `data`, against the reference `fasta` holds for it.
+    /// container's `data`, against the reference `fasta` holds for it; with
+    /// no `fasta`, only a slice that needs no reference decodes.
     pub(crate) fn decode_slice<F: Read + Seek>(
         &mut self,
-        fasta: &mut IndexedFastaReader<F>,
+        fasta: Option<&mut IndexedFastaReader<F>>,
         ch: &CompressionHeader,
         data: &[u8],
         offset: usize,
@@ -541,10 +631,15 @@ impl SliceDecoder {
         // A file written without a reference (`RR` false) is decoded
         // without one (`r[cram.record.no_ref_fill+1]`): nothing to fetch.
         let no_ref = !ch.preservation.reference_required;
-        let reference = match slice_ref {
-            RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
+        let plan = Plan::new(&self.fields, self.decode_md);
+        let reference = match (slice_ref, fasta) {
+            (RefSeqId::Unmapped, _) => SliceReference::Window { bases: Some(&[]), start: 0 },
             _ if no_ref => SliceReference::Window { bases: Some(&[]), start: 0 },
-            RefSeqId::Ref(tid) => {
+            // r[impl cram.stream.fields.seq_off]
+            // No SEQ to rebuild: no reference to fetch.
+            _ if !plan.needs_reference() => SliceReference::None,
+            (_, None) => SliceReference::None,
+            (RefSeqId::Ref(tid), Some(fasta)) => {
                 let begin = u64::try_from(sh.alignment_start.max(1)).unwrap_or(1).saturating_sub(1);
                 let span = u64::try_from(sh.alignment_span).unwrap_or(0);
                 let end = begin.saturating_add(span).min(header.target_len(tid).unwrap_or(0));
@@ -554,7 +649,7 @@ impl SliceDecoder {
                     start: begin.cast_signed(),
                 }
             }
-            RefSeqId::Multi => {
+            (RefSeqId::Multi, Some(fasta)) => {
                 let spans = slice::multi_ref_spans(
                     ch,
                     data,
@@ -591,6 +686,7 @@ impl SliceDecoder {
             header,
             read_group_ids,
             keep,
+            &self.fields,
             Synthesis { md_nm: self.decode_md, name_prefix: Some(&self.name_prefix) },
             &mut self.scratch,
         )?;
@@ -637,13 +733,170 @@ fn fetch<F: Read + Seek>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
     use super::*;
+    use crate::cram::encoding::{ByteArrayEncoding, ByteEncoding, IntEncoding};
+    use crate::reader::{AuxTags, PartialRecord};
+    use std::path::PathBuf;
 
     #[test]
     fn containers_and_decoders_are_send() {
         fn send<T: Send>() {}
         send::<CramContainer>();
         send::<CramContainerDecoder>();
+    }
+
+    pub(crate) fn data(name: &str) -> PathBuf {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data")).join(name)
+    }
+
+    /// The content ids of a file's blocks of QS, of BA and BS, and of its
+    /// tags, read from every container's compression header.
+    #[derive(Debug, Default)]
+    pub(crate) struct SeriesBlocks {
+        pub(crate) qual: Vec<i32>,
+        pub(crate) bases: Vec<i32>,
+        pub(crate) tags: Vec<i32>,
+    }
+
+    impl SeriesBlocks {
+        pub(crate) fn of(cram: &Path) -> Self {
+            fn byte(e: &ByteEncoding, out: &mut Vec<i32>) {
+                if let ByteEncoding::External { content_id } = e {
+                    out.push(*content_id);
+                }
+            }
+            let mut reader = CramStreamReader::new(std::fs::File::open(cram).unwrap()).unwrap();
+            let mut slices = SliceDecoder::new(Arc::clone(&reader.shared));
+            let mut out = Self::default();
+            while let Some(container) = reader.next_container().unwrap() {
+                let ch = slices.compression_header(&container.data).unwrap();
+                byte(&ch.data_series.quality_score, &mut out.qual);
+                byte(&ch.data_series.base, &mut out.bases);
+                byte(&ch.data_series.base_sub, &mut out.bases);
+                for enc in ch.tag_encodings.values() {
+                    match enc {
+                        ByteArrayEncoding::External { content_id }
+                        | ByteArrayEncoding::ByteArrayStop { content_id, .. } => {
+                            out.tags.push(*content_id);
+                        }
+                        ByteArrayEncoding::ByteArrayLen { len_encoding, val_encoding } => {
+                            if let IntEncoding::External { content_id } = &**len_encoding {
+                                out.tags.push(*content_id);
+                            }
+                            byte(val_encoding, &mut out.tags);
+                        }
+                        ByteArrayEncoding::Null => {}
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    /// Every record of `cram` read with `fields`, and the content ids of
+    /// the external blocks the decode decompressed.
+    fn decode(
+        cram: &Path,
+        fasta: Option<&Path>,
+        fields: RecordFields,
+    ) -> Result<(Vec<PartialRecord>, Vec<i32>), CramStreamError> {
+        let mut reader = CramStreamReader::new(
+            std::fs::File::open(cram).map_err(|source| CramStreamError::Io { source })?,
+        )?;
+        let decoder = match fasta {
+            Some(fasta) => reader.decoder(fasta)?,
+            None => reader.decoder_without_reference(),
+        };
+        let mut decoder = decoder.fields(fields);
+        let mut records = Vec::new();
+        while let Some(container) = reader.next_container()? {
+            decoder.decode(&container, &mut records)?;
+        }
+        Ok((records, decoder.slices.scratch.codec.decompressed.clone()))
+    }
+
+    fn fixtures() -> [(PathBuf, PathBuf); 2] {
+        [
+            (data("test.cram"), data("test.fasta.gz")),
+            (data("cram-stream/fidelity_v31.cram"), data("cram-stream/fidelity.fa")),
+        ]
+    }
+
+    fn hits(decompressed: &[i32], ids: &[i32]) -> usize {
+        decompressed.iter().filter(|id| ids.contains(id)).count()
+    }
+
+    // r[verify cram.stream.fields.qual_off]
+    // r[verify cram.stream.fields.dropped_blocks]
+    #[test]
+    fn qualities_off_never_decompress_the_quality_block() {
+        for (cram, fasta) in fixtures() {
+            let qual = SeriesBlocks::of(&cram).qual;
+            let (_, all) = decode(&cram, Some(&fasta), RecordFields::all()).unwrap();
+            assert!(hits(&all, &qual) > 0, "{}: QS is read at all", cram.display());
+            let fields = RecordFields::core().with_names().with_sequence().with_aux(AuxTags::All);
+            let (records, without) = decode(&cram, Some(&fasta), fields).unwrap();
+            assert!(!records.is_empty());
+            assert_eq!(hits(&without, &qual), 0, "{}: QS decompressed", cram.display());
+        }
+    }
+
+    // r[verify cram.stream.fields.dropped_blocks]
+    #[test]
+    fn no_tags_never_decompress_a_tag_block() {
+        for (cram, fasta) in fixtures() {
+            let tags = SeriesBlocks::of(&cram).tags;
+            let (_, all) = decode(&cram, Some(&fasta), RecordFields::all()).unwrap();
+            assert!(hits(&all, &tags) > 0, "{}: tags are read at all", cram.display());
+            let fields = RecordFields::all().with_aux(AuxTags::None);
+            let (records, without) = decode(&cram, Some(&fasta), fields).unwrap();
+            assert!(records.iter().all(|r| r.aux().iter_tags().next().is_none()));
+            assert_eq!(hits(&without, &tags), 0, "{}: a tag block decompressed", cram.display());
+        }
+    }
+
+    // r[verify cram.stream.fields.seq_off]
+    // r[verify cram.stream.fields.reference_optional]
+    #[test]
+    fn sequence_off_decodes_without_a_reference() {
+        for (cram, fasta) in fixtures() {
+            let bases = SeriesBlocks::of(&cram).bases;
+            let (full, all) = decode(&cram, Some(&fasta), RecordFields::all()).unwrap();
+            assert!(hits(&all, &bases) > 0, "{}: BA/BS are read at all", cram.display());
+
+            let (core, without) = decode(&cram, None, RecordFields::core()).unwrap();
+            assert_eq!(hits(&without, &bases), 0, "{}: BA/BS decompressed", cram.display());
+            assert_eq!(core.len(), full.len());
+            for (c, f) in core.iter().zip(&full) {
+                assert_eq!(c.cigar().collect::<Vec<_>>(), f.cigar().collect::<Vec<_>>());
+                assert_eq!(
+                    (c.pos(), c.end_pos(), c.seq_len()),
+                    (f.pos(), f.end_pos(), f.seq_len())
+                );
+            }
+
+            let reader = CramStreamReader::new(std::fs::File::open(&cram).unwrap()).unwrap();
+            let decoder = reader.decoder_without_reference();
+            assert!(decoder.needs_reference());
+            assert!(!decoder.fields(RecordFields::core()).needs_reference());
+            let md = RecordFields::core().with_aux(AuxTags::only([*b"NM"]));
+            let decoder = reader.decoder_without_reference().fields(md);
+            assert!(decoder.needs_reference(), "NM may be generated");
+            assert!(!decoder.decode_md(false).needs_reference());
+        }
+    }
+
+    // r[verify cram.stream.fields.reference_optional]
+    /// A slice that needs the reference fails without one, with its own error.
+    #[test]
+    fn the_sequence_without_a_reference_is_an_error() {
+        let (cram, _) = &fixtures()[0];
+        let err = decode(cram, None, RecordFields::all()).unwrap_err();
+        assert!(
+            matches!(err, CramStreamError::Cram { source: CramError::NoReference { .. } }),
+            "{err:?}"
+        );
     }
 }
