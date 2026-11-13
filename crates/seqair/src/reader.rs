@@ -25,6 +25,7 @@ mod stream_pileup;
 mod fuzz;
 
 pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
+pub(crate) use fields::TOKEN;
 pub use fields::{
     AuxTags, Complete, Field, Partial, PartialRecord, RecordFields, RecordKind, RequestedAux,
     SeqRef, Skipped,

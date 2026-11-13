@@ -16,7 +16,7 @@ use super::{
 };
 use crate::bam::{BamHeader, DecodeError, RawBamRecord, raw_record::Refill};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use crate::reader::{Complete, Partial, RecordFields, RecordKind, Tid};
+use crate::reader::{Complete, Partial, RecordFields, RecordKind, TOKEN, Tid};
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
@@ -519,7 +519,7 @@ impl<K: RecordKind> CramContainerDecoder<K> {
                     })
                 };
                 if let Some(slot) = out.get_mut(at) {
-                    fill(K::raw_mut(slot, fields_read))?;
+                    fill(K::raw_mut(slot, fields_read, TOKEN))?;
                 } else {
                     let mut raw = RawBamRecord::default();
                     fill(&mut raw)?;
