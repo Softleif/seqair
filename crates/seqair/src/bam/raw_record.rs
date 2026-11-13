@@ -239,15 +239,16 @@ impl RawBamRecord {
 
     /// Become [`Self::default`], keeping the payload's allocation.
     fn reset(&mut self) {
-        self.payload.clear();
-        self.payload.extend_from_slice(&EMPTY_RECORD);
-        self.tid = None;
-        self.pos = None;
-        self.mate = MateFields::default();
-        self.cigar_start = EMPTY_RECORD.len();
-        self.cigar_end = EMPTY_RECORD.len();
-        self.seq_end = EMPTY_RECORD.len();
-        self.qual_end = EMPTY_RECORD.len();
+        // Destructured, so a new field fails to compile here until it is reset.
+        let Self { payload, tid, pos, mate, cigar_start, cigar_end, seq_end, qual_end } = self;
+        payload.clear();
+        payload.extend_from_slice(&EMPTY_RECORD);
+        *tid = None;
+        *pos = None;
+        *mate = MateFields::default();
+        for offset in [cigar_start, cigar_end, seq_end, qual_end] {
+            *offset = EMPTY_RECORD.len();
+        }
     }
 
     /// The record's bytes as BAM stores them, without `block_size`.
