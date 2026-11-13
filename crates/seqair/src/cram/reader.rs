@@ -523,6 +523,16 @@ impl IndexedCramReader<File> {
         })
     }
 
+    // r[impl unified.record_fields.indexed]
+    /// Decode against a fork of `fasta` if opened without a reference, as the
+    /// pileup's fetches, which read the sequence, need one.
+    pub(crate) fn ensure_reference(&mut self, fasta: &IndexedFastaReader) -> Result<(), CramError> {
+        if self.fasta.is_none() {
+            self.fasta = Some(fasta.fork()?);
+        }
+        Ok(())
+    }
+
     pub fn fork(&self) -> Result<Self, CramError> {
         let file = File::open(&self.shared.cram_path)
             .map_err(|source| CramError::Open { path: self.shared.cram_path.clone(), source })?;

@@ -557,7 +557,7 @@ r[unified.reader_builder]
 `IndexedReader::builder(path)` MUST open what `open`, `open_with_reference` and `open_with_reference_and_index` open, given the same reference (`.reference`) and index (`.index`); those openers are shorthands for it.
 
 r[unified.record_fields.indexed]
-`IndexedReader::builder(path).fields(f).open()` MUST give a `PartialIndexedReader` whose `query_raw` yields `PartialRecord`s read with `f`. Its fetches into a `RecordStore`, and the pileup of `into_pileup`, MUST read the sequence and qualities whatever `f` says, since the pileup needs both.
+`IndexedReader::builder(path).fields(f).open()` MUST give a `PartialIndexedReader` whose `query_raw` yields `PartialRecord`s read with `f`. Its fetches into a `RecordStore`, and the pileup of `into_pileup`, MUST read the sequence and qualities whatever `f` says, since the pileup needs both. A CRAM reader opened without a reference (`r[cram.stream.fields.reference_optional]`) MUST decode against the FASTA `into_pileup` is given, so the pileup's fetches work.
 
 r[unified.record_fields.fetch_into]
 A fetch of a reader built with `RecordFields` MUST store only the requested tags, on every format, so that a tag missing from the request is missing from the store on BAM as on CRAM.
