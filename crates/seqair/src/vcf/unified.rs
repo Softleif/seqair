@@ -72,7 +72,7 @@ pub struct WithSamples;
 ///
 /// `begin_record` is only available after the header has been written:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use seqair::vcf::{Alleles, ContigDef, OutputFormat, VcfHeader, Writer};
 /// use seqair_types::{Base, Pos1};
 ///
@@ -92,7 +92,7 @@ pub struct WithSamples;
 ///
 /// `write_header` cannot be called twice:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use seqair::vcf::{OutputFormat, VcfHeader, Writer};
 /// use std::sync::Arc;
 ///
@@ -792,7 +792,7 @@ fn begin_vcf_record<'a>(
 ///
 /// INFO fields cannot be encoded before the filter is set:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use seqair::vcf::{Begun, InfoInt, RecordEncoder};
 ///
 /// fn check(enc: &mut RecordEncoder<'_, Begun>, dp: &InfoInt) {
@@ -803,7 +803,7 @@ fn begin_vcf_record<'a>(
 ///
 /// FORMAT fields cannot be encoded before `begin_samples`:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use seqair::vcf::{Filtered, FormatInt, RecordEncoder, VcfError};
 ///
 /// fn check(enc: &mut RecordEncoder<'_, Filtered>, dp: &FormatInt) -> Result<(), VcfError> {
@@ -814,7 +814,7 @@ fn begin_vcf_record<'a>(
 ///
 /// INFO fields cannot be encoded after `begin_samples`:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use seqair::vcf::{InfoInt, RecordEncoder, WithSamples};
 ///
 /// fn check(enc: &mut RecordEncoder<'_, WithSamples>, dp: &InfoInt) {

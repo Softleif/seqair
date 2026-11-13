@@ -72,7 +72,7 @@ impl FetchCounts {
 /// it. Its own type so that an opener taking an alignment, a reference and an
 /// index path cannot be called with two of them swapped:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use seqair::reader::IndexedReader;
 /// use std::path::Path;
 /// let swapped = IndexedReader::open_with_reference_and_index(
