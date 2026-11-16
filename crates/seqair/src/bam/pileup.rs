@@ -209,6 +209,39 @@ fn base_qual_at<U>(
     )
 }
 
+/// The column entry `active` contributes at `pos`.
+#[inline(always)]
+fn entry(active: &ActiveRecord, op: PileupOp, indel_after: Indel, pos: Pos0) -> PileupAlignment {
+    PileupAlignment {
+        op,
+        mapq: active.mapq,
+        flags: active.flags,
+        seq_len: active.seq_len,
+        matching_bases: active.matching_bases,
+        indel_bases: active.indel_bases,
+        record_idx: active.record_idx,
+        indel_after,
+        // r[impl pileup.mate_link_cache]
+        mate_idx: active.mate_idx,
+        in_mate_overlap: active.mate_overlap.contains(&pos),
+    }
+}
+
+/// Write `entry` to `spare[*written]` and count it.
+#[inline(always)]
+fn write_entry(
+    spare: &mut [std::mem::MaybeUninit<PileupAlignment>],
+    written: &mut usize,
+    entry: PileupAlignment,
+) -> Option<()> {
+    spare
+        .get_mut(*written)
+        .trace_err("BUG: column entries outran the reserved capacity")?
+        .write(entry);
+    *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+    Some(())
+}
+
 /// Write one column entry per read of `actives` that has one at `pos`,
 /// starting at `spare[*written]`. Inlined into both of the engine's column
 /// loops — the uncapped one, and the capped one that calls it per pass — so
@@ -233,11 +266,17 @@ fn fill_entries<U>(
         // Each path says whether its entry matches the reference while it
         // still knows what it built: matching on the finished `op` instead
         // costs ~10 instructions an entry.
-        let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
+        if let Some(qpos) = active.cigar.plain_match(pos_u32) {
             let (base, qual) = base_qual_at(store, active, qpos);
             matches_reference &= base == reference;
-            (PileupOp::Match { qpos, base, qual }, Indel::None)
-        } else if let Some(gap) = active.cigar.plain_gap(pos_u32) {
+            // Written here rather than joined with the paths below: the join
+            // builds the op as a value of any variant, and every entry then
+            // pays for storing one.
+            let op = PileupOp::Match { qpos, base, qual };
+            write_entry(spare, written, entry(active, op, Indel::None, pos))?;
+            continue;
+        }
+        let (op, indel_after) = if let Some(gap) = active.cigar.plain_gap(pos_u32) {
             matches_reference = false;
             let op = match gap {
                 PlainGap::Deletion(del_len) => PileupOp::Deletion { del_len },
@@ -258,23 +297,8 @@ fn fill_entries<U>(
                 {
                     let (base, qual) = base_qual_at(store, active, qpos);
                     matches_reference = false;
-                    let entry = PileupAlignment {
-                        op: PileupOp::SoftClip { qpos, base, qual },
-                        mapq: active.mapq,
-                        flags: active.flags,
-                        seq_len: active.seq_len,
-                        matching_bases: active.matching_bases,
-                        indel_bases: active.indel_bases,
-                        record_idx: active.record_idx,
-                        indel_after: Indel::None,
-                        mate_idx: active.mate_idx,
-                        in_mate_overlap: active.mate_overlap.contains(&pos),
-                    };
-                    spare
-                        .get_mut(*written)
-                        .trace_err("BUG: column entries outran the reserved capacity")?
-                        .write(entry);
-                    *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+                    let op = PileupOp::SoftClip { qpos, base, qual };
+                    write_entry(spare, written, entry(active, op, Indel::None, pos))?;
                 }
                 continue;
             };
@@ -323,24 +347,7 @@ fn fill_entries<U>(
             (op, indel_after)
         };
 
-        let entry = PileupAlignment {
-            op,
-            mapq: active.mapq,
-            flags: active.flags,
-            seq_len: active.seq_len,
-            matching_bases: active.matching_bases,
-            indel_bases: active.indel_bases,
-            record_idx: active.record_idx,
-            indel_after,
-            // r[impl pileup.mate_link_cache]
-            mate_idx: active.mate_idx,
-            in_mate_overlap: active.mate_overlap.contains(&pos),
-        };
-        spare
-            .get_mut(*written)
-            .trace_err("BUG: column entries outran the reserved capacity")?
-            .write(entry);
-        *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+        write_entry(spare, written, entry(active, op, indel_after, pos))?;
     }
     Some(matches_reference)
 }
