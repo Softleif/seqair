@@ -220,9 +220,9 @@ fn edit_aux_keeps_untouched_tags_byte_for_byte(tc: TestCase) {
         tags.iter().for_each(|t| t.encode(&mut out));
         out
     };
+    // Once a `CG` tag is the CIGAR, no `CG` tag stays.
     if record.aux().as_bytes() != encoded(&visible) {
-        let cg = visible.iter().position(|t| t.key == *b"CG").expect("only CG is taken");
-        visible.remove(cg);
+        visible.retain(|t| t.key != *b"CG");
     }
     assert_eq!(record.aux().as_bytes(), encoded(&visible));
     let edits = draw_edits(&tc, &g);

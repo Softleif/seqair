@@ -392,10 +392,10 @@ impl<'a> Plan<'a> {
         self.seq
     }
 
-    /// Whether a stored tag is decoded: asked for, or a `cF` that says
-    /// which of `MD`/`NM` not to generate.
+    /// Whether a stored tag is decoded: asked for, a `cF` that says which
+    /// of `MD`/`NM` not to generate, or a `CG` that may hold the CIGAR
+    /// (`r[cram.record.long_cigar]`; [`drop_unrequested_cg`] drops it after).
     fn keeps_tag(self, tag: [u8; 2]) -> bool {
-        // `CG` may hold the CIGAR (`r[cram.record.long_cigar]`).
         self.aux.contains(tag) || (self.md_nm && tag == *b"cF") || tag == *b"CG"
     }
 }
@@ -1443,16 +1443,17 @@ fn decode_record(
         // r[impl cram.record.long_cigar]
         // As `cram_to_bam` does, a `CG` tag behind a placeholder CIGAR is the
         // CIGAR. The mate span above keeps the placeholder's, as htslib's.
-        let (end_pos, matching_bases, indel_bases) =
-            if long_cigar::take(cigar_buf, aux_buf, bases_buf.len(), true) {
-                let end = cigar::compute_end_pos(pos_0based, &*cigar_buf).ok_or(
-                    super::reader::CramError::InvalidPosition { value: pos_0based.as_i64() },
-                )?;
-                let (matching, indels) = cigar::calc_matches_indels(cigar_buf);
-                (end, matching, indels)
-            } else {
-                (end_pos, matching_bases, indel_bases)
-            };
+        let placed = record_ref_id.is_some();
+        let taken = long_cigar::take(cigar_buf, aux_buf, bases_buf.len(), placed)?;
+        drop_unrequested_cg(plan, aux_buf);
+        let (end_pos, matching_bases, indel_bases) = if taken {
+            let end = cigar::compute_end_pos(pos_0based, &*cigar_buf)
+                .ok_or(super::reader::CramError::InvalidPosition { value: pos_0based.as_i64() })?;
+            let (matching, indels) = cigar::calc_matches_indels(cigar_buf);
+            (end, matching, indels)
+        } else {
+            (end_pos, matching_bases, indel_bases)
+        };
 
         let slot = out.push(
             pos_0based,
@@ -1494,6 +1495,8 @@ fn decode_record(
         ds.base.skip_n(ctx, read_length)?;
         bases_buf.resize(read_length, IupacBase::N);
     }
+
+    drop_unrequested_cg(plan, aux_buf);
 
     // Quality. See the mapped-read branch above for the bulk-decode
     // rationale.
@@ -2270,6 +2273,14 @@ fn push_cigar_op(ops: &mut Vec<(u32, u8)>, len: u32, op: u8) {
 }
 
 /// Pack `(length, op)` pairs into BAM-layout [`CigarOp`]s.
+/// A `CG` tag is decoded whatever tags were asked for, as it may hold the
+/// CIGAR; once that is settled, one that was not asked for goes.
+fn drop_unrequested_cg(plan: Plan<'_>, aux: &mut Vec<u8>) {
+    if !plan.aux.contains(*b"CG") {
+        long_cigar::drop_cg_tags(aux);
+    }
+}
+
 fn pack_cigar(ops: &[(u32, u8)], cigar_buf: &mut Vec<CigarOp>) {
     cigar_buf.clear();
     cigar_buf

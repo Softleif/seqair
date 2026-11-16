@@ -44,7 +44,7 @@ whole ops (`from_bam_bytes` MUST return `None` for a length that is not a
 multiple of 4), any alignment, decoded on the fly by `iter`, copied by
 `extend_into`/`to_vec` (one `memcpy`, correct at any alignment), and equal to
 `PackedCigar::from_ops` of the same ops. A record's packed CIGAR MUST be its
-real one (`r[bam.long_cigar.resolve]`); the placeholder a long CIGAR stands
+real one (`r[bam.raw_record.long_cigar]`); the placeholder a long CIGAR stands
 behind is reachable only as `RawBamRecord::stored_cigar`.
 
 r[cigar.slice_from_bam_bytes]

@@ -18,7 +18,7 @@
 use super::MateFields;
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::{self, CigarOp};
-use super::long_cigar::WireCigar;
+use super::long_cigar::{LongCigarError, WireCigar};
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
@@ -33,12 +33,9 @@ pub enum OwnedRecordError {
     #[error("qname length {len} exceeds maximum of 254 bytes")]
     QnameTooLong { len: usize },
 
-    /// A CIGAR of more than 65535 operations goes in a `CG` tag behind a
-    /// placeholder whose `N` op holds the reference length in 28 bits.
-    #[error(
-        "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
-    )]
-    CigarRefLenTooLong { ref_len: u64 },
+    /// BAM cannot store the record's CIGAR of more than 65535 operations.
+    #[error(transparent)]
+    LongCigar(#[from] LongCigarError),
 
     /// Sequence length exceeds `i32::MAX` (BAM `l_seq` is i32).
     #[error("sequence length {len} exceeds i32::MAX")]
@@ -306,8 +303,8 @@ impl OwnedBamRecord {
             return Err(OwnedRecordError::SeqLengthOverflow { len: self.seq.len() });
         }
         // r[impl bam.owned_record.long_cigar]
-        let cigar = WireCigar::new(&self.cigar, u32::try_from(self.seq.len()).unwrap_or(u32::MAX))
-            .map_err(|e| OwnedRecordError::CigarRefLenTooLong { ref_len: e.ref_len })?;
+        let placed = self.tid.is_some() && self.pos.is_some();
+        let cigar = WireCigar::new(&self.cigar, self.seq.len(), placed)?;
         // r[impl bam.owned_record.seq_qual_length_at_serialization]
         // `set_seq` does not touch `qual`, so a caller that resizes the
         // sequence and does not follow with `set_qual` leaves the two out of

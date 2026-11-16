@@ -9,18 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **One model for long CIGARs.** BAM's `<l_seq>S<ref_len>N` placeholder with the real CIGAR in a `CG:B:I` tag is now purely a wire-format matter: every reader resolves it on the way in, as htslib's `bam_tag2cigar` does, and every BAM writer writes it on the way out, as `bam_write1` does. In between, a CIGAR is its real operations and a resolved `CG` tag is not a tag.
+- **One model for long CIGARs.** BAM's `<l_seq>S<ref_len>N` placeholder with the real CIGAR in a `CG:B:I` tag is now purely a wire-format matter: every reader resolves it on the way in, as htslib's `bam_tag2cigar` does, and every BAM writer writes it on the way out, as `bam_write1` does. In between, a CIGAR is its real operations, and once a `CG` tag is the CIGAR no `CG` tag stays among the tags (htslib keeps any but the one it took, which a later reader may take for the CIGAR).
   - New `bam::PackedCigar`: a CIGAR in BAM's packed, unaligned form (`iter`, `len`, `first`, `to_vec`, `extend_into`, `as_ops`, `from_ops`, `from_bam_bytes`). It replaces `CigarOp::iter_bam_bytes`, `CigarOp::extend_from_bam_bytes` and `CigarOp::slice_from_bam_bytes`.
   - `RawBamRecord::cigar()` and `PartialRecord::cigar()` return a `PackedCigar`; `cigar_len()` is gone (`cigar().len()`), and `stored_cigar_bytes()` is now `stored_cigar()`. A record whose `CG` tag holds a CIGAR that fits BAM's 16-bit op count has those ops moved into the CIGAR field and the tag dropped; a longer one keeps its tag, moved to the end, as the only `CG` tag. `aux()` no longer shows that tag (so the SAM formatter no longer needs to skip it), and `edit_aux` edits around it.
   - `FilterRawFields` has `cigar: PackedCigar` (the real CIGAR) and `aux: Aux` (without the resolved `CG` tag) in place of `cigar: &[u8]`, `aux_bytes` and `n_cigar_ops`.
-  - `OwnedBamRecord` holds a CIGAR of any length; `to_bam_bytes` writes one past 65535 operations as the placeholder plus a trailing `CG:B:I`. `OwnedRecordError::CigarCountOverflow` is replaced by `CigarRefLenTooLong`.
+  - `OwnedBamRecord` holds a CIGAR of any length; `to_bam_bytes` writes one past 65535 operations as the placeholder plus a trailing `CG:B:I`.
+  - New `bam::LongCigarError` says why BAM cannot store a long CIGAR: a reference span or a sequence of 2^28 or more, or an unplaced record (no reader takes its `CG` tag for the CIGAR, so it would be lost). It replaces `OwnedRecordError::CigarCountOverflow` (as `OwnedRecordError::LongCigar`) and the `CigarRefLenTooLong` variants of `RecordEncodeError` and `SamRecordError` (as `LongCigar`).
+  - The SAM parser parses a `CG` tag that was not asked for only when the CIGAR starts as the placeholder does, and drops it once the CIGAR is settled; the CRAM decoder likewise.
 
 ### Fixed
 
 - `RecordStore` resolves BAM long CIGARs from `CG` before filtering and auxiliary-tag selection. Fetches and pileups now use the real alignment rather than the soft-clip/reference-skip placeholder, even when auxiliary tags are not retained. `SlimRecord::n_cigar_ops` widens from `u16` to `u32`; `push_fields` and `set_alignment` preserve counts above 65535. The store keeps no resolved `CG` tag, and `write_store_record` writes such a record back in BAM's long form; `write_raw` still copies records unchanged.
 - The indexed SAM reader and the CRAM decoder take a `CG` tag behind a placeholder CIGAR as the CIGAR (htslib's `sam_parse1` and `cram_to_bam` do); before, the store kept the placeholder.
 - The BAM reader's region filter and `RawBamRecord::end_pos` compute a long-CIGAR record's end from the real CIGAR, not the placeholder.
-- A BAM writer emitting a CIGAR's long form leaves out any other `CG` tag among the record's tags, which a reader would otherwise take as the CIGAR.
+- A BAM writer leaves out a stale `CG` tag that a reader would take for the record's CIGAR: always for a CIGAR written in the long form, and for one written inline that starts as the placeholder does.
+- A `CG` CIGAR that does not account for SEQ is refused by every reader (`CigarQueryLenMismatch`, or `CigarSeqLenMismatch` from SAM text), as htslib refuses it; the indexed SAM and CRAM readers stored it.
+- The indexed SAM reader no longer drops a record from a region by its placeholder's span: the real CIGAR's span decides.
 
 ## v0.10.1 (2026-11-13)
 

@@ -5,7 +5,7 @@ use super::encode::{self, SamRecordEncoder, SamRecordError};
 use crate::bam::{
     BaiError, BamHeader, BamHeaderError, BamIndex, MateFields, RawBamRecord,
     bgzf::VirtualOffset,
-    cigar::{self, CigarOp},
+    cigar::{self, CigarOp, PackedCigar},
     flags::BamFlags,
     index::Chunk,
     long_cigar,
@@ -696,7 +696,7 @@ fn select_line(
     // the CIGAR's end; compute_end_pos returns None only if the ref span
     // overflows u32 range, so fall back to pos (zero-span) on malformed input.
     let end_pos = if cigar_available && !flags.is_unmapped() {
-        cigar::compute_end_pos(pos, cigar_buf).unwrap_or(pos)
+        cigar::compute_end_pos(pos, &*cigar_buf).unwrap_or(pos)
     } else {
         pos
     };
@@ -704,7 +704,14 @@ fn select_line(
     // r[impl sam.reader.overlap_filter+4]
     // r[impl sam.reader.overlap_inclusive]
     // r[impl interval.overlap_test]
-    if pos.as_i64() > end || end_pos.as_i64() < start {
+    // r[impl sam.reader.long_cigar]
+    // A CIGAR that starts as BAM's placeholder does may stand for one in a
+    // `CG` tag, whose span decides once the tags are read (`parse_sam_line`).
+    let seq_field = fields.get(9).copied().unwrap_or(b"*");
+    let seq_len = if seq_field == b"*" { 0 } else { seq_field.len() };
+    let maybe_long =
+        long_cigar::starts_like_placeholder(PackedCigar::from_ops(cigar_buf), seq_len, true);
+    if pos.as_i64() > end || (end_pos.as_i64() < start && !maybe_long) {
         return Ok(None);
     }
     Ok(Some(SelectedLine { tid: rec_tid, pos, end_pos, flags, mapq }))
@@ -768,26 +775,30 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         // r[impl sam.record.aux_parse_strict+2]
         // r[impl sam.record.aux_int_range+3]
         // r[impl sam.reader.fields.aux]
-        encode::parse_aux_fields(aux_text, aux, aux_buf)?;
+        let cg = long_cigar::starts_like_placeholder(
+            PackedCigar::from_ops(cigar_buf),
+            bases.len(),
+            true,
+        );
+        encode::parse_aux_fields(aux_text, aux, cg, aux_buf)?;
     }
 
     // r[impl sam.reader.long_cigar]
     // A `CG` tag behind a placeholder CIGAR is the CIGAR, as `sam_parse1`
-    // reads it; the region test above took the placeholder's span, which a
-    // well-formed placeholder shares.
-    let end_pos = if long_cigar::take(cigar_buf, aux_buf, bases.len(), true) {
-        let end_pos = if flags.is_unmapped() {
+    // reads it; then the record's end is the real CIGAR's, and the region
+    // test, which let a placeholder through, is made again.
+    let end_pos = if encode::take_cg_tag(cigar_buf, aux_buf, bases.len(), aux)? {
+        if flags.is_unmapped() {
             pos
         } else {
             cigar::compute_end_pos(pos, &*cigar_buf).unwrap_or(pos)
-        };
-        if end_pos.as_i64() < start {
-            return Ok(None);
         }
-        end_pos
     } else {
         end_pos
     };
+    if end_pos.as_i64() < start {
+        return Ok(None);
+    }
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
     let rnext_field = fields.get(6).copied().unwrap_or(b"*");
@@ -976,7 +987,7 @@ mod tests {
     /// The aux bytes the shared parser produces for one `TAG:TYPE:VALUE` field.
     fn aux_bytes(field: &str) -> Result<Vec<u8>, SamError> {
         let mut buf = Vec::new();
-        encode::parse_aux_fields(field.as_bytes(), &AuxTags::All, &mut buf)?;
+        encode::parse_aux_fields(field.as_bytes(), &AuxTags::All, false, &mut buf)?;
         Ok(buf)
     }
 

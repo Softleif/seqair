@@ -139,13 +139,15 @@ it using the same rules as `RawBamRecord` (`r[bam.raw_record.long_cigar]`), befo
 filtering or discarding unrequested auxiliary tags. The filter's CIGAR, the
 stored CIGAR and all derived alignment fields MUST describe the resolved
 operations, not the placeholder, and neither the filter's tags nor the aux slab
-MUST hold the `CG` tag: as in htslib, it is the CIGAR now. The SAM and CRAM
+MUST hold a `CG` tag (`r[bam.raw_record.cg_hidden]`): it is the CIGAR now. A
+`CG` CIGAR that does not account for SEQ MUST fail the push with
+`DecodeError::CigarQueryLenMismatch`, whatever FLAG says, as htslib refuses it. The SAM and CRAM
 readers resolve before `push_fields` (`r[sam.reader.long_cigar]`,
 `r[cram.record.long_cigar]`), so the store never holds a placeholder or a
 resolved `CG` tag, whichever reader filled it. The BAM reader's pre-push
-overlap test MUST use the same resolved CIGAR's end (`compute_end_pos_from_raw`). `SlimRecord` and `FilterRawFields` MUST use a
-`u32` operation count; `push_fields` and `set_alignment` MUST also preserve
-counts above 65535 without truncation.
+overlap test MUST use the same resolved CIGAR's end (`compute_end_pos_from_raw`).
+`SlimRecord` MUST use a `u32` operation count; `push_fields` and
+`set_alignment` MUST also preserve counts above 65535 without truncation.
 
 r[record_store.seq_lossless]
 The bases slab MUST hold each record's SEQ as `IupacBase`, as the file stores it: for BAM the 4-bit code, for SAM the code of `r[sam.record.seq_decode+1]`, for CRAM the code the decode rebuilds (`r[cram.stream.iupac+1]`). A record's `seq()` MUST therefore equal `RawBamRecord::iupac_bases()` of the same record read by `query_raw` or a stream reader, code for code.

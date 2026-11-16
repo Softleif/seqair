@@ -38,7 +38,11 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
     let pos = h.pos?;
     let stored = PackedCigar::whole_ops(raw.get(h.var_start..h.cigar_end)?);
     let aux = raw.get(h.qual_end..)?;
+    // A `CG` tag that does not account for the sequence is no CIGAR: the
+    // store refuses the record; until then, the stored CIGAR stands.
     let cigar = super::long_cigar::find(stored, h.seq_len as usize, h.refs.has_reference(), aux)
+        .ok()
+        .flatten()
         .map_or(stored, |long| long.ops);
     super::cigar::compute_end_pos(pos, cigar)
 }

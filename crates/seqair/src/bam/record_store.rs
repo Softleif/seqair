@@ -661,11 +661,8 @@ impl<U> RecordStore<U> {
         // Resolved before the filter and the tag selection: CG carries the
         // alignment even when the caller keeps no tags, and is not a tag once
         // it is the CIGAR.
-        let long = long_cigar::find(stored_cigar, h.seq_len as usize, refs.tid.is_some(), raw_aux);
+        let long = long_cigar::find(stored_cigar, h.seq_len as usize, refs.tid.is_some(), raw_aux)?;
         let cigar = long.as_ref().map_or(stored_cigar, |long| long.ops);
-        if long.is_some() {
-            super::raw_record::check_cigar_against_seq(cigar, true, h.flags, h.seq_len)?;
-        }
         let n_cigar_ops = u32::try_from(cigar.len())
             .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar.len() })?;
         let aux_slice = match &long {

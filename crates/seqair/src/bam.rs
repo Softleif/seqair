@@ -52,6 +52,7 @@ pub mod depth_cap;
 pub mod header;
 pub mod index;
 pub(crate) mod long_cigar;
+pub use long_cigar::LongCigarError;
 pub mod mate;
 pub mod nm_md;
 pub mod owned_record;

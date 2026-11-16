@@ -52,7 +52,7 @@ r[bam.owned_record.qname_limit]
 The qname (without NUL terminator) MUST NOT exceed 254 bytes. The `l_read_name` field in the BAM 32-byte header is a u8 that stores the length including NUL, so the maximum stored length is 255. The builder and `to_bam_bytes` MUST reject qnames exceeding this limit with a typed error.
 
 r[bam.owned_record.long_cigar]
-An `OwnedBamRecord` MUST hold a CIGAR of any length: BAM's 16-bit `n_cigar_op` is a wire-format limit, not one of the record. `to_bam_bytes` MUST write a CIGAR of more than 65535 operations as every BAM writer does (`r[sam.encode.long_cigar]`): the placeholder, and the real CIGAR in a trailing `CG:B:I` tag, leaving out any `CG` tag already among the record's tags. A reference length of 2^28 or more cannot be written that way and MUST fail with `OwnedRecordError::CigarRefLenTooLong`.
+An `OwnedBamRecord` MUST hold a CIGAR of any length: BAM's 16-bit `n_cigar_op` is a wire-format limit, not one of the record. `to_bam_bytes` MUST write a CIGAR of more than 65535 operations as every BAM writer does (`r[sam.encode.long_cigar+1]`): the placeholder, and the real CIGAR in a trailing `CG:B:I` tag, leaving out any `CG` tag already among the record's tags. A record BAM cannot store that way MUST fail with `OwnedRecordError::LongCigar`: a reference length or a sequence of 2^28 or more (the placeholder's ops hold 28 bits), or an unplaced record (no reader takes a `CG` tag for its CIGAR, so it would be lost).
 
 r[bam.owned_record.seq_length_limit]
 The sequence length MUST NOT exceed `i32::MAX` (2,147,483,647). The `l_seq` field in the BAM header is an i32. The builder, `set_seq`, and `to_bam_bytes` MUST reject sequences exceeding this limit with a typed error.

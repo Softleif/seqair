@@ -331,8 +331,8 @@ impl<W: Write> BamWriter<W> {
 
         // Validate field limits (matching OwnedBamRecord::to_bam_bytes).
         // r[impl bam_writer.store_long_cigar]
-        let cigar = WireCigar::new(cigar, rec.seq_len)
-            .map_err(|e| OwnedRecordError::CigarRefLenTooLong { ref_len: e.ref_len })?;
+        let cigar = WireCigar::new(cigar, rec.seq_len as usize, rec.tid.is_some())
+            .map_err(OwnedRecordError::from)?;
         if qname.len() > 254 {
             return Err(OwnedRecordError::QnameTooLong { len: qname.len() }.into());
         }

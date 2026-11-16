@@ -8,7 +8,7 @@
 use crate::bam::{
     BamHeader, CigarOp, DecodeError, MateFields, RawBamRecord,
     cigar::{self, CigarOpType},
-    long_cigar::{self, WireCigar},
+    long_cigar::{self, LongCigarError, WireCigar},
     raw_record::Refill,
     record::{FixedHeaderFields, MAX_RECORD_SIZE, encode_fixed_header},
     seq,
@@ -104,12 +104,9 @@ pub enum SamRecordError {
     #[error("CIGAR query length {cigar_query_len} does not match SEQ length {seq_len}")]
     CigarSeqLenMismatch { cigar_query_len: u64, seq_len: usize },
 
-    /// A CIGAR of more than 65535 operations is stored as a placeholder whose
-    /// `N` operation holds the reference length, which must be below 2^28.
-    #[error(
-        "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
-    )]
-    CigarRefLenTooLong { ref_len: u64 },
+    /// BAM cannot store the record's CIGAR of more than 65535 operations.
+    #[error(transparent)]
+    LongCigar(#[from] LongCigarError),
 
     #[error("invalid SEQ byte {} at offset {offset}", Escaped(&[*byte]))]
     InvalidSeq { byte: u8, offset: usize },
@@ -343,8 +340,8 @@ impl SamRecordEncoder {
             && !(placed && self.cg_tag_may_apply(seq.len()))
             && encode_alignment(payload, &AlignmentFields { cigar: &self.cigar, ..fields }).is_ok()
         {
-            parse_aux_at_tabs(line, aux_tabs, &self.tags, payload)?;
-            check_cigar_seq(&self.cigar, seq)?;
+            parse_aux_at_tabs(line, aux_tabs, &self.tags, false, payload)?;
+            check_cigar_seq(&self.cigar, seq.len())?;
             if payload.len() > MAX_RECORD_SIZE {
                 return Err(SamRecordError::RecordTooLarge { size: payload.len() });
             }
@@ -353,20 +350,17 @@ impl SamRecordEncoder {
         payload.clear();
 
         self.aux.clear();
-        parse_aux_at_tabs(line, aux_tabs, &self.tags, &mut self.aux)?;
-
-        // r[impl sam.encode.cg_tag]
-        if placed {
-            self.take_cg_tag(seq.len());
+        let cg_may_apply = placed && self.cg_tag_may_apply(seq.len());
+        parse_aux_at_tabs(line, aux_tabs, &self.tags, cg_may_apply, &mut self.aux)?;
+        if cg_may_apply {
+            take_cg_tag(&mut self.cigar, &mut self.aux, seq.len(), &self.tags)?;
         }
-        check_cigar_seq(&self.cigar, seq)?;
+        check_cigar_seq(&self.cigar, seq.len())?;
 
         encode_alignment(payload, &AlignmentFields { cigar: &self.cigar, aux: &self.aux, ..fields })
             .map_err(|e| match e {
                 RecordEncodeError::QnameTooLong { len } => SamRecordError::QnameTooLong { len },
-                RecordEncodeError::CigarRefLenTooLong { ref_len } => {
-                    SamRecordError::CigarRefLenTooLong { ref_len }
-                }
+                RecordEncodeError::LongCigar(e) => SamRecordError::LongCigar(e),
                 RecordEncodeError::RecordTooLarge { size } => {
                     SamRecordError::RecordTooLarge { size }
                 }
@@ -380,12 +374,29 @@ impl SamRecordEncoder {
             .first()
             .is_some_and(|op| op.op_type() == CigarOpType::SoftClip && op.len() as usize == l_seq)
     }
+}
 
-    /// htslib's `bam_tag2cigar` on a placed record
-    /// (`r[bam.raw_record.long_cigar]`): the `CG` tag becomes the CIGAR.
-    fn take_cg_tag(&mut self, l_seq: usize) {
-        long_cigar::take(&mut self.cigar, &mut self.aux, l_seq, true);
+// r[impl sam.encode.cg_tag]
+/// htslib's `bam_tag2cigar` on a placed SAM record whose CIGAR starts as the
+/// placeholder does (`r[bam.raw_record.long_cigar]`): a qualifying `CG` tag
+/// becomes the CIGAR. `CG` was parsed whatever `tags` asked for, so one that
+/// was not asked for goes now, the CIGAR or not.
+pub(crate) fn take_cg_tag(
+    cigar: &mut Vec<CigarOp>,
+    aux: &mut Vec<u8>,
+    l_seq: usize,
+    tags: &AuxTags,
+) -> Result<bool, SamRecordError> {
+    let taken = long_cigar::take(cigar, aux, l_seq, true).map_err(|e| match e {
+        DecodeError::CigarQueryLenMismatch { cigar_query_len, .. } => {
+            SamRecordError::CigarSeqLenMismatch { cigar_query_len, seq_len: l_seq }
+        }
+        source => SamRecordError::InvalidRecord { source },
+    })?;
+    if !tags.contains(*b"CG") {
+        long_cigar::drop_cg_tags(aux);
     }
+    Ok(taken)
 }
 
 /// A decoded record has a field BAM cannot hold, so it has no BAM form.
@@ -400,12 +411,9 @@ pub enum RecordEncodeError {
     #[error("QNAME is {len} bytes; BAM allows at most 254")]
     QnameTooLong { len: usize },
 
-    /// A CIGAR too long for the record's 16-bit op count goes in a `CG` tag,
-    /// behind a placeholder whose `N` op holds the reference length in 28 bits.
-    #[error(
-        "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
-    )]
-    CigarRefLenTooLong { ref_len: u64 },
+    /// BAM cannot store the record's CIGAR of more than 65535 operations.
+    #[error(transparent)]
+    LongCigar(#[from] LongCigarError),
 
     /// The whole record exceeds the reader/writer record limit
     /// (`r[io.writer_limits]`).
@@ -492,9 +500,7 @@ pub(crate) fn encode_alignment(
     let beg = f.pos.map_or(-1, |p| i64::from(p.as_i32()));
     let bin = reg2bin(beg, beg.saturating_add_unsigned(span));
 
-    let seq_len = u32::try_from(f.seq.len()).unwrap_or(u32::MAX);
-    let cigar = WireCigar::new(f.cigar, seq_len)
-        .map_err(|e| RecordEncodeError::CigarRefLenTooLong { ref_len: e.ref_len })?;
+    let cigar = WireCigar::new(f.cigar, f.seq.len(), f.tid.is_some() && f.pos.is_some())?;
     // An upper bound: a stale `CG` tag in `aux` is dropped for a long CIGAR.
     let size = [
         FIXED_LEN,
@@ -694,6 +700,7 @@ pub fn parse_cigar(text: &[u8], out: &mut Vec<CigarOp>) -> Result<(), SamRecordE
 pub(crate) fn parse_aux_fields(
     text: &[u8],
     tags: &AuxTags,
+    cg: bool,
     out: &mut Vec<u8>,
 ) -> Result<(), SamRecordError> {
     let mut rest = text;
@@ -706,7 +713,7 @@ pub(crate) fn parse_aux_fields(
         if field.is_empty() && next.is_none() {
             return Ok(());
         }
-        parse_aux_field_if(field, tags, out)?;
+        parse_aux_field_if(field, tags, cg, out)?;
         match next {
             Some(next) => rest = next,
             None => return Ok(()),
@@ -720,6 +727,7 @@ fn parse_aux_at_tabs(
     line: &[u8],
     tabs: &[usize],
     tags: &AuxTags,
+    cg: bool,
     out: &mut Vec<u8>,
 ) -> Result<(), SamRecordError> {
     for (i, &tab) in tabs.iter().enumerate() {
@@ -729,36 +737,38 @@ fn parse_aux_at_tabs(
         if field.is_empty() && end.is_none() {
             return Ok(());
         }
-        parse_aux_field_if(field, tags, out)?;
+        parse_aux_field_if(field, tags, cg, out)?;
     }
     Ok(())
 }
 
 // r[impl sam.encode.cigar_seq]
 /// A CIGAR and a SEQ, both present, must agree on the query length.
-fn check_cigar_seq(cigar: &[CigarOp], seq: &[u8]) -> Result<(), SamRecordError> {
-    if seq.is_empty() || cigar.is_empty() {
+fn check_cigar_seq(cigar: &[CigarOp], seq_len: usize) -> Result<(), SamRecordError> {
+    if seq_len == 0 || cigar.is_empty() {
         return Ok(());
     }
     let cigar_query_len = cigar::query_len(cigar);
-    if cigar_query_len != seq.len() as u64 {
-        return Err(SamRecordError::CigarSeqLenMismatch { cigar_query_len, seq_len: seq.len() });
+    if cigar_query_len != seq_len as u64 {
+        return Err(SamRecordError::CigarSeqLenMismatch { cigar_query_len, seq_len });
     }
     Ok(())
 }
 
 // r[impl sam.stream.fields.aux]
-/// [`parse_aux_field`], unless `tags` leaves the field's tag out. `CG` is
-/// always parsed: a long CIGAR lives in it (`r[sam.encode.cg_tag]`).
+/// [`parse_aux_field`], unless `tags` leaves the field's tag out. With `cg`
+/// — the CIGAR starts as BAM's placeholder does, so a `CG` tag may hold the
+/// real one (`r[sam.encode.cg_tag]`) — `CG` is parsed whatever `tags` says.
 #[inline(always)]
 fn parse_aux_field_if(
     field: &[u8],
     tags: &AuxTags,
+    cg: bool,
     out: &mut Vec<u8>,
 ) -> Result<(), SamRecordError> {
     if !matches!(tags, AuxTags::All)
         && let Some(&[t0, t1]) = field.first_chunk::<2>()
-        && [t0, t1] != *b"CG"
+        && !(cg && [t0, t1] == *b"CG")
         && !tags.contains([t0, t1])
     {
         return Ok(());
@@ -938,7 +948,7 @@ mod tests {
 
     fn aux(field: &str) -> Result<Vec<u8>, SamRecordError> {
         let mut out = Vec::new();
-        parse_aux_fields(field.as_bytes(), &AuxTags::All, &mut out)?;
+        parse_aux_fields(field.as_bytes(), &AuxTags::All, false, &mut out)?;
         Ok(out)
     }
 

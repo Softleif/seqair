@@ -46,11 +46,11 @@ r[bam_writer.write_store_record+1]
 
 r[bam_writer.store_long_cigar]
 `write_store_record` MUST write a CIGAR of more than 65535 operations as every
-BAM writer does (`r[sam.encode.long_cigar]`): the placeholder, and the real
+BAM writer does (`r[sam.encode.long_cigar+1]`): the placeholder, and the real
 CIGAR in a trailing `CG:B:I` tag. The store never holds a resolved `CG` tag
-(`r[record_store.long_cigar+1]`), so a record read and written back is the
-record htslib writes. A reference length of 2^28 or more MUST fail with
-`OwnedRecordError::CigarRefLenTooLong` before any byte is written.
+(`r[record_store.long_cigar+1]`), so a record read and written back reads back
+as itself. A reference length of 2^28 or more MUST fail with
+`OwnedRecordError::LongCigar` before any byte is written.
 
 r[bam_writer.write_raw]
 `write_raw(&RawBamRecord)` MUST write the record's payload byte for byte, after its `block_size`. The record was validated against the header it was read with; its reference and mate reference ids MUST additionally be below this writer's target count, or the write MUST fail with `BamWriteError::TidOutOfRange` before anything is written. The BAI inputs are the record's position and the exclusive end of its CIGAR's reference span (`end_pos + 1`). A record without a reference is counted as unplaced (`n_no_coor`) whatever its FLAG says, as htslib's `hts_idx_push` counts it, rather than refused as `MappedWithoutReference`. Index co-production, error poisoning, flush-before-record and the record size limit apply as for `write()`.
