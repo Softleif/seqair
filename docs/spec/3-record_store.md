@@ -293,8 +293,9 @@ consumer that deduplicates overlapping mates keeps both.
 Both MUST therefore be unrepresentable rather than documented.
 `PileupEngine::new` and `PileupEngine::with_scratch` MUST take a `PileupInput`,
 not a `RecordStore`. `PileupInput` MUST have no public constructor;
-`RecordStore::prepare_for_pileup(self) -> Prepared` MUST be the only way to
-obtain one. `Prepared` MUST carry the `PileupInput` and the `MateLinkStats`
+`RecordStore::prepare_for_pileup(self) -> Prepared` MUST be the default way to
+obtain one. The explicit opt-out below is the only exception to mate linking.
+`Prepared` MUST carry the `PileupInput` and the `MateLinkStats`
 linking produced, since callers log the latter and the engine has no use for it.
 
 `prepare_for_pileup` MUST sort by position before linking — a mate index is a
@@ -302,6 +303,15 @@ store index and cannot survive a reorder — and MUST be idempotent: the sort is
 skipped when no push arrived out of order and the linking when nothing has
 invalidated it. The resulting pileup MUST NOT depend on the order records were
 pushed in.
+
+r[record_store.pileup_input.without_mates]
+`prepare_for_pileup_without_mate_links` MUST produce a position-sorted,
+window-indexed `PileupInput` without matching read names. All mate links,
+including links established before the call, MUST be cleared. Pileup positions
+and alignments MUST match the default preparation, but `mate_idx()` MUST be
+`None` and `in_mate_overlap()` MUST be `false`. This method is for callers that
+perform their own mate resolution or deliberately count both mates. The default
+`prepare_for_pileup` MUST continue linking mates.
 
 r[record_store.pileup_input.order_tracking]
 The store MUST track whether its records are in ascending `pos` order. A push

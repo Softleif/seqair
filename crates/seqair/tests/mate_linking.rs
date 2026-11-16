@@ -42,6 +42,55 @@ const SECOND: u16 = 0x80;
 const SECONDARY: u16 = 0x100;
 const SUPPLEMENTARY: u16 = 0x800;
 
+// r[verify record_store.pileup_input.without_mates]
+#[test]
+fn explicit_unlinked_pileup_preserves_columns_and_clears_existing_links() {
+    for reverse in [false, true] {
+        for prelink in [false, true] {
+            for skip_links in [false, true] {
+                let mut store = RecordStore::new();
+                let mut reads = [Read::mate(2, 4, 4, FIRST), Read::mate(4, 3, 2, SECOND)];
+                if reverse {
+                    reads.reverse();
+                }
+                for read in reads {
+                    push(&mut store, b"pair", read);
+                }
+                if prelink {
+                    assert!(store.link_mates().is_clean());
+                    assert!(store.record(ri(0)).unwrap().mate_idx().is_some());
+                }
+                let input = if skip_links {
+                    store.prepare_for_pileup_without_mate_links()
+                } else {
+                    store.prepare_for_pileup().input
+                };
+                assert_eq!(
+                    input
+                        .records_overlapping(Pos0::new(5).unwrap(), Pos0::new(5).unwrap(),)
+                        .count(),
+                    2
+                );
+                let mut engine =
+                    PileupEngine::new(input, (Pos0::ZERO..=Pos0::new(8).unwrap()).into());
+                let mut depths = Vec::new();
+                while let Some(column) = engine.pileups() {
+                    let pos = column.pos().as_u32();
+                    depths.push((pos, column.depth()));
+                    for alignment in column.raw_alignments() {
+                        assert_eq!(alignment.mate_idx().is_some(), !skip_links);
+                        assert_eq!(
+                            alignment.in_mate_overlap(),
+                            !skip_links && (4..=5).contains(&pos)
+                        );
+                    }
+                }
+                assert_eq!(depths, [(2, 1), (3, 1), (4, 2), (5, 2), (6, 1)]);
+            }
+        }
+    }
+}
+
 /// A read to push: the fields mate linking actually looks at.
 #[derive(Clone, Copy, Debug)]
 struct Read {

@@ -392,12 +392,12 @@ pub struct RecordStore<U = ()> {
 }
 
 // r[impl record_store.pileup_input]
-/// A [`RecordStore`] that is in ascending position order and has its mates
-/// linked — the two properties [`PileupEngine`] relies on and does not check.
+/// A [`RecordStore`] in ascending position order, with mates linked unless
+/// the caller explicitly opted out to perform its own mate resolution.
 ///
-/// There is no constructor: [`RecordStore::prepare_for_pileup`] is the only
-/// way to obtain one, so the properties cannot be claimed without being
-/// established.
+/// Obtain one through [`RecordStore::prepare_for_pileup`] or
+/// [`RecordStore::prepare_for_pileup_without_mate_links`]. Both establish the
+/// ordering and window index required by the engine.
 ///
 /// [`PileupEngine`]: crate::bam::pileup::PileupEngine
 pub struct PileupInput<U = ()> {
@@ -1760,8 +1760,9 @@ impl<U> RecordStore<U> {
     /// overlapping mates silently keeps both.
     ///
     /// Both were reachable because [`PileupEngine::new`] took a bare
-    /// [`RecordStore`]. It takes [`PileupInput`] instead, and this is the only
-    /// way to make one.
+    /// [`RecordStore`]. It takes [`PileupInput`] instead. Callers that perform
+    /// their own mate resolution can explicitly choose
+    /// [`prepare_for_pileup_without_mate_links`](Self::prepare_for_pileup_without_mate_links).
     ///
     /// Idempotent and cheap to repeat: the sort is skipped when no push
     /// arrived out of order, and the linking when nothing has invalidated it.
@@ -1781,6 +1782,26 @@ impl<U> RecordStore<U> {
         };
         self.build_reach();
         Prepared { input: PileupInput { store: self }, stats }
+    }
+
+    // r[impl record_store.pileup_input.without_mates]
+    /// Prepare a pileup without matching read names to find primary mates.
+    ///
+    /// Use this when counting both mates independently or resolving mates
+    /// yourself. Every alignment will report `mate_idx() == None` and
+    /// `in_mate_overlap() == false`, even if this store was previously linked.
+    /// Records are still sorted by position and indexed for window queries.
+    /// For automatic mate links, use [`prepare_for_pileup`](Self::prepare_for_pileup).
+    #[must_use]
+    pub fn prepare_for_pileup_without_mate_links(mut self) -> PileupInput<U> {
+        if self.order == RecordOrder::Unknown {
+            // Clears mate links too.
+            self.sort_by_pos();
+        } else {
+            self.clear_mate_links();
+        }
+        self.build_reach();
+        PileupInput { store: self }
     }
 
     // r[impl record_store.window_query.reach]
