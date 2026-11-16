@@ -209,16 +209,47 @@ fn base_qual_at<U>(
     )
 }
 
-/// Write one column entry per read of `actives` that has one at `pos`,
-/// starting at `spare[*written]`. Inlined into both of the engine's column
+/// Track initialized entries even if a caller's projection unwinds. The Vec's
+/// length is published once per column, rather than updated for every entry.
+struct ColumnBuffer<'a, T> {
+    output: &'a mut Vec<T>,
+    written: usize,
+}
+
+impl<T> ColumnBuffer<'_, T> {
+    #[inline]
+    fn push(&mut self, value: T) -> Option<()> {
+        let next = self.written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+        self.output
+            .spare_capacity_mut()
+            .get_mut(self.written)
+            .trace_err("BUG: column entries outran the reserved capacity")?
+            .write(value);
+        self.written = next;
+        Some(())
+    }
+}
+
+impl<T> Drop for ColumnBuffer<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: the output was cleared before this guard was constructed.
+        // Each checked write initializes one slot before advancing `written`,
+        // with no intervening fallible work. This also runs during callback
+        // unwinding, so the Vec owns and eventually drops every finished entry.
+        unsafe { self.output.set_len(self.written) };
+    }
+}
+
+/// Write one column entry per read of `actives` that has one at `pos`.
+/// Inlined into both of the engine's column
 /// loops — the uncapped one, and the capped one that calls it per pass — so
 /// the uncapped loop is exactly this loop and nothing else.
 #[inline(always)]
-fn fill_entries<U>(
+fn fill_entries<U, T>(
     actives: &mut [ActiveRecord],
     store: &RecordStore<U>,
-    spare: &mut [std::mem::MaybeUninit<PileupAlignment>],
-    written: &mut usize,
+    output: &mut ColumnBuffer<'_, T>,
+    project: &mut impl FnMut(PileupEntry<'_, U>) -> T,
     pos: Pos0,
     soft_clip_overhang: u32,
     reference: Base,
@@ -258,23 +289,14 @@ fn fill_entries<U>(
                 {
                     let (base, qual) = base_qual_at(store, active, qpos);
                     matches_reference = false;
-                    let entry = PileupAlignment {
+                    let entry = PileupEntry {
+                        active,
+                        store,
+                        pos,
                         op: PileupOp::SoftClip { qpos, base, qual },
-                        mapq: active.mapq,
-                        flags: active.flags,
-                        seq_len: active.seq_len,
-                        matching_bases: active.matching_bases,
-                        indel_bases: active.indel_bases,
-                        record_idx: active.record_idx,
                         indel_after: Indel::None,
-                        mate_idx: active.mate_idx,
-                        in_mate_overlap: active.mate_overlap.contains(&pos),
                     };
-                    spare
-                        .get_mut(*written)
-                        .trace_err("BUG: column entries outran the reserved capacity")?
-                        .write(entry);
-                    *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+                    output.push(project(entry))?;
                 }
                 continue;
             };
@@ -323,26 +345,101 @@ fn fill_entries<U>(
             (op, indel_after)
         };
 
-        let entry = PileupAlignment {
-            op,
-            mapq: active.mapq,
-            flags: active.flags,
-            seq_len: active.seq_len,
-            matching_bases: active.matching_bases,
-            indel_bases: active.indel_bases,
-            record_idx: active.record_idx,
-            indel_after,
-            // r[impl pileup.mate_link_cache]
-            mate_idx: active.mate_idx,
-            in_mate_overlap: active.mate_overlap.contains(&pos),
-        };
-        spare
-            .get_mut(*written)
-            .trace_err("BUG: column entries outran the reserved capacity")?
-            .write(entry);
-        *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+        let entry = PileupEntry { active, store, pos, op, indel_after };
+        output.push(project(entry))?;
     }
     Some(matches_reference)
+}
+
+// r[impl pileup.projection]
+/// One read's contribution at the current reference position, available inside
+/// the callback passed to [`PileupEngine::pileups_with`].
+///
+/// The engine has already determined the alignment operation and base. Other
+/// fields are read on demand: a callback that does not ask for mate overlap,
+/// for example, does not need to compute it for its output entry. Loading and
+/// active-read preparation are unchanged by choosing a custom output type.
+/// Use [`record`](Self::record) for names, tags, sequence, and per-record extras.
+pub struct PileupEntry<'a, U = ()> {
+    active: &'a ActiveRecord,
+    store: &'a RecordStore<U>,
+    pos: Pos0,
+    op: PileupOp,
+    indel_after: Indel,
+}
+
+impl<U> PileupEntry<'_, U> {
+    pub fn pos(&self) -> Pos0 {
+        self.pos
+    }
+
+    pub fn record_idx(&self) -> RecordIdx {
+        self.active.record_idx
+    }
+
+    pub fn op(&self) -> &PileupOp {
+        &self.op
+    }
+
+    pub fn indel_after(&self) -> Indel {
+        self.indel_after
+    }
+
+    pub fn mapq(&self) -> MappingQuality {
+        self.active.mapq
+    }
+
+    pub fn flags(&self) -> BamFlags {
+        self.active.flags
+    }
+
+    pub fn seq_len(&self) -> u32 {
+        self.active.seq_len
+    }
+
+    pub fn mate_idx(&self) -> Option<RecordIdx> {
+        self.active.mate_idx
+    }
+
+    pub fn in_mate_overlap(&self) -> bool {
+        self.active.mate_overlap.contains(&self.pos)
+    }
+
+    /// Resolve the underlying read only when its stored fields are needed.
+    pub fn record(&self) -> RecordRef<'_, U> {
+        self.store.record_at(self.record_idx())
+    }
+
+    /// Materialize all the fields produced by ordinary [`PileupEngine::pileups`].
+    /// A custom projection need not call this.
+    pub fn into_alignment(self) -> PileupAlignment {
+        PileupAlignment {
+            record_idx: self.active.record_idx,
+            mapq: self.active.mapq,
+            flags: self.active.flags,
+            seq_len: self.active.seq_len,
+            matching_bases: self.active.matching_bases,
+            indel_bases: self.active.indel_bases,
+            mate_idx: self.active.mate_idx,
+            in_mate_overlap: self.in_mate_overlap(),
+            op: self.op,
+            indel_after: self.indel_after,
+        }
+    }
+}
+
+// r[impl pileup.projection]
+/// A column of caller-defined entries from [`PileupEngine::pileups_with`].
+/// Borrows the caller's output buffer, not the engine. The entries cannot borrow
+/// the callback's temporary read view; copy fields or use owned values instead.
+#[derive(Debug)]
+pub struct ProjectedColumn<'a, T> {
+    pub pos: Pos0,
+    pub reference_base: Base,
+    /// Same reference-match summary as [`PileupColumn::matches_reference`],
+    /// independent of which fields the callback retained.
+    pub matches_reference: bool,
+    pub entries: &'a [T],
 }
 
 // r[impl pileup.column_contents]
@@ -1191,6 +1288,18 @@ impl<U> PileupEngine<U> {
     /// non-empty column. Returns `(pos, reference_base)` so the caller
     /// can build a [`PileupColumn`] borrowing the buffer.
     pub(crate) fn advance(&mut self) -> Option<(Pos0, Base, bool)> {
+        let mut output = std::mem::take(&mut self.buf);
+        let step = self.advance_with(&mut output, &mut |entry| entry.into_alignment());
+        self.buf = output;
+        step
+    }
+
+    fn advance_with<T>(
+        &mut self,
+        output: &mut Vec<T>,
+        project: &mut impl FnMut(PileupEntry<'_, U>) -> T,
+    ) -> Option<(Pos0, Base, bool)> {
+        output.clear();
         loop {
             if self.current_pos > self.region_end {
                 return None;
@@ -1335,12 +1444,8 @@ impl<U> PileupEngine<U> {
             // The active set is appended in store order and compacted stably on
             // eviction, so walking it yields ascending record indices.
             // r[impl perf.reuse_alignment_vec+3]
-            // One `reserve` for the whole column, then a straight write per
-            // entry. `Vec::push` cannot hoist its capacity compare — it may
-            // reallocate — so it repeats compare, store, len-update per read
-            // per column, which is 1.5 % of a variant caller's worker CPU for
-            // bookkeeping the loop already knows the answer to: at most one
-            // entry per active record.
+            // Reserve once for the column, then initialize checked spare slots.
+            // The guard also publishes their length if the callback unwinds.
             // r[impl pileup.max_depth_per_position]
             // The cap keeps the first `max` entries in column order, so the
             // loop never visits the reads past it rather than building the
@@ -1357,19 +1462,17 @@ impl<U> PileupEngine<U> {
             let reference_base = self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
             let mut matches_reference = true;
             let cap = self.max_depth.map_or(usize::MAX, |max| max.get() as usize);
-            self.buf.clear();
-            self.buf.reserve(self.active.len().min(cap));
-            let Self { buf, active: actives, store, soft_clip_overhang, .. } = self;
+            output.reserve(self.active.len().min(cap));
+            let Self { active: actives, store, soft_clip_overhang, .. } = self;
             let soft_clip_overhang = *soft_clip_overhang;
-            let mut written = 0usize;
-            let spare = buf.spare_capacity_mut();
             let n_active = actives.len();
+            let mut filling = ColumnBuffer { output, written: 0 };
             if n_active <= cap {
                 matches_reference &= fill_entries(
                     actives,
                     store,
-                    spare,
-                    &mut written,
+                    &mut filling,
+                    project,
                     pos,
                     soft_clip_overhang,
                     reference_base,
@@ -1382,35 +1485,30 @@ impl<U> PileupEngine<U> {
                     matches_reference &= fill_entries(
                         pass,
                         store,
-                        spare,
-                        &mut written,
+                        &mut filling,
+                        project,
                         pos,
                         soft_clip_overhang,
                         reference_base,
                     )?;
-                    if written >= cap || pass_end >= n_active {
+                    if filling.written >= cap || pass_end >= n_active {
                         break;
                     }
                     pass_start = pass_end;
-                    pass_end = pass_end.saturating_add(cap.saturating_sub(written)).min(n_active);
+                    pass_end =
+                        pass_end.saturating_add(cap.saturating_sub(filling.written)).min(n_active);
                 }
             }
-            debug_assert!(written <= cap, "wrote past the depth cap");
-            debug_assert!(written <= self.buf.capacity(), "wrote past the reserve");
-            // SAFETY: the loop writes each of `written` slots before advancing
-            // past it, and `get_mut` above has refused every index outside the
-            // reserve, so the first `written` elements are initialised. Leaving
-            // early through `?` leaves the length at 0, which is also sound:
-            // spare capacity is never read and never dropped.
-            unsafe { self.buf.set_len(written) };
+            drop(filling);
+            debug_assert!(output.len() <= cap, "wrote past the depth cap");
 
-            if !self.buf.is_empty() {
+            if !output.is_empty() {
                 self.columns_produced = self.columns_produced.saturating_add(1);
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "depth is bounded by max_depth (u32) or typical pileup sizes; saturates at u32::MAX for profiling"
                 )]
-                let depth_u32 = self.buf.len() as u32;
+                let depth_u32 = output.len() as u32;
                 self.max_active_depth = self.max_active_depth.max(depth_u32);
                 return Some((pos, reference_base, matches_reference));
             }
@@ -1431,6 +1529,57 @@ impl<U> PileupEngine<U> {
     pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
         let step = self.advance()?;
         Some(self.column(step))
+    }
+
+    // r[impl pileup.projection]
+    /// Advance one column, choosing what to store for each contributing read.
+    ///
+    /// `output` is cleared on every call, including at exhaustion, and retains
+    /// its allocation. The callback runs once per emitted alignment, in the
+    /// same order as [`pileups`](Self::pileups), after the depth cap is applied.
+    /// It receives a temporary view rather than a fully populated alignment.
+    /// This method and `pileups` advance the same cursor; mixing them does not
+    /// revisit a column.
+    ///
+    /// Return copied fields or owned values: `T` cannot borrow the view or its
+    /// record. The callback can borrow and update external state. A panic leaves
+    /// already-produced entries owned by `output`, but callers must discard the
+    /// engine rather than resume iteration after a panic.
+    ///
+    /// ```
+    /// # use seqair::bam::{PileupEngine, PileupOp, RecordIdx};
+    /// # fn example(engine: &mut PileupEngine) {
+    /// struct Entry {
+    ///     record: RecordIdx,
+    ///     op: PileupOp,
+    /// }
+    /// let mut entries = Vec::new();
+    /// while let Some(column) = engine.pileups_with(&mut entries, |read| Entry {
+    ///     record: read.record_idx(),
+    ///     op: *read.op(),
+    /// }) {
+    ///     println!("{}: {} reads", column.pos, column.entries.len());
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// Borrowed read data cannot escape the callback. Use `to_vec()` if the
+    /// result needs to own a read name:
+    ///
+    /// ```compile_fail,E0515
+    /// # use seqair::bam::PileupEngine;
+    /// # fn example(engine: &mut PileupEngine) {
+    /// let mut names = Vec::new();
+    /// engine.pileups_with(&mut names, |read| read.record().qname());
+    /// # }
+    /// ```
+    pub fn pileups_with<'out, T>(
+        &mut self,
+        output: &'out mut Vec<T>,
+        mut project: impl FnMut(PileupEntry<'_, U>) -> T,
+    ) -> Option<ProjectedColumn<'out, T>> {
+        let (pos, reference_base, matches_reference) = self.advance_with(output, &mut project)?;
+        Some(ProjectedColumn { pos, reference_base, matches_reference, entries: output })
     }
 
     /// The column [`advance`](Self::advance) just filled. Split from

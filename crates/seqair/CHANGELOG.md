@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `PileupEngine::pileups_with` fills a reusable caller-owned buffer through a generic callback. Callers can choose their own entry type without first constructing full `PileupAlignment` values. The callback receives a temporary `PileupEntry` with access to the current contribution and stored read; ordering, depth caps, and reference summaries match ordinary pileup iteration.
+
 ## v0.10.1 (2026-11-13)
 
 ### Added

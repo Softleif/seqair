@@ -1019,3 +1019,178 @@ fn pileup_deduplicates_cross_category_records() {
     let col = columns.iter().find(|c| c.pos().as_u32() == 130).expect("column at 130");
     assert_eq!(col.depth(), 2, "expected exactly 2 (r1 + r2) after dedup, got {}", col.depth());
 }
+
+// r[verify pileup.projection]
+#[hegel::test]
+fn projected_columns_preserve_full_column_semantics(tc: TestCase) {
+    let reads = tc.draw(
+        gs::vecs(gs::tuples!(
+            gs::integers::<i32>().min_value(4).max_value(24),
+            gs::integers::<u32>().min_value(1).max_value(5),
+            gs::integers::<u8>().max_value(3),
+        ))
+        .max_size(10),
+    );
+    let cap = tc.draw(gs::integers::<u32>().max_value(4));
+    let overhang = tc.draw(gs::integers::<u32>().max_value(3));
+    let mut engines = (0..2).map(|_| {
+        let mut store = RecordStore::new();
+        for &(pos, n, kind) in &reads {
+            let (ops, len) = match kind {
+                0 => (vec![cigar_op(n, 0)], n),
+                1 => (vec![cigar_op(n, 0)], 0), // SEQ=*
+                2 => (vec![cigar_op(n, 4)], n), // No aligned contribution
+                _ => (
+                    vec![
+                        cigar_op(2, 4),
+                        cigar_op(n, 0),
+                        cigar_op(1, 1),
+                        cigar_op(2, 0),
+                        cigar_op(2, 2),
+                        cigar_op(1, 1),
+                        cigar_op(1, 0),
+                        cigar_op(3, 3),
+                        cigar_op(2, 0),
+                        cigar_op(1, 4),
+                    ],
+                    n + 10,
+                ),
+            };
+            store
+                .push_raw(
+                    &make_record_with_cigar(0, pos, 0, 21 + kind, &ops, len),
+                    helpers::header(),
+                    &mut (),
+                )
+                .unwrap();
+        }
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            (Pos0::ZERO..=Pos0::new(50).unwrap()).into(),
+        );
+        if let Some(cap) = NonZeroU32::new(cap) {
+            engine.set_max_depth(cap);
+        }
+        engine.set_soft_clip_overhang(overhang);
+        engine.set_reference_seq(RefSeq::new(
+            (0..51).map(|i| if i % 3 == 0 { Base::C } else { Base::A }).collect(),
+            Pos0::ZERO,
+        ));
+        engine
+    });
+    let mut ordinary = engines.next().unwrap();
+    let mut projected = engines.next().unwrap();
+    let mut output = Vec::new();
+    let mut calls = 0;
+    let mut expected_calls = 0;
+    while let Some(expected) = ordinary.pileups() {
+        let actual = projected
+            .pileups_with(&mut output, |entry| {
+                calls += 1;
+                assert_eq!(entry.pos(), expected.pos());
+                assert_eq!(entry.record().qname(), b"read");
+                // Exercise public getters as well as reconstruction.
+                let cached = (
+                    entry.record_idx(),
+                    *entry.op(),
+                    entry.mapq(),
+                    entry.flags(),
+                    entry.seq_len(),
+                    entry.mate_idx(),
+                    entry.in_mate_overlap(),
+                    entry.indel_after(),
+                );
+                (cached, entry.into_alignment())
+            })
+            .unwrap();
+        assert_eq!(actual.pos, expected.pos());
+        assert_eq!(actual.reference_base, expected.reference_base());
+        assert_eq!(actual.matches_reference, expected.matches_reference());
+        assert_eq!(actual.entries.len(), expected.depth());
+        expected_calls += expected.depth();
+        assert_eq!(calls, expected_calls);
+        for ((cached, a), b) in actual.entries.iter().zip(expected.raw_alignments()) {
+            let fields = |a: &seqair::bam::PileupAlignment| {
+                (
+                    a.record_idx(),
+                    a.op,
+                    a.mapq,
+                    a.flags,
+                    a.seq_len,
+                    a.mate_idx(),
+                    a.in_mate_overlap(),
+                    a.indel_after(),
+                )
+            };
+            assert_eq!(*cached, fields(b));
+            assert_eq!(fields(a), fields(b));
+            assert_eq!((a.matching_bases, a.indel_bases), (b.matching_bases, b.indel_bases));
+        }
+    }
+    for _ in 0..2 {
+        assert!(projected.pileups_with(&mut output, |_| panic!("exhausted")).is_none());
+        assert!(output.is_empty());
+    }
+}
+
+// r[verify pileup.projection]
+#[test]
+fn projection_reuses_iteration_and_drops_owned_results_even_on_panic() {
+    struct Entry(Rc<Cell<usize>>);
+    impl Drop for Entry {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let mut store = RecordStore::new();
+    for pos in [10, 10, 11, 30] {
+        store.push_raw(&make_record(0, pos, 0, 60, 3), helpers::header(), &mut ()).unwrap();
+    }
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        (Pos0::ZERO..=Pos0::new(32).unwrap()).into(),
+    );
+    engine.set_max_depth(NonZeroU32::new(2).unwrap());
+    let dropped = Rc::new(Cell::new(0));
+    let mut output = Vec::new();
+    let first = engine.pileups_with(&mut output, |_| Entry(dropped.clone())).unwrap();
+    assert_eq!(first.pos.as_u32(), 10);
+    assert_eq!(first.entries.len(), 2);
+    assert_eq!(dropped.get(), 0);
+    assert_eq!(engine.pileups().unwrap().pos().as_u32(), 11);
+    let mut calls = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.pileups_with(&mut output, |_| {
+            calls += 1;
+            assert!(calls < 2, "deliberate callback panic");
+            Entry(dropped.clone())
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(dropped.get(), 2, "previous column was cleared");
+    assert_eq!(output.len(), 1, "successful result remains owned");
+    drop(output);
+    assert_eq!(dropped.get(), 3, "no constructed value leaked");
+
+    let mut empty = PileupEngine::new(
+        RecordStore::<()>::new().prepare_for_pileup().input,
+        (Pos0::ZERO..=Pos0::new(1).unwrap()).into(),
+    );
+    let mut units = vec![()];
+    assert!(empty.pileups_with(&mut units, |_| ()).is_none());
+    assert!(units.is_empty());
+
+    let mut store = RecordStore::new();
+    store.push_raw(&make_record(0, 0, 0, 60, 2), helpers::header(), &mut ()).unwrap();
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        (Pos0::ZERO..=Pos0::new(1).unwrap()).into(),
+    );
+    for expected_pos in 0..2 {
+        let column = engine.pileups_with(&mut units, |_| ()).unwrap();
+        assert_eq!(column.pos.as_u32(), expected_pos);
+        assert_eq!(column.entries, &[()]);
+    }
+    assert!(engine.pileups_with(&mut units, |_| ()).is_none());
+    assert!(units.is_empty());
+}

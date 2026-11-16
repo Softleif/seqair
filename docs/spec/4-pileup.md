@@ -96,7 +96,19 @@ r[pileup.extras.constructor_accepts_any_u]
 `PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store via `RecordStore::apply_customize` with a [`CustomizeRecordStore`](../../crates/seqair/src/bam/record_store.rs) value before constructing the engine. There is no engine-level customize method — the constructor is the only entry point.
 
 r[pileup.lending_iterator]
-`PileupEngine<U>` MUST expose iteration via a single lending method `pileups(&mut self) -> Option<PileupColumn<'_, U>>`. The returned `PileupColumn<'store, U>` MUST borrow the engine's store for the duration of its use. `PileupEngine` MUST NOT implement `Iterator` — the store borrow held by each column would be incompatible with `Iterator::next`'s `&mut self` contract. Callers MUST use a `while let Some(col) = engine.pileups() { ... }` loop.
+`PileupEngine<U>` MUST expose ordinary iteration via the lending method `pileups(&mut self) -> Option<PileupColumn<'_, U>>`. The returned `PileupColumn<'store, U>` MUST borrow the engine's store for the duration of its use. `PileupEngine` MUST NOT implement `Iterator` — the store borrow held by each column would be incompatible with `Iterator::next`'s `&mut self` contract. Callers MUST use a `while let Some(col) = engine.pileups() { ... }` loop.
+
+r[pileup.projection]
+`pileups_with` MUST advance the same iteration as `pileups`, filling a caller-owned
+`Vec<T>` with the results of a generic `FnMut` callback. The callback MUST run exactly
+once per emitted alignment, in the ordinary column order, after depth admission.
+Positions, operations, indel anchors, reference summaries, and soft-clip handling
+MUST match ordinary iteration. Each call MUST clear the output, including at
+exhaustion, retaining its allocation for reuse. The callback MUST receive a borrowed
+view of the current contribution and its record, without first materializing a
+full `PileupAlignment`. Results MUST NOT borrow that temporary view. Owned results
+with destructors MUST be supported, including correct destruction if a callback
+panics; resuming iteration after a callback panic is not guaranteed.
 
 r[pileup.alignment_view]
 `PileupColumn<'store, U>::alignments(&self)` MUST yield `AlignmentView<'_, 'store, U>` items. `AlignmentView` MUST deref to `PileupAlignment` so existing field and method access on alignments is unchanged. `AlignmentView` MUST additionally provide `extra(&self) -> &'store U`, `qname(&self) -> &'store [u8]`, and `aux(&self) -> &'store [u8]` methods that read from the borrowed store without additional arguments. `PileupColumn` MUST also expose `raw_alignments()` yielding `&PileupAlignment` for callers that do not need store access.
