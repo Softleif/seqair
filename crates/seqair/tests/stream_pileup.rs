@@ -302,14 +302,16 @@ fn col(tid: u32, column: &PileupColumn<'_, ()>) -> Col {
 }
 
 /// The oracle: one whole-contig segment per contig through the indexed path.
-fn indexed_columns(bam: &Path, fasta: &Path, depth: DepthLimit) -> Vec<Col> {
+fn indexed_columns(bam: &Path, fasta: &Path, depth: DepthLimit, link_mates: bool) -> Vec<Col> {
     let mut readers = Readers::open(bam, fasta).unwrap();
     let opts = SegmentOptions::new(NonZeroU32::new(1 << 30).unwrap());
     let segments: Vec<_> = readers.segments((), opts).unwrap().collect();
     let mut cols = Vec::new();
     for segment in &segments {
         assert!(segment.starts_at_contig_start() && segment.ends_at_contig_end());
-        let mut pileup = readers.pileup(segment, depth).run().unwrap();
+        let plan = readers.pileup(segment, depth);
+        let plan = if link_mates { plan } else { plan.without_mate_links() };
+        let mut pileup = plan.run().unwrap();
         while let Some(column) = pileup.pileups() {
             cols.push(col(segment.tid().as_u32(), &column));
         }
@@ -335,10 +337,13 @@ fn streamed_columns<E: CustomizeRecordStore<Extra = ()>>(mut pileup: StreamPileu
 // r[verify pileup_stream.depth_limit+1]
 // r[verify pileup_stream.reference]
 // r[verify pileup_stream.lending]
+// r[verify pileup_stream.without_mate_links]
+// r[verify unified.pileup_without_mate_links]
 /// Every column, and the set of positions, matches the indexed pileup of the
 /// same file — whatever the window length, including windows far shorter
 /// than the reads, whatever the window budget, down to one record, from BAM or
-/// SAM text, with or without a depth cap.
+/// SAM text, with or without a depth cap, with or without mate links — and
+/// without them, the same columns but for the mate fields.
 #[hegel::test(test_cases = pinned::cases(60))]
 fn streaming_columns_equal_indexed_columns(tc: TestCase) {
     let lines = tc.draw(sorted_lines());
@@ -363,6 +368,7 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
         WindowBudget::default()
     };
     let from_sam = tc.draw(gs::booleans());
+    let link_mates = tc.draw(gs::booleans());
 
     let dir = tempfile::tempdir().unwrap();
     let sam = sam_text(&lines);
@@ -374,7 +380,15 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
     let bam = dir.path().join("in.bam");
     let fasta = dir.path().join("ref.fa");
 
-    let expected = indexed_columns(&bam, &fasta, depth);
+    let expected = indexed_columns(&bam, &fasta, depth, link_mates);
+    if !link_mates {
+        let mut linked = indexed_columns(&bam, &fasta, depth, true);
+        for entry in linked.iter_mut().flat_map(|c| &mut c.entries) {
+            entry.in_mate_overlap = false;
+            entry.mate = None;
+        }
+        assert_eq!(expected, linked, "unlinked columns are the linked ones without mates");
+    }
 
     let stream = if from_sam {
         AlignmentStream::from_reader(std::io::Cursor::new(sam.into_bytes())).unwrap()
@@ -385,6 +399,7 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
         .with_window_len(NonZeroU32::new(window).unwrap())
         .with_window_budget(budget)
         .with_reference(IndexedFastaReader::open(&fasta).unwrap());
+    let pileup = if link_mates { pileup } else { pileup.without_mate_links() };
     let actual = streamed_columns(pileup);
 
     let positions = |cols: &[Col]| cols.iter().map(|c| (c.tid, c.pos)).collect::<Vec<_>>();

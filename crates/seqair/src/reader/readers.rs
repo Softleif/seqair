@@ -9,7 +9,7 @@ use crate::{
         BamHeader,
         depth_cap::{DepthCap, DepthLimit},
         pileup::{PileupEngine, PileupGuard, RefSeq},
-        record_store::{CustomizeRecordStore, Prepared, RecordStore},
+        record_store::{CustomizeRecordStore, MateLinkStats, Prepared, RecordStore},
     },
     fasta::{FastaError, IndexedFastaReader},
 };
@@ -367,7 +367,15 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// moved back, so subsequent pileups keep the ~39 MB allocation. No
     /// explicit recover step is needed.
     pub fn pileup<'a>(&'a mut self, segment: &'a Segment, depth: DepthLimit) -> Pileup<'a, E> {
-        Pileup { readers: self, segment, depth, reference: None, mutate: None, cover_reads: false }
+        Pileup {
+            readers: self,
+            segment,
+            depth,
+            reference: None,
+            mutate: None,
+            cover_reads: false,
+            link_mates: true,
+        }
     }
 
     fn pileup_impl<F>(
@@ -377,6 +385,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         mutate: Option<F>,
         supplied_ref: Option<RefSeq>,
         cover_reads: bool,
+        link_mates: bool,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where
         F: FnMut(&mut RecordStore<E::Extra>, &RefSeq),
@@ -535,8 +544,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
         // Sorts (the realignment hook above may have moved records) and links,
         // in that order — a mate index is a store index and cannot survive a
         // reorder. Producing the engine's input is the only way to do this, so
-        // neither step can be skipped.
-        let Prepared { input, stats: mate_links } = store.prepare_for_pileup();
+        // the sort cannot be skipped; the linking only when asked.
+        let (input, mate_links) = if link_mates {
+            let Prepared { input, stats } = store.prepare_for_pileup();
+            (input, stats)
+        } else {
+            (store.prepare_for_pileup_without_mate_links(), MateLinkStats::default())
+        };
         if !mate_links.is_clean() {
             // Repeated primary qnames, or the same record present twice.
             // Neither is valid input; say so once per fetch, not per column.
@@ -643,6 +657,7 @@ pub struct Pileup<
     reference: Option<RefSeq>,
     mutate: Option<F>,
     cover_reads: bool,
+    link_mates: bool,
 }
 
 impl<'a, E: CustomizeRecordStore, F> Pileup<'a, E, F>
@@ -708,6 +723,20 @@ where
         self
     }
 
+    // r[impl unified.pileup_without_mate_links]
+    /// Skip linking mates: every alignment reports no
+    /// [`mate_idx`](crate::bam::pileup::PileupAlignment::mate_idx) and is never
+    /// [`in_mate_overlap`](crate::bam::pileup::PileupAlignment::in_mate_overlap).
+    ///
+    /// Linking matches the read names of every record in the segment. A caller
+    /// that counts both mates, or resolves mates itself, pays for that and
+    /// keeps the names only to feed it. See
+    /// [`RecordStore::prepare_for_pileup_without_mate_links`].
+    pub fn without_mate_links(mut self) -> Self {
+        self.link_mates = false;
+        self
+    }
+
     // r[impl unified.readers_pileup_store_mutation+4]
     /// Run `mutate` on the freshly fetched [`RecordStore`] **before** the
     /// pileup engine is built, then re-sort the store by position.
@@ -750,6 +779,7 @@ where
             reference: self.reference,
             mutate: Some(mutate),
             cover_reads: self.cover_reads,
+            link_mates: self.link_mates,
         }
     }
 
@@ -762,8 +792,8 @@ where
     /// See [`Readers::pileup`] for what is validated here and what is reused
     /// between calls.
     pub fn run(self) -> Result<PileupGuard<'a, E::Extra>, ReaderError> {
-        let Self { readers, segment, depth, reference, mutate, cover_reads } = self;
-        readers.pileup_impl(segment, depth, mutate, reference, cover_reads)
+        let Self { readers, segment, depth, reference, mutate, cover_reads, link_mates } = self;
+        readers.pileup_impl(segment, depth, mutate, reference, cover_reads, link_mates)
     }
 }
 

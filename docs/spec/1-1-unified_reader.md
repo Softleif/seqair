@@ -301,12 +301,13 @@ planner can ask before committing.
 > executes it, and the plan MUST be `#[must_use]` so a caller who forgets is
 > told.
 >
-> The plan MUST carry two independent options, either, both, or neither of
-> which may be set, in any order:
+> The plan MUST carry independent options, any of which may be set, in any
+> order:
 >
 > - `with_reference(RefSeq)` — r[`unified.readers_pileup_supplied_reference+1`]
 > - `mutate(F)` — r[`unified.readers_pileup_store_mutation+4`]
 > - `reference_covers_reads()` — r[`unified.pileup_reference_covers_reads`]
+> - `without_mate_links()` — r[`unified.pileup_without_mate_links`]
 >
 > This is why it is a plan. The three separate methods it replaces
 > (`pileup`, `pileup_with`, `pileup_with_reference`) covered three of the four
@@ -319,6 +320,13 @@ planner can ask before committing.
 > Setting an option twice MUST keep the last value; `mutate` MUST be generic
 > over the mutator's type rather than boxing it, so a hook costs no
 > indirection and a plan without one costs no allocation.
+
+> r[unified.pileup_without_mate_links]
+> `Pileup::without_mate_links()` MUST prepare the store with
+> `RecordStore::prepare_for_pileup_without_mate_links`
+> (`r[record_store.pileup_input.without_mates]`) instead of
+> `prepare_for_pileup`: the same columns, but no alignment carries a
+> `mate_idx` or is `in_mate_overlap`.
 
 > r[unified.readers_pileup+2]
 > `Pileup::run() -> Result<PileupGuard<'_, E::Extra>, ReaderError>` is the only

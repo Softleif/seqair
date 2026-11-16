@@ -6,7 +6,7 @@ use super::{AlignmentStream, AlignmentStreamError, DepthCap, DepthLimit, Tid};
 use crate::bam::{
     BamHeader, DecodeError, RawBamRecord, RecordIdx,
     pileup::{PileupColumn, PileupEngine, PileupScratch, RefSeq},
-    record_store::{CustomizeRecordStore, Prepared, RecordStore},
+    record_store::{CustomizeRecordStore, MateLinkStats, Prepared, RecordStore},
 };
 use crate::fasta::{FastaError, IndexedFastaReader};
 use core::range::RangeInclusive;
@@ -167,6 +167,7 @@ pub struct StreamPileup<E: CustomizeRecordStore = ()> {
     scratch: PileupScratch,
     input_ended: bool,
     failed: bool,
+    link_mates: bool,
 }
 
 impl<E: CustomizeRecordStore> std::fmt::Debug for StreamPileup<E> {
@@ -207,6 +208,7 @@ where
             scratch: PileupScratch::default(),
             input_ended: false,
             failed: false,
+            link_mates: true,
         }
     }
 
@@ -232,6 +234,17 @@ where
     #[must_use]
     pub fn with_window_budget(mut self, budget: WindowBudget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    // r[impl pileup_stream.without_mate_links]
+    /// Skip linking mates in each window: every alignment reports no
+    /// `mate_idx` and is never `in_mate_overlap`. For a caller that counts
+    /// both mates or resolves mates itself; see
+    /// [`RecordStore::prepare_for_pileup_without_mate_links`].
+    #[must_use]
+    pub fn without_mate_links(mut self) -> Self {
+        self.link_mates = false;
         self
     }
 
@@ -481,7 +494,12 @@ where
         last: Pos0,
     ) -> Result<(), StreamPileupError> {
         let reference = self.reference(tid, start, last, store.is_empty())?;
-        let Prepared { input, stats } = store.prepare_for_pileup();
+        let (input, stats) = if self.link_mates {
+            let Prepared { input, stats } = store.prepare_for_pileup();
+            (input, stats)
+        } else {
+            (store.prepare_for_pileup_without_mate_links(), MateLinkStats::default())
+        };
         if !stats.is_clean() {
             tracing::debug!(
                 tid = tid.as_u32(),
