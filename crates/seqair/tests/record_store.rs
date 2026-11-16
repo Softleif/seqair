@@ -18,6 +18,124 @@ use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use seqair_types::{BamFlags, BaseQuality, IupacBase};
 
+// r[verify record_store.long_cigar]
+// r[verify bam_writer.store_long_cigar_limit]
+#[test]
+fn long_cigar_counts_survive_loading_and_realignment() {
+    use seqair::bam::cigar::CigarOp;
+    use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, SlimRecord};
+
+    #[derive(Clone)]
+    struct MatchFirst;
+    impl CustomizeRecordStore for MatchFirst {
+        type Extra = ();
+
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore) {}
+
+        fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+            assert_eq!(fields.n_cigar_ops as usize, fields.cigar.len() / 4);
+            CigarOp::iter_bam_bytes(fields.cigar).next().unwrap().to_bam_u32() == 16
+        }
+    }
+
+    // Exercise both sides of BAM's 16-bit wire count and both CG array types.
+    for n in [65_535usize, 65_536, 65_537] {
+        for subtype in *b"Ii" {
+            // Alternating 1M/1I consumes n query bases and ceil(n/2) reference bases.
+            let ops: Vec<u32> = (0..n).map(|i| if i % 2 == 0 { 16 } else { 17 }).collect();
+            let typed: Vec<_> = ops.iter().copied().map(CigarOp::from_bam_u32).collect();
+            let mut aux = b"CGB".to_vec();
+            aux.push(subtype);
+            aux.extend_from_slice(&(n as u32).to_le_bytes());
+            for op in &ops {
+                aux.extend_from_slice(&op.to_le_bytes());
+            }
+            let raw = make_test_record(
+                0,
+                100,
+                0,
+                60,
+                b"long",
+                &[(n as u32) << 4 | 4, (n.div_ceil(2) as u32) << 4 | 3],
+                &vec![0x12; n.div_ceil(2)],
+                &vec![30; n],
+                &aux,
+            );
+            let mut store = RecordStore::new();
+            let idx = store.push_raw(&raw, helpers::header(), &mut MatchFirst).unwrap().unwrap();
+            let rec = store.record(idx).unwrap();
+            assert_eq!(rec.cigar(), typed);
+            assert_eq!(rec.n_cigar_ops as usize, n);
+            assert_eq!(rec.end_pos.as_u32(), 100 + n.div_ceil(2) as u32 - 1);
+            assert_eq!(rec.matching_bases, n.div_ceil(2) as u32);
+            assert_eq!(rec.indel_bases, (n / 2) as u32);
+            assert_eq!((rec.leading_soft_clip, rec.trailing_soft_clip), (0, 0));
+
+            let mut from_fields = RecordStore::new();
+            let copy = from_fields
+                .push_fields(
+                    rec.pos,
+                    rec.end_pos,
+                    rec.flags,
+                    rec.mapq,
+                    rec.matching_bases,
+                    rec.indel_bases,
+                    rec.qname(),
+                    rec.cigar(),
+                    rec.seq(),
+                    BaseQuality::slice_to_bytes(rec.qual()),
+                    rec.aux(),
+                    rec.tid,
+                    rec.mate_fields,
+                    &mut MatchFirst,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(from_fields.record(copy).unwrap().cigar(), typed);
+
+            let mut writer =
+                seqair::bam::BamWriterBuilder::to_writer(Vec::new(), helpers::header())
+                    .build()
+                    .unwrap();
+            let written = writer.write_store_record(&store, idx);
+            if n > 65_535 {
+                assert!(matches!(written, Err(seqair::bam::BamWriteError::Record {
+                    source: seqair::bam::OwnedRecordError::CigarCountOverflow { count },
+                }) if count == n));
+            } else {
+                written.unwrap();
+                let (bytes, _) = writer.finish().unwrap();
+                let mut stream =
+                    seqair::reader::AlignmentStream::builder(std::io::Cursor::new(bytes))
+                        .build()
+                        .unwrap();
+                let record = stream.records().next().unwrap().unwrap();
+                assert_eq!(record.cigar().collect::<Vec<_>>(), typed);
+            }
+
+            store.set_alignment(idx, Pos0::new(200).unwrap(), &typed).unwrap();
+            assert_eq!(store.record(idx).unwrap().cigar(), typed);
+            assert_eq!(store.record(idx).unwrap().end_pos.as_u32(), 200 + n.div_ceil(2) as u32 - 1);
+        }
+    }
+}
+
+// r[verify record_store.long_cigar]
+#[test]
+fn long_cigar_query_length_is_checked_before_storing() {
+    // The placeholder consumes four bases, but CG's 1M2M consumes only three.
+    let mut aux = b"CGBI\x02\0\0\0".to_vec();
+    aux.extend_from_slice(&16u32.to_le_bytes());
+    aux.extend_from_slice(&32u32.to_le_bytes());
+    let raw = make_test_record(0, 100, 0, 60, b"bad", &[68, 67], &[0x11; 2], &[30; 4], &aux);
+    let mut store = RecordStore::new();
+    assert!(matches!(
+        store.push_raw(&raw, helpers::header(), &mut ()),
+        Err(seqair::bam::DecodeError::CigarQueryLenMismatch { cigar_query_len: 3, seq_len: 4 })
+    ));
+    assert!(store.is_empty());
+}
+
 // r[verify record_store.push_raw+3]
 // r[verify record_store.field_access]
 #[test]

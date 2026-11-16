@@ -133,6 +133,15 @@ On construction, the store MUST pre-allocate all six vectors with estimated capa
 r[record_store.push_raw+3]
 `push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `IupacBase` codes in the bases slab, every code kept (`r[seq.iupac_bulk+3]`).
 
+r[record_store.long_cigar]
+When a BAM record carries a long CIGAR in its `CG` tag, `push_raw` MUST resolve
+it using the same rules as `RawBamRecord` (`r[bam.raw_record.long_cigar]`), before
+filtering or discarding unrequested auxiliary tags. The filter's CIGAR, the
+stored CIGAR and all derived alignment fields MUST describe the resolved
+operations, not the placeholder. `SlimRecord` and `FilterRawFields` MUST use a
+`u32` operation count; `push_fields` and `set_alignment` MUST also preserve
+counts above 65535 without truncation.
+
 r[record_store.seq_lossless]
 The bases slab MUST hold each record's SEQ as `IupacBase`, as the file stores it: for BAM the 4-bit code, for SAM the code of `r[sam.record.seq_decode+1]`, for CRAM the code the decode rebuilds (`r[cram.stream.iupac+1]`). A record's `seq()` MUST therefore equal `RawBamRecord::iupac_bases()` of the same record read by `query_raw` or a stream reader, code for code.
 
@@ -191,8 +200,8 @@ All records in the store MUST remain valid and accessible until the store is cle
 r[record_store.set_alignment]
 `set_alignment(idx, new_pos, new_cigar_ops: &[CigarOp])` MUST replace a record's alignment by appending the new ops to the end of the cigar slab and updating the record's `cigar_off`, `n_cigar_ops`, `pos`, `end_pos`, `matching_bases`, and `indel_bases`. The old CIGAR ops MUST be left in place as dead data (append-only mutation). The sequence, quality, aux, and name slabs MUST NOT be modified. After calling `set_alignment` on one or more records, the caller MUST call `sort_by_pos()` before using the store for pileup iteration.
 
-r[record_store.set_alignment.validation]
-`set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len` and that the CIGAR op count fits in `u16`. All validation MUST complete before any slab mutation. If validation fails, the method MUST return an error without modifying the store.
+r[record_store.set_alignment.validation+1]
+`set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len` and that the CIGAR op count fits in `u32`. All validation MUST complete before any slab mutation. If validation fails, the method MUST return an error without modifying the store.
 
 r[record_store.set_alignment.dead_data]
 Each `set_alignment` call appends new CIGAR ops to the cigar slab; old ops become dead data. For a typical realignment pass where ~10% of records are realigned once, the dead-data overhead is ~10% of cigar slab size. Iterative algorithms that call `set_alignment` multiple times per record accumulate proportionally more dead data. Dead data is reclaimed when `clear()` is called (the cigar slab retains capacity but resets its length). No compaction is provided between `clear()` calls.

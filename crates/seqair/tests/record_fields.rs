@@ -695,6 +695,7 @@ fn check_long_cigar(rec: &PartialRecord, want: &[u32], fields: &RecordFields, wh
 }
 
 // r[verify unified.partial_record.no_payload]
+// r[verify record_store.long_cigar]
 /// A record whose CIGAR lives in a `CG` tag behind the `<l_seq>S<ref_len>N`
 /// placeholder shows its real CIGAR through `PartialRecord::cigar` whatever
 /// tags were requested, from SAM text and from a BAM that keeps the
@@ -779,4 +780,15 @@ fn a_long_cigar_is_resolved_whatever_tags_were_requested(tc: TestCase) {
         reader.query_raw(tid, span()).expect("query").collect::<Result<_, _>>().unwrap();
     assert_eq!(recs.len(), 1);
     check_long_cigar(&recs[0], &want, &fields, "bam query_raw");
+
+    let mut store = RecordStore::new();
+    reader.fetch_into(tid, span(), &mut store).expect("fetch");
+    assert_eq!(store.len(), 1);
+    let rec = store.record(store.indices().next().unwrap()).unwrap();
+    assert_eq!(rec.cigar().iter().map(|op| op.to_bam_u32()).collect::<Vec<_>>(), want);
+    assert_eq!(rec.end_pos, Pos0::new(9 + ref_len - 1).unwrap());
+    assert_eq!(
+        seqair::bam::aux::iter_tags(rec.aux()).any(|(tag, _)| tag == *b"CG"),
+        fields.aux().contains(*b"CG")
+    );
 }

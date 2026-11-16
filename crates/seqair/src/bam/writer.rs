@@ -289,6 +289,10 @@ impl<W: Write> BamWriter<W> {
     /// sequence is the one that was read, `=` and ambiguity codes included.
     /// CIGAR, quality, and aux data are already in BAM wire format in the
     /// store's slabs and are copied directly.
+    ///
+    /// Like [`OwnedBamRecord::to_bam_bytes`], this rejects more than 65535
+    /// CIGAR operations with [`OwnedRecordError::CigarCountOverflow`]. To copy
+    /// an existing long-CIGAR record unchanged, use [`Self::write_raw`].
     pub fn write_store_record(
         &mut self,
         store: &RecordStore,
@@ -325,7 +329,9 @@ impl<W: Write> BamWriter<W> {
         let aux = rec.aux();
 
         // Validate field limits (matching OwnedBamRecord::to_bam_bytes).
-        // n_cigar_ops is u16 (validated at push time), pos is Pos0 (always ≤ i32::MAX).
+        // r[impl bam_writer.store_long_cigar_limit]
+        let n_cigar_op = u16::try_from(cigar.len())
+            .map_err(|_| OwnedRecordError::CigarCountOverflow { count: cigar.len() })?;
         if qname.len() > 254 {
             return Err(OwnedRecordError::QnameTooLong { len: qname.len() }.into());
         }
@@ -358,7 +364,7 @@ impl<W: Write> BamWriter<W> {
                 mapq: rec.mapq,
                 l_read_name,
                 flags: rec.flags.raw(),
-                n_cigar_op: rec.n_cigar_ops,
+                n_cigar_op,
                 l_seq: rec.seq_len as i32,
                 mate_fields: rec.mate_fields,
             },

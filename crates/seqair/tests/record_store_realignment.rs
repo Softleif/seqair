@@ -369,7 +369,7 @@ fn set_alignment_does_not_corrupt_other_records() {
     assert_eq!(store.record(idx2).unwrap().qual(), &orig_qual2);
 }
 
-// r[verify record_store.set_alignment.validation]
+// r[verify record_store.set_alignment.validation+1]
 #[test]
 fn set_alignment_rejects_query_length_mismatch() {
     let raw = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
@@ -554,7 +554,7 @@ fn set_alignment_end_pos_matches_oracle(tc: TestCase) {
 
     assert_eq!(rec.matching_bases, expected_matching_bases(&new_parts));
     assert_eq!(rec.indel_bases, expected_indel_bases(&new_parts));
-    assert_eq!(rec.n_cigar_ops, new_parts.len() as u16);
+    assert_eq!(rec.n_cigar_ops as usize, new_parts.len());
 }
 
 // r[verify record_store.set_alignment]
@@ -623,7 +623,7 @@ fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
     }
 }
 
-// r[verify record_store.set_alignment.validation]
+// r[verify record_store.set_alignment.validation+1]
 #[hegel::test(test_cases = crate::pinned::cases(200))]
 fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
     let orig_parts = tc.draw(arb_cigar_parts_with_query_len().print_as_debug());

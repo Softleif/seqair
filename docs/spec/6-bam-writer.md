@@ -44,6 +44,13 @@ r[bam_writer.write_record]
 r[bam_writer.write_store_record+1]
 `write_store_record(store: &RecordStore, idx: u32)` MUST serialize a record directly from RecordStore slabs into the BGZF stream without constructing an intermediate `OwnedBamRecord`. The method MUST write the 32-byte BAM fixed header from SlimRecord fields, then append variable-length data: NUL-terminated qname from the name slab, the typed cigar slab reinterpreted as wire bytes via `CigarOp::ops_as_bytes` (zero-copy on little-endian hosts because `CigarOp` is `#[repr(transparent)]` over the on-disk packed `u32`), 4-bit packed sequence packed from the bases slab's codes (`r[seq.iupac_bulk+3]`), so equal byte for byte to the SEQ of the record that was read (`r[record_store.seq_lossless]`; an odd length's last low nibble is written 0, as htslib writes it), quality bytes from the data slab, and raw aux bytes from the data slab. The BAI bin MUST be recomputed from pos and end_pos at serialization time. Index co-production, error poisoning, flush-before-record, and record-size-limit rules apply identically to `write()`.
 
+r[bam_writer.store_long_cigar_limit]
+Until the store writer can encode the `CG` escape, `write_store_record` MUST
+reject a resolved CIGAR of more than 65535 operations with
+`OwnedRecordError::CigarCountOverflow`, before writing record bytes. It MUST
+NOT truncate the count into BAM's 16-bit fixed header. `write_raw` remains
+available for copying an existing long-CIGAR payload unchanged.
+
 r[bam_writer.write_raw]
 `write_raw(&RawBamRecord)` MUST write the record's payload byte for byte, after its `block_size`. The record was validated against the header it was read with; its reference and mate reference ids MUST additionally be below this writer's target count, or the write MUST fail with `BamWriteError::TidOutOfRange` before anything is written. The BAI inputs are the record's position and the exclusive end of its CIGAR's reference span (`end_pos + 1`). A record without a reference is counted as unplaced (`n_no_coor`) whatever its FLAG says, as htslib's `hts_idx_push` counts it, rather than refused as `MappedWithoutReference`. Index co-production, error poisoning, flush-before-record and the record size limit apply as for `write()`.
 

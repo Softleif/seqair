@@ -112,8 +112,8 @@ pub struct SlimRecord {
     // r[impl flags.field_type]
     /// BAM flag bits (paired, unmapped, reverse strand, …).
     pub flags: BamFlags,
-    /// Number of CIGAR ops; bounded by BAM's u16 `l_op` field.
-    pub n_cigar_ops: u16,
+    /// Number of resolved CIGAR operations, including those stored in a BAM `CG` tag.
+    pub n_cigar_ops: u32,
     // r[impl types.mapping_quality.field_type]
     /// Mapping quality; see [`MappingQuality`] for the unavailable sentinel.
     pub mapq: MappingQuality,
@@ -653,6 +653,30 @@ impl<U> RecordStore<U> {
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
+        #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
+        let aux_slice = &raw[h.qual_end..];
+
+        // r[impl record_store.long_cigar]
+        // CG carries alignment data even when the caller discards auxiliary tags.
+        let cigar_bytes = if let Some(cg) = super::raw_record::long_cigar(
+            cigar_bytes,
+            h.seq_len as usize,
+            refs.tid.is_some(),
+            Aux::new(aux_slice),
+        ) {
+            let query_len = cigar::query_len(CigarOp::iter_bam_bytes(cg));
+            if h.seq_len != 0 && query_len != u64::from(h.seq_len) {
+                return Err(DecodeError::CigarQueryLenMismatch {
+                    cigar_query_len: query_len,
+                    seq_len: h.seq_len,
+                });
+            }
+            cg
+        } else {
+            cigar_bytes
+        };
+        let n_cigar_ops = u32::try_from(cigar_bytes.len() / 4)
+            .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar_bytes.len() / 4 })?;
 
         // --- filter_raw: pre-filter before any slab extension or base decode ---
         // r[impl record_store.pre_filter.rollback+1]
@@ -664,8 +688,6 @@ impl<U> RecordStore<U> {
                 reason = "all bounds \u{2264} qual_end \u{2264} raw.len()"
             )]
             let qual_slice = &raw[h.seq_end..h.qual_end];
-            #[allow(clippy::indexing_slicing, reason = "qual_end \u{2264} raw.len()")]
-            let aux_slice = &raw[h.qual_end..];
             #[allow(
                 clippy::indexing_slicing,
                 reason = "all bounds \u{2264} qual_end \u{2264} raw.len()"
@@ -676,7 +698,7 @@ impl<U> RecordStore<U> {
                 end_pos: None,
                 flags: h.flags,
                 mapq: h.mapq,
-                n_cigar_ops: h.n_cigar_ops,
+                n_cigar_ops,
                 seq_len: h.seq_len,
                 matching_bases: 0,
                 indel_bases: 0,
@@ -743,8 +765,6 @@ impl<U> RecordStore<U> {
         let aux_off = u32::try_from(self.aux.len()).map_err(|_| DecodeError::SlabOverflow)?;
 
         // Aux data (everything after qual)
-        #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
-        let aux_slice = &raw[h.qual_end..];
         match tags {
             AuxTags::All => self.aux.extend_from_slice(aux_slice),
             tags => super::aux::retain_tags_into(aux_slice, tags, &mut self.aux),
@@ -760,7 +780,7 @@ impl<U> RecordStore<U> {
             pos,
             end_pos,
             flags: h.flags,
-            n_cigar_ops: h.n_cigar_ops,
+            n_cigar_ops,
             mapq: h.mapq,
             seq_len: h.seq_len,
             matching_bases,
@@ -852,11 +872,9 @@ impl<U> RecordStore<U> {
         }
 
         let idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "caller validates cigar op count ≤ 65535 (BAM n_cigar_op is u16); fits in u16"
-        )]
-        let n_cigar_ops = cigar_ops.len() as u16;
+        // r[impl record_store.long_cigar]
+        let n_cigar_ops = u32::try_from(cigar_ops.len())
+            .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar_ops.len() })?;
         #[expect(
             clippy::cast_possible_truncation,
             reason = "seq length is bounded by slab limits (u32); slab overflow checked via SlabOverflow"
@@ -996,7 +1014,8 @@ pub enum Sequence<'a> {
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are the pre-computed values.
 ///
-/// [`cigar`](Self::cigar) is always raw BAM CIGAR bytes (`&[u8]`). Use
+/// [`cigar`](Self::cigar) is always raw BAM CIGAR bytes (`&[u8]`). For a long
+/// CIGAR, it contains the resolved `CG` operations, not the placeholder. Use
 /// [`CigarOp::slice_from_bam_bytes`] or [`CigarOp::extend_from_bam_bytes`]
 /// for typed access.
 #[derive(Debug)]
@@ -1017,8 +1036,8 @@ pub struct FilterRawFields<'a> {
     // r[impl types.mapping_quality.field_type]
     /// Mapping quality; see [`MappingQuality`] for the unavailable sentinel.
     pub mapq: MappingQuality,
-    /// Number of CIGAR ops.
-    pub n_cigar_ops: u16,
+    /// Number of resolved CIGAR operations, including those stored in a BAM `CG` tag.
+    pub n_cigar_ops: u32,
     /// Query sequence length.
     pub seq_len: u32,
     /// Sum of M/=/X CIGAR op lengths. `0` for `push_raw` (not yet computed).
@@ -1559,7 +1578,7 @@ impl<U> RecordStore<U> {
     /// Where `rec`'s ops sit in [`cigar_slab`](Self::cigar_slab), as
     /// `(start, end)`.
     pub(crate) fn cigar_span(rec: &SlimRecord) -> (u32, u32) {
-        (rec.cigar_off, rec.cigar_off.saturating_add(u32::from(rec.n_cigar_ops)))
+        (rec.cigar_off, rec.cigar_off.saturating_add(rec.n_cigar_ops))
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
@@ -1623,7 +1642,7 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.set_alignment]
-    // r[impl record_store.set_alignment.validation]
+    // r[impl record_store.set_alignment.validation+1]
     /// Replace a record's alignment (pos + cigar) by appending new CIGAR to the
     /// cigar slab. The old CIGAR bytes become dead data.
     ///
@@ -1643,7 +1662,7 @@ impl<U> RecordStore<U> {
         let (seq_len, was_unmapped) = (rec.seq_len, rec.flags.is_unmapped());
 
         // ── All validation before any mutation ──
-        // If any check fails, the store is unchanged (r[record_store.set_alignment.validation]).
+        // If any check fails, the store is unchanged (r[record_store.set_alignment.validation+1]).
 
         let new_query_len = cigar::query_len(new_cigar_ops);
         if new_query_len != u64::from(seq_len) {
@@ -1655,7 +1674,7 @@ impl<U> RecordStore<U> {
 
         let n_ops = new_cigar_ops.len();
         let n_cigar_ops =
-            u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
+            u32::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
         // r[impl record_store.end_pos_htslib]
         let end_pos = if was_unmapped {
@@ -2015,7 +2034,7 @@ pub(crate) mod tests {
         pos: u32,
         flags: u16,
         mapq: MappingQuality,
-        n_cigar_ops: u16,
+        n_cigar_ops: u32,
         seq_len: u32,
         tid: Option<Tid>,
         mate_fields: MateFields,

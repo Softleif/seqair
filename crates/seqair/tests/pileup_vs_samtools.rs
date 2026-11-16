@@ -238,6 +238,34 @@ fn assert_pileup_parity(sam_name: &str, contig: &str, contig_len: u32) {
     assert_columns_match(&ours, &hts, sam_name);
 }
 
+// r[verify record_store.long_cigar]
+// r[verify pileup.htslib_compat]
+#[test]
+fn long_cigar_pileup_matches_htslib() {
+    // 65538 operations: matches, insertions, deletions and reference skips.
+    // samtools must encode this alignment through CG, not BAM's u16 count.
+    let cigar = "1M1I1M1D1M1N".repeat(10_923);
+    let seq = "ACGT".repeat(10_923);
+    let sam = format!(
+        "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:long\tLN:100000\n\
+         r\t0\tlong\t101\t60\t{cigar}\t*\t0\t0\t{seq}\t*\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let sam_path = dir.path().join("long.sam");
+    std::fs::write(&sam_path, sam).unwrap();
+    let bam = sam_to_bam(dir.path(), &sam_path);
+
+    let mut stream = seqair::reader::AlignmentStream::open_path(&bam).unwrap().build().unwrap();
+    let raw = stream.records().next().unwrap().unwrap();
+    assert!(raw.has_cg_placeholder());
+    assert_eq!(raw.cigar_len(), 65_538);
+
+    let hts = htslib_pileup(&bam, b"long", 0, 100_000);
+    let ours = seqair_pileup(&bam, "long", 0, 100_000);
+    assert_eq!(hts.len(), 54_615);
+    assert_columns_match(&ours, &hts, "long CIGAR");
+}
+
 // --- Tests for contig "z" (LN:13) SAMs ---
 
 /// Deletions: 3 reads with M and D CIGAR ops.

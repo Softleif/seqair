@@ -420,7 +420,7 @@ struct Snapshot {
     end_pos: u64,
     flags: u16,
     mapq: u8,
-    n_cigar_ops: u16,
+    n_cigar_ops: u32,
     seq_len: u32,
     matching_bases: u32,
     indel_bases: u32,

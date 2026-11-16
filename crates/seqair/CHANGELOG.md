@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `RecordStore` resolves BAM long CIGARs from `CG` before filtering and auxiliary-tag selection. Fetches and pileups now use the real alignment rather than the soft-clip/reference-skip placeholder, even when auxiliary tags are not retained. `SlimRecord::n_cigar_ops` and `FilterRawFields::n_cigar_ops` widen from `u16` to `u32`; `push_fields` and `set_alignment` preserve counts above 65535. The store writer rejects those counts with `CigarCountOverflow`, matching the owned-record writer's existing limit; `write_raw` still copies long-CIGAR records unchanged.
+
 ## v0.10.1 (2026-11-13)
 
 ### Added

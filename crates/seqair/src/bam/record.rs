@@ -282,7 +282,7 @@ pub enum DecodeError {
     #[error("CIGAR query length {cigar_query_len} does not match seq_len {seq_len}")]
     CigarQueryLenMismatch { cigar_query_len: u64, seq_len: u32 },
 
-    #[error("CIGAR op count {count} exceeds u16::MAX (BAM n_cigar_op limit)")]
+    #[error("CIGAR op count {count} exceeds u32::MAX (record store limit)")]
     CigarOpCountOverflow { count: usize },
 
     #[error("qual length {qual_len} does not match seq length {seq_len}")]
