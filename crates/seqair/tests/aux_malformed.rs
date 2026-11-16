@@ -195,6 +195,19 @@ fn edit_aux_refuses_exactly_the_malformed_blocks(tc: TestCase) {
     payload.extend_from_slice(&whole);
     let mut record = RawBamRecord::from_payload(payload, &header()).expect("aux is not validated");
     let before = record.as_payload().to_vec();
+    // A `CG` tag the record took its CIGAR from is not among its tags, and
+    // past 65535 ops no other `CG` tag is either.
+    let visible = record.aux().as_bytes().to_vec();
+    let cg = match () {
+        () if visible == whole => cg,
+        () if record.has_cg_placeholder() => Vec::new(),
+        () => cg[1..].to_vec(),
+    };
+    let visible_tags = |tags: &[GenTag]| {
+        let mut all = cg.clone();
+        all.extend(tags.iter().cloned());
+        all
+    };
 
     // Not `CG`: taking it out is the separate `LongCigarChanged` refusal.
     let keys: Vec<[u8; 2]> = probe_keys(&tc, &block).into_iter().filter(|k| k != b"CG").collect();
@@ -205,7 +218,7 @@ fn edit_aux_refuses_exactly_the_malformed_blocks(tc: TestCase) {
         Ok(())
     });
 
-    match validate_aux(&whole) {
+    match validate_aux(&visible) {
         Err(_) => {
             assert!(matches!(result, Err(RawRecordEditError::MalformedAux(_))), "{result:?}");
             assert_eq!(record.as_payload(), before, "a refused edit changed the record");
@@ -213,13 +226,10 @@ fn edit_aux_refuses_exactly_the_malformed_blocks(tc: TestCase) {
         Ok(()) => {
             result.unwrap();
             if let Some(tags) = &block.tags {
-                let mut model = cg.clone();
-                model.extend(tags.iter().cloned());
+                let model = visible_tags(tags);
                 let mut model = model_remove(&model_remove(&model, key), *b"XR");
                 model.push(GenTag { key: *b"XR", value: b"ZCT\0".to_vec() });
-                let mut want = fixed;
-                want.extend(encode(&model));
-                assert_eq!(record.as_payload(), want);
+                assert_eq!(record.aux().as_bytes(), encode(&model));
             }
         }
     }

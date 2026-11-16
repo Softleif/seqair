@@ -455,6 +455,9 @@ The output size is untrusted: it MUST pass `check_alloc_size`, and the output bu
 r[cram.record.position]
 `AP` (alignment position): if the preservation map `AP=true` (delta mode), each record's position is a delta from the previous record's position within the slice. The reader MUST maintain a running position accumulator and convert to absolute 0-based coordinates (CRAM positions are 1-based). Delta-coded positions can be negative (valid for supplementary alignments in coordinate-sorted CRAM).
 
+r[cram.record.long_cigar]
+As htslib's `cram_to_bam` does (it calls `bam_tag2cigar`), a record whose CIGAR, rebuilt from its read features, is a placeholder with a `CG` tag behind it (`r[bam.raw_record.long_cigar]`) MUST take the tag's ops as its CIGAR and drop the tag, and its end, matching bases and indel bases MUST come from that CIGAR. The `CG` tag MUST be decoded whatever tags were requested. Mate resolution (TLEN) keeps the span the read features give, as htslib's does. Both readers share this decode, so the indexed reader's store and the stream's records agree.
+
 r[cram.record.end_pos]
 A CRAM record's reference span comes out of the feature walk as `ref_consumed`,
 a length. The slice decoder MUST convert it to the same `end_pos` convention

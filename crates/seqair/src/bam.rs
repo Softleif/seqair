@@ -51,6 +51,7 @@ pub mod csi_index;
 pub mod depth_cap;
 pub mod header;
 pub mod index;
+pub(crate) mod long_cigar;
 pub mod mate;
 pub mod nm_md;
 pub mod owned_record;
@@ -79,7 +80,7 @@ pub use base_mod::{
     BaseModError, BaseModState, FromRecordError, ModMode, ModStrand, ModType, Modification,
 };
 pub use bgzf::{BgzfError, BgzfStream, EofMarker};
-pub use cigar::{CigarOp, CigarStr};
+pub use cigar::{CigarOp, CigarStr, PackedCigar};
 pub use csi_index::{CsiError, CsiIndex};
 pub use depth_cap::{DepthCap, DepthLimit};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};

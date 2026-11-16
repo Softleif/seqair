@@ -10,7 +10,8 @@
 use super::MateFields;
 use super::{
     aux::Aux,
-    cigar::{self, CigarOp},
+    cigar::{self, CigarOp, PackedCigar},
+    long_cigar,
     record::{self, DecodeError},
     record_idx::{RecordIdx, RecordRef},
     seq,
@@ -652,31 +653,26 @@ impl<U> RecordStore<U> {
             crate::io::text_scan::find_byte(qname_raw, 0).unwrap_or(qname_raw.len());
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        let cigar_bytes = &raw[h.var_start..h.cigar_end];
+        let stored_cigar = PackedCigar::whole_ops(&raw[h.var_start..h.cigar_end]);
         #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
-        let aux_slice = &raw[h.qual_end..];
+        let raw_aux = &raw[h.qual_end..];
 
-        // r[impl record_store.long_cigar]
-        // CG carries alignment data even when the caller discards auxiliary tags.
-        let cigar_bytes = if let Some(cg) = super::raw_record::long_cigar(
-            cigar_bytes,
-            h.seq_len as usize,
-            refs.tid.is_some(),
-            Aux::new(aux_slice),
-        ) {
-            let query_len = cigar::query_len(CigarOp::iter_bam_bytes(cg));
-            if h.seq_len != 0 && query_len != u64::from(h.seq_len) {
-                return Err(DecodeError::CigarQueryLenMismatch {
-                    cigar_query_len: query_len,
-                    seq_len: h.seq_len,
-                });
-            }
-            cg
-        } else {
-            cigar_bytes
+        // r[impl record_store.long_cigar+1]
+        // Resolved before the filter and the tag selection: CG carries the
+        // alignment even when the caller keeps no tags, and is not a tag once
+        // it is the CIGAR.
+        let long = long_cigar::find(stored_cigar, h.seq_len as usize, refs.tid.is_some(), raw_aux);
+        let cigar = long.as_ref().map_or(stored_cigar, |long| long.ops);
+        if long.is_some() {
+            super::raw_record::check_cigar_against_seq(cigar, true, h.flags, h.seq_len)?;
+        }
+        let n_cigar_ops = u32::try_from(cigar.len())
+            .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar.len() })?;
+        let aux_slice = match &long {
+            None => raw_aux.into(),
+            Some(long) => long.remaining_tags(raw_aux),
         };
-        let n_cigar_ops = u32::try_from(cigar_bytes.len() / 4)
-            .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar_bytes.len() / 4 })?;
+        let aux_slice = &*aux_slice;
 
         // --- filter_raw: pre-filter before any slab extension or base decode ---
         // r[impl record_store.pre_filter.rollback+1]
@@ -698,7 +694,6 @@ impl<U> RecordStore<U> {
                 end_pos: None,
                 flags: h.flags,
                 mapq: h.mapq,
-                n_cigar_ops,
                 seq_len: h.seq_len,
                 matching_bases: 0,
                 indel_bases: 0,
@@ -706,8 +701,8 @@ impl<U> RecordStore<U> {
                 mate_fields: refs.mate_fields,
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
-                aux_bytes: aux_slice,
-                cigar: cigar_bytes,
+                aux: Aux::new(aux_slice),
+                cigar,
                 seq: Sequence::Packed(packed_seq_slice),
             }) {
                 return Ok(None);
@@ -717,7 +712,7 @@ impl<U> RecordStore<U> {
         // --- Write into cigar slab ---
         // r[impl record_store.checked_offsets]
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        CigarOp::extend_from_bam_bytes(&mut self.cigar, cigar_bytes);
+        cigar.extend_into(&mut self.cigar);
         let cigar_start = cigar_off as usize;
         #[allow(clippy::indexing_slicing, reason = "just appended; offsets within slab bounds")]
         let cigar_ops = &self.cigar[cigar_start..];
@@ -872,7 +867,7 @@ impl<U> RecordStore<U> {
         }
 
         let idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
-        // r[impl record_store.long_cigar]
+        // r[impl record_store.long_cigar+1]
         let n_cigar_ops = u32::try_from(cigar_ops.len())
             .map_err(|_| DecodeError::CigarOpCountOverflow { count: cigar_ops.len() })?;
         #[expect(
@@ -888,7 +883,6 @@ impl<U> RecordStore<U> {
             end_pos: Some(end_pos),
             flags,
             mapq,
-            n_cigar_ops,
             seq_len,
             matching_bases,
             indel_bases,
@@ -896,8 +890,8 @@ impl<U> RecordStore<U> {
             mate_fields,
             qname,
             qual_bytes: qual,
-            aux_bytes: aux,
-            cigar: CigarOp::ops_as_bytes(cigar_ops),
+            aux: Aux::new(aux),
+            cigar: PackedCigar::from_ops(cigar_ops),
             seq: Sequence::Iupac(bases),
         }) {
             return Ok(None);
@@ -1014,10 +1008,9 @@ pub enum Sequence<'a> {
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are the pre-computed values.
 ///
-/// [`cigar`](Self::cigar) is always raw BAM CIGAR bytes (`&[u8]`). For a long
-/// CIGAR, it contains the resolved `CG` operations, not the placeholder. Use
-/// [`CigarOp::slice_from_bam_bytes`] or [`CigarOp::extend_from_bam_bytes`]
-/// for typed access.
+/// [`cigar`](Self::cigar) and [`aux`](Self::aux) describe the record as it
+/// will be stored: for a long CIGAR, the operations from its `CG` tag, and the
+/// tags without it (`r[record_store.long_cigar+1]`).
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
@@ -1036,8 +1029,6 @@ pub struct FilterRawFields<'a> {
     // r[impl types.mapping_quality.field_type]
     /// Mapping quality; see [`MappingQuality`] for the unavailable sentinel.
     pub mapq: MappingQuality,
-    /// Number of resolved CIGAR operations, including those stored in a BAM `CG` tag.
-    pub n_cigar_ops: u32,
     /// Query sequence length.
     pub seq_len: u32,
     /// Sum of M/=/X CIGAR op lengths. `0` for `push_raw` (not yet computed).
@@ -1053,12 +1044,10 @@ pub struct FilterRawFields<'a> {
     pub qname: &'a [u8],
     /// Raw quality score bytes.
     pub qual_bytes: &'a [u8],
-    /// Raw auxiliary tag bytes (BAM binary format).
-    pub aux_bytes: &'a [u8],
-    /// Raw BAM CIGAR bytes. Use [`CigarOp::slice_from_bam_bytes`] for zero-cost
-    /// typed access on aligned little-endian input, or
-    /// [`CigarOp::extend_from_bam_bytes`] to copy into a `Vec<CigarOp>`.
-    pub cigar: &'a [u8],
+    /// The aux tags, in BAM's binary form, without a long CIGAR's `CG` tag.
+    pub aux: Aux<'a>,
+    /// The CIGAR, the real one for a long CIGAR.
+    pub cigar: PackedCigar<'a>,
     /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
     /// [`Sequence::Iupac`] from `push_fields` (SAM/CRAM).
     pub seq: Sequence<'a>,
@@ -1128,7 +1117,7 @@ pub struct FilterRawFields<'a> {
 ///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
 ///         // Quick: if the aux bytes don't contain our target string at all,
 ///         // skip the record. No slab work done.
-///         fields.aux_bytes
+///         fields.aux.as_bytes()
 ///             .windows(self.target_rg.len())
 ///             .any(|w| w == self.target_rg.as_slice())
 ///     }
@@ -2049,12 +2038,12 @@ pub(crate) mod tests {
                 pos: f.pos.as_u32(),
                 flags: f.flags.raw(),
                 mapq: f.mapq,
-                n_cigar_ops: f.n_cigar_ops,
+                n_cigar_ops: u32::try_from(f.cigar.len()).unwrap(),
                 seq_len: f.seq_len,
                 tid: f.tid,
                 mate_fields: f.mate_fields,
                 qname: f.qname.to_vec(),
-                aux: f.aux_bytes.to_vec(),
+                aux: f.aux.as_bytes().to_vec(),
             });
             true
         }

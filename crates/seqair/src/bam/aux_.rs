@@ -106,6 +106,11 @@ pub fn find_tag<'a>(aux: &'a [u8], tag: [u8; 2]) -> Option<AuxValue<'a>> {
     iter_tags(aux.get(at..)?).next().map(|(_, value)| value)
 }
 
+/// The offset of the first `tag` in `aux`, where its two name bytes start.
+pub(crate) fn find_tag_offset(aux: &[u8], tag: [u8; 2]) -> Option<usize> {
+    find_tag_at(Level::new(), aux, tag)
+}
+
 // r[impl io.simd_portable]
 fn find_tag_at(level: Level, aux: &[u8], tag: [u8; 2]) -> Option<usize> {
     dispatch!(level, simd => find_tag_simd(simd, aux, tag))

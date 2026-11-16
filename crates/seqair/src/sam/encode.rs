@@ -7,8 +7,8 @@
 
 use crate::bam::{
     BamHeader, CigarOp, DecodeError, MateFields, RawBamRecord,
-    aux::tag_end,
     cigar::{self, CigarOpType},
+    long_cigar::{self, WireCigar},
     raw_record::Refill,
     record::{FixedHeaderFields, MAX_RECORD_SIZE, encode_fixed_header},
     seq,
@@ -381,37 +381,10 @@ impl SamRecordEncoder {
             .is_some_and(|op| op.op_type() == CigarOpType::SoftClip && op.len() as usize == l_seq)
     }
 
-    /// htslib's `bam_tag2cigar` on a placed record: a first CIGAR operation
-    /// `<l_seq>S` and a first `CG` tag of type `B:I`/`B:i` holding at least as
-    /// many (and fewer than 2^29) operations make that tag the CIGAR.
+    /// htslib's `bam_tag2cigar` on a placed record
+    /// (`r[bam.raw_record.long_cigar]`): the `CG` tag becomes the CIGAR.
     fn take_cg_tag(&mut self, l_seq: usize) {
-        if !self.cg_tag_may_apply(l_seq) {
-            return;
-        }
-        let mut at = 0;
-        while at < self.aux.len() {
-            // Our own parser wrote these bytes, so every tag is well formed.
-            let Ok(end) = tag_end(&self.aux, at) else { return };
-            let tag = self.aux.get(at..end).unwrap_or_default();
-            if let Some((b"CG", value)) = tag.split_first_chunk::<2>() {
-                let Some((&[b'B', sub, n0, n1, n2, n3], ops)) = value.split_first_chunk::<6>()
-                else {
-                    return;
-                };
-                let count = u32::from_le_bytes([n0, n1, n2, n3]);
-                if !matches!(sub, b'I' | b'i')
-                    || (count as usize) < self.cigar.len()
-                    || count >= 1 << 29
-                {
-                    return;
-                }
-                self.cigar.clear();
-                CigarOp::extend_from_bam_bytes(&mut self.cigar, ops);
-                self.aux.drain(at..end);
-                return;
-            }
-            at = end;
-        }
+        long_cigar::take(&mut self.cigar, &mut self.aux, l_seq, true);
     }
 }
 
@@ -503,7 +476,7 @@ pub(crate) struct AlignmentFields<'a> {
 }
 
 // r[impl sam.encode.bin]
-// r[impl sam.encode.long_cigar]
+// r[impl sam.encode.long_cigar+1]
 // r[impl sam.encode.limits]
 /// Append one record's BAM payload (its bytes after `block_size`) to
 /// `payload`, as htslib's `bam_set1` and `bam_write1` lay it out: the bin
@@ -519,21 +492,17 @@ pub(crate) fn encode_alignment(
     let beg = f.pos.map_or(-1, |p| i64::from(p.as_i32()));
     let bin = reg2bin(beg, beg.saturating_add_unsigned(span));
 
-    let long = f.cigar.len() > usize::from(u16::MAX);
-    if long && ref_len >= 1 << 28 {
-        return Err(RecordEncodeError::CigarRefLenTooLong { ref_len });
-    }
-    let n_cigar_op = if long { 2 } else { u16::try_from(f.cigar.len()).unwrap_or(u16::MAX) };
-
-    let cigar_bytes = f.cigar.len().saturating_mul(4);
+    let seq_len = u32::try_from(f.seq.len()).unwrap_or(u32::MAX);
+    let cigar = WireCigar::new(f.cigar, seq_len)
+        .map_err(|e| RecordEncodeError::CigarRefLenTooLong { ref_len: e.ref_len })?;
+    // An upper bound: a stale `CG` tag in `aux` is dropped for a long CIGAR.
     let size = [
         FIXED_LEN,
         f.qname.len().saturating_add(1),
-        if long { 8 } else { cigar_bytes },
+        cigar.wire_len(),
         f.seq.len().div_ceil(2),
         f.seq.len(),
         f.aux.len(),
-        if long { cigar_bytes.saturating_add(8) } else { 0 },
     ]
     .into_iter()
     .fold(0usize, usize::saturating_add);
@@ -556,40 +525,21 @@ pub(crate) fn encode_alignment(
             mapq: f.mapq,
             l_read_name,
             flags: f.flags,
-            n_cigar_op,
+            n_cigar_op: cigar.n_cigar_op(),
             l_seq,
             mate_fields: f.mate_fields,
         },
     );
     payload.extend_from_slice(f.qname);
     payload.push(0);
-    if long {
-        // `bam_write1`'s placeholder: `<l_seq>S<ref_len>N`. Both lengths
-        // are below 2^28 (checked above; `l_seq` by the size limit).
-        let ref_len = u32::try_from(ref_len).unwrap_or(u32::MAX);
-        for op in [
-            CigarOp::new(CigarOpType::SoftClip, l_seq.cast_unsigned()),
-            CigarOp::new(CigarOpType::RefSkip, ref_len),
-        ] {
-            payload.extend_from_slice(&op.to_bam_u32().to_le_bytes());
-        }
-    } else {
-        payload.extend_from_slice(CigarOp::ops_as_bytes(f.cigar));
-    }
+    cigar.write_cigar(payload);
     f.seq.encode_into(payload);
     match f.qual {
         Qualities::Missing => payload.resize(payload.len().saturating_add(f.seq.len()), 0xFF),
         Qualities::Phred33(qual) => payload.extend(qual.iter().map(|q| q.wrapping_sub(33))),
         Qualities::Raw(qual) => payload.extend_from_slice(qual),
     }
-    payload.extend_from_slice(f.aux);
-    if long {
-        payload.extend_from_slice(b"CGBI");
-        let n_ops =
-            u32::try_from(f.cigar.len()).map_err(|_| RecordEncodeError::RecordTooLarge { size })?;
-        payload.extend_from_slice(&n_ops.to_le_bytes());
-        payload.extend_from_slice(CigarOp::ops_as_bytes(f.cigar));
-    }
+    cigar.write_aux(f.aux, payload);
     Ok(())
 }
 

@@ -15,6 +15,7 @@
 //! them into a [`RecordStore`](super::record_store::RecordStore) and access
 //! fields via [`SlimRecord`](super::record_store::SlimRecord).
 
+use super::cigar::PackedCigar;
 use super::{BamHeader, MateFields};
 use crate::reader::Tid;
 use seqair_types::{BamFlags, MappingQuality, Pos0};
@@ -25,7 +26,9 @@ use std::num::NonZeroI32;
 /// writes (`r[io.writer_limits]`).
 pub(crate) const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
 
-/// Compute `end_pos` from raw BAM record bytes (before full decode).
+// r[impl record_store.long_cigar+1]
+/// Compute `end_pos` from raw BAM record bytes (before full decode), by the
+/// real CIGAR: a long one's `CG` tag, as the store and `RawBamRecord` read it.
 ///
 /// Walks the packed CIGAR bytes in place — used on the hot pre-push scan
 /// path before we know whether to keep the record, so we can't afford to
@@ -33,17 +36,11 @@ pub(crate) const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
 pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
     let h = parse_header(raw).ok()?;
     let pos = h.pos?;
-    // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
-    debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
-    #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
-    let cigar_bytes = &raw[h.var_start..h.cigar_end];
-    debug_assert!(
-        cigar_bytes.len().is_multiple_of(4),
-        "BAM CIGAR region must be n_cigar_op * 4 bytes, got {}",
-        cigar_bytes.len()
-    );
-
-    super::cigar::compute_end_pos(pos, super::cigar::CigarOp::iter_bam_bytes(cigar_bytes))
+    let stored = PackedCigar::whole_ops(raw.get(h.var_start..h.cigar_end)?);
+    let aux = raw.get(h.qual_end..)?;
+    let cigar = super::long_cigar::find(stored, h.seq_len as usize, h.refs.has_reference(), aux)
+        .map_or(stored, |long| long.ops);
+    super::cigar::compute_end_pos(pos, cigar)
 }
 
 // Callers only invoke read2/read4 after validating raw.len() >= 32 or equivalent.
@@ -91,7 +88,6 @@ pub(crate) struct ParsedHeader {
     pub pos: Option<Pos0>,
     pub mapq: MappingQuality,
     pub flags: BamFlags,
-    pub n_cigar_ops: u16,
     pub seq_len: u32,
     /// Start of variable-length data (32 + `name_len`).
     pub var_start: usize,
@@ -122,6 +118,11 @@ pub(crate) struct Refs {
 }
 
 impl WireRefs {
+    /// Whether the record names a reference (BAM's `refID` is not `-1`).
+    pub(crate) fn has_reference(&self) -> bool {
+        self.tid >= 0
+    }
+
     // r[impl bam.record.ref_ids]
     /// `-1` is "none" for all three; a reference id must name one of
     /// `header`'s targets and a mate position must not be otherwise negative.
@@ -195,18 +196,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         return Err(DecodeError::TooShort { len: raw.len() });
     }
 
-    Ok(ParsedHeader {
-        refs,
-        pos,
-        mapq,
-        flags,
-        n_cigar_ops,
-        seq_len,
-        var_start,
-        cigar_end,
-        seq_end,
-        qual_end,
-    })
+    Ok(ParsedHeader { refs, pos, mapq, flags, seq_len, var_start, cigar_end, seq_end, qual_end })
 }
 
 /// Field values for the 32-byte BAM fixed record header.

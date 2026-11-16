@@ -1288,7 +1288,7 @@ mod tests {
         assert!(!full.is_empty());
         assert_eq!(core.len(), full.len());
         for (c, f) in core.iter().zip(&full) {
-            assert_eq!(c.cigar().collect::<Vec<_>>(), f.cigar().collect::<Vec<_>>());
+            assert_eq!(c.cigar().to_vec(), f.cigar().to_vec());
             assert_eq!((c.pos(), c.flags(), c.seq_len()), (f.pos(), f.flags(), f.seq_len()));
         }
         let err = without.fetch_into(tid, span, &mut RecordStore::new()).unwrap_err();

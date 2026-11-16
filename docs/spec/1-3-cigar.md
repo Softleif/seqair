@@ -38,24 +38,33 @@ same bytes. Viewing one as the other without copying is therefore tempting — b
 BAM does not align the CIGAR: it starts right after the read name, whose length
 is only a multiple of 4 by accident, and samtools emits records where it is not.
 
+r[cigar.packed]
+`PackedCigar<'a>` MUST be the one type for a CIGAR in BAM's packed form:
+whole ops (`from_bam_bytes` MUST return `None` for a length that is not a
+multiple of 4), any alignment, decoded on the fly by `iter`, copied by
+`extend_into`/`to_vec` (one `memcpy`, correct at any alignment), and equal to
+`PackedCigar::from_ops` of the same ops. A record's packed CIGAR MUST be its
+real one (`r[bam.long_cigar.resolve]`); the placeholder a long CIGAR stands
+behind is reachable only as `RawBamRecord::stored_cigar`.
+
 r[cigar.slice_from_bam_bytes]
-`CigarOp::slice_from_bam_bytes(bytes) -> Option<&[CigarOp]>` MUST return a
-borrowed, zero-copy view of BAM-on-disk CIGAR bytes, and MUST return `None`
-rather than a view whenever that reinterpretation would be wrong: when
-`bytes.len()` is not a multiple of 4, when the pointer is not 4-byte aligned
-(`align_of::<CigarOp>()`). (seqair builds for little-endian targets only, so
-the in-memory u32 byte order is BAM's on-disk order.) Empty input MUST
-return `Some(&[])`. Callers that cannot guarantee alignment MUST use
-`extend_from_bam_bytes`, which copies and is always correct. Returning `None` is
-the whole contract: a caller that treats it as "no CIGAR" would silently drop
-operations, so `None` means "ask for the copying path", never "there are none".
+`PackedCigar::as_ops() -> Option<&[CigarOp]>` MUST return a
+borrowed, zero-copy view, and MUST return `None`
+rather than a view whenever that reinterpretation would be wrong: when the
+pointer is not 4-byte aligned (`align_of::<CigarOp>()`). (seqair builds for
+little-endian targets only, so the in-memory u32 byte order is BAM's on-disk
+order.) An empty CIGAR MUST give `Some(&[])`. Callers that cannot guarantee
+alignment MUST use `extend_into`, which copies and is always correct. Returning
+`None` is the whole contract: a caller that treats it as "no CIGAR" would
+silently drop operations, so `None` means "ask for the copying path", never
+"there are none".
 
 ## Matches and indels
 
 These aggregate statistics are used downstream for read quality metrics (e.g. fraction of matching bases, indel rate).
 
 r[cigar.ref_len]
-`cigar::ref_len(ops)` MUST be the summed lengths of the reference-consuming operations (M, D, N, =, X), as htslib's `bam_cigar2rlen`, as a `u64`, for decoded ops (`&[CigarOp]`) and packed ones (`CigarOp::iter_bam_bytes`) alike. Every reference length the crate computes — end positions, the depth cap's span — MUST come from it, so `CigarOp::consumes_ref` is the one definition of which ops count.
+`cigar::ref_len(ops)` MUST be the summed lengths of the reference-consuming operations (M, D, N, =, X), as htslib's `bam_cigar2rlen`, as a `u64`, for decoded ops (`&[CigarOp]`) and packed ones (`PackedCigar`) alike. Every reference length the crate computes — end positions, the depth cap's span — MUST come from it, so `CigarOp::consumes_ref` is the one definition of which ops count.
 
 r[cigar.query_len]
 `cigar::query_len(ops)` MUST be the summed lengths of the query-consuming operations (M, I, S, =, X), as htslib's `bam_cigar2qlen`, as a `u64`, for decoded and packed ops alike. Every check of a CIGAR against a SEQ length MUST use it.

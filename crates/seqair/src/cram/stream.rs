@@ -899,7 +899,7 @@ pub(crate) mod tests {
             assert_eq!(hits(&without, &bases), 0, "{}: BA/BS decompressed", cram.display());
             assert_eq!(core.len(), full.len());
             for (c, f) in core.iter().zip(&full) {
-                assert_eq!(c.cigar().collect::<Vec<_>>(), f.cigar().collect::<Vec<_>>());
+                assert_eq!(c.cigar().to_vec(), f.cigar().to_vec());
                 assert_eq!(
                     (c.pos(), c.end_pos(), c.seq_len()),
                     (f.pos(), f.end_pos(), f.seq_len())

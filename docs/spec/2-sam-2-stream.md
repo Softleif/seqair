@@ -38,8 +38,8 @@ r[sam.encode.cigar]
 r[sam.encode.cigar_seq]
 When a record has a CIGAR and a sequence, the CIGAR's query length (M, I, S, =, X) MUST equal the sequence length, mapped or not, as `sam_parse1` checks (`CigarSeqLenMismatch`). The check runs after `r[sam.encode.cg_tag]`.
 
-r[sam.encode.long_cigar]
-A CIGAR of more than 65535 operations MUST be written as `bam_write1` writes it: the CIGAR field holds the two placeholder operations `<l_seq>S<rlen>N` (`n_cigar_op = 2`), where `rlen` is the reference length of the real CIGAR, and a `CG:B:I` tag holding the real CIGAR is appended after every other tag. A reference length of 2^28 or more cannot be written this way and MUST fail with `CigarRefLenTooLong`.
+r[sam.encode.long_cigar+1]
+A CIGAR of more than 65535 operations MUST be written as `bam_write1` writes it: the CIGAR field holds the two placeholder operations `<l_seq>S<rlen>N` (`n_cigar_op = 2`), where `rlen` is the reference length of the real CIGAR, and a `CG:B:I` tag holding the real CIGAR is appended after every other tag. Any `CG` tag among the other tags MUST be left out: a reader takes the first `CG` tag, so a stale one would stand in for the real CIGAR (htslib's `bam_write1` keeps it, and loses the CIGAR that way). A reference length of 2^28 or more cannot be written this way and MUST fail with `CigarRefLenTooLong`. Every BAM writer — the SAM and CRAM encoders, `OwnedBamRecord::to_bam_bytes`, `BamWriter::write_store_record` — MUST write a long CIGAR through this one encoder (`WireCigar`).
 
 r[sam.encode.cg_tag]
 As `bam_tag2cigar` does in `sam_parse1`, when a placed record (reference and POS set) has a CIGAR whose first operation is `<l_seq>S` and its first `CG` tag is a `B:I` or `B:i` array of at least as many elements as the CIGAR has operations and fewer than 2^29, the CG tag MUST become the CIGAR and be removed from the tags; `bin` is computed from the new CIGAR. The record is then written by `r[sam.encode.long_cigar]`, so a CG of more than 65535 operations goes back to the end of the tags.

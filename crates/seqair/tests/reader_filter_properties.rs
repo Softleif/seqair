@@ -389,7 +389,7 @@ impl CustomizeRecordStore for ClauseFilter {
         self.pred.accepts(
             fields.flags.raw(),
             fields.mapq.as_byte(),
-            ref_span_from_cigar_bytes(fields.cigar),
+            ref_span_from_cigar_bytes(fields.cigar.as_bytes()),
             fields.qname,
         )
     }

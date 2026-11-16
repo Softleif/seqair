@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- **One model for long CIGARs.** BAM's `<l_seq>S<ref_len>N` placeholder with the real CIGAR in a `CG:B:I` tag is now purely a wire-format matter: every reader resolves it on the way in, as htslib's `bam_tag2cigar` does, and every BAM writer writes it on the way out, as `bam_write1` does. In between, a CIGAR is its real operations and a resolved `CG` tag is not a tag.
+  - New `bam::PackedCigar`: a CIGAR in BAM's packed, unaligned form (`iter`, `len`, `first`, `to_vec`, `extend_into`, `as_ops`, `from_ops`, `from_bam_bytes`). It replaces `CigarOp::iter_bam_bytes`, `CigarOp::extend_from_bam_bytes` and `CigarOp::slice_from_bam_bytes`.
+  - `RawBamRecord::cigar()` and `PartialRecord::cigar()` return a `PackedCigar`; `cigar_len()` is gone (`cigar().len()`), and `stored_cigar_bytes()` is now `stored_cigar()`. A record whose `CG` tag holds a CIGAR that fits BAM's 16-bit op count has those ops moved into the CIGAR field and the tag dropped; a longer one keeps its tag, moved to the end, as the only `CG` tag. `aux()` no longer shows that tag (so the SAM formatter no longer needs to skip it), and `edit_aux` edits around it.
+  - `FilterRawFields` has `cigar: PackedCigar` (the real CIGAR) and `aux: Aux` (without the resolved `CG` tag) in place of `cigar: &[u8]`, `aux_bytes` and `n_cigar_ops`.
+  - `OwnedBamRecord` holds a CIGAR of any length; `to_bam_bytes` writes one past 65535 operations as the placeholder plus a trailing `CG:B:I`. `OwnedRecordError::CigarCountOverflow` is replaced by `CigarRefLenTooLong`.
+
 ### Fixed
 
-- `RecordStore` resolves BAM long CIGARs from `CG` before filtering and auxiliary-tag selection. Fetches and pileups now use the real alignment rather than the soft-clip/reference-skip placeholder, even when auxiliary tags are not retained. `SlimRecord::n_cigar_ops` and `FilterRawFields::n_cigar_ops` widen from `u16` to `u32`; `push_fields` and `set_alignment` preserve counts above 65535. The store writer rejects those counts with `CigarCountOverflow`, matching the owned-record writer's existing limit; `write_raw` still copies long-CIGAR records unchanged.
+- `RecordStore` resolves BAM long CIGARs from `CG` before filtering and auxiliary-tag selection. Fetches and pileups now use the real alignment rather than the soft-clip/reference-skip placeholder, even when auxiliary tags are not retained. `SlimRecord::n_cigar_ops` widens from `u16` to `u32`; `push_fields` and `set_alignment` preserve counts above 65535. The store keeps no resolved `CG` tag, and `write_store_record` writes such a record back in BAM's long form; `write_raw` still copies records unchanged.
+- The indexed SAM reader and the CRAM decoder take a `CG` tag behind a placeholder CIGAR as the CIGAR (htslib's `sam_parse1` and `cram_to_bam` do); before, the store kept the placeholder.
+- The BAM reader's region filter and `RawBamRecord::end_pos` compute a long-CIGAR record's end from the real CIGAR, not the placeholder.
+- A BAM writer emitting a CIGAR's long form leaves out any other `CG` tag among the record's tags, which a reader would otherwise take as the CIGAR.
 
 ## v0.10.1 (2026-11-13)
 

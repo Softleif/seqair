@@ -17,7 +17,7 @@ fn revalidate(record: &RawBamRecord, header: &BamHeader) {
     record.decode_seq_into(&mut seq);
     assert_eq!(seq.len(), record.seq_len());
     std::hint::black_box((
-        record.cigar().count(),
+        record.cigar().len(),
         record.end_pos(),
         record.qual(),
         record.aux().iter_checked().count(),

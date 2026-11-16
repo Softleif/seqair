@@ -18,6 +18,7 @@
 use super::MateFields;
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::{self, CigarOp};
+use super::long_cigar::WireCigar;
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
@@ -32,9 +33,12 @@ pub enum OwnedRecordError {
     #[error("qname length {len} exceeds maximum of 254 bytes")]
     QnameTooLong { len: usize },
 
-    /// CIGAR operation count exceeds 65535 (BAM `n_cigar_op` is u16).
-    #[error("CIGAR op count {count} exceeds maximum of 65535")]
-    CigarCountOverflow { count: usize },
+    /// A CIGAR of more than 65535 operations goes in a `CG` tag behind a
+    /// placeholder whose `N` op holds the reference length in 28 bits.
+    #[error(
+        "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
+    )]
+    CigarRefLenTooLong { ref_len: u64 },
 
     /// Sequence length exceeds `i32::MAX` (BAM `l_seq` is i32).
     #[error("sequence length {len} exceeds i32::MAX")]
@@ -131,14 +135,10 @@ impl OwnedBamRecordBuilder {
     }
 
     // r[impl bam.owned_record.qname_limit]
-    // r[impl bam.owned_record.cigar_count_limit]
     // r[impl bam.owned_record.seq_length_limit]
     pub fn build(self) -> Result<OwnedBamRecord, OwnedRecordError> {
         if self.qname.len() > 254 {
             return Err(OwnedRecordError::QnameTooLong { len: self.qname.len() });
-        }
-        if self.cigar.len() > 65535 {
-            return Err(OwnedRecordError::CigarCountOverflow { count: self.cigar.len() });
         }
         if self.seq.len() > i32::MAX as usize {
             return Err(OwnedRecordError::SeqLengthOverflow { len: self.seq.len() });
@@ -239,9 +239,6 @@ impl OwnedBamRecord {
         pos: Option<Pos0>,
         cigar: Vec<CigarOp>,
     ) -> Result<(), OwnedRecordError> {
-        if cigar.len() > 65535 {
-            return Err(OwnedRecordError::CigarCountOverflow { count: cigar.len() });
-        }
         // For mapped reads, validate CIGAR query length matches seq length
         if !self.is_unmapped() && !self.seq.is_empty() {
             let query_len = cigar::query_len(&cigar);
@@ -305,12 +302,12 @@ impl OwnedBamRecord {
         if name_len > 254 {
             return Err(OwnedRecordError::QnameTooLong { len: name_len });
         }
-        if self.cigar.len() > 65535 {
-            return Err(OwnedRecordError::CigarCountOverflow { count: self.cigar.len() });
-        }
         if self.seq.len() > i32::MAX as usize {
             return Err(OwnedRecordError::SeqLengthOverflow { len: self.seq.len() });
         }
+        // r[impl bam.owned_record.long_cigar]
+        let cigar = WireCigar::new(&self.cigar, u32::try_from(self.seq.len()).unwrap_or(u32::MAX))
+            .map_err(|e| OwnedRecordError::CigarRefLenTooLong { ref_len: e.ref_len })?;
         // r[impl bam.owned_record.seq_qual_length_at_serialization]
         // `set_seq` does not touch `qual`, so a caller that resizes the
         // sequence and does not follow with `set_qual` leaves the two out of
@@ -331,11 +328,6 @@ impl OwnedBamRecord {
         let l_read_name = (self.qname.len() as u8).saturating_add(1); // +1 for NUL
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "cigar.len() ≤ 65535 (validated above); fits in u16"
-        )]
-        let n_cigar_op = self.cigar.len() as u16;
-        #[expect(
-            clippy::cast_possible_truncation,
             clippy::cast_possible_wrap,
             reason = "seq.len() ≤ i32::MAX (validated above); fits in i32"
         )]
@@ -350,7 +342,7 @@ impl OwnedBamRecord {
                 mapq: self.mapq,
                 l_read_name,
                 flags: self.flags.raw(),
-                n_cigar_op,
+                n_cigar_op: cigar.n_cigar_op(),
                 l_seq,
                 mate_fields: self.mate_fields,
             },
@@ -360,10 +352,7 @@ impl OwnedBamRecord {
         buf.extend_from_slice(&self.qname);
         buf.push(0);
 
-        // CIGAR: each op as u32 LE
-        for op in &self.cigar {
-            buf.extend_from_slice(&op.to_bam_u32().to_le_bytes());
-        }
+        cigar.write_cigar(buf);
 
         seq::encode_iupac_bases_into(&self.seq, buf);
 
@@ -375,8 +364,8 @@ impl OwnedBamRecord {
             buf.extend_from_slice(BaseQuality::slice_to_bytes(&self.qual));
         }
 
-        // Auxiliary data
-        buf.extend_from_slice(self.aux.as_bytes());
+        // Auxiliary data, and a long CIGAR's `CG` tag.
+        cigar.write_aux(self.aux.as_bytes(), buf);
 
         Ok(())
     }

@@ -5,6 +5,7 @@
 
 use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};
+use super::long_cigar::WireCigar;
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
 use super::raw_record::RawBamRecord;
 use super::record_idx::RecordIdx;
@@ -290,9 +291,9 @@ impl<W: Write> BamWriter<W> {
     /// CIGAR, quality, and aux data are already in BAM wire format in the
     /// store's slabs and are copied directly.
     ///
-    /// Like [`OwnedBamRecord::to_bam_bytes`], this rejects more than 65535
-    /// CIGAR operations with [`OwnedRecordError::CigarCountOverflow`]. To copy
-    /// an existing long-CIGAR record unchanged, use [`Self::write_raw`].
+    /// Like [`OwnedBamRecord::to_bam_bytes`], this writes a CIGAR of more
+    /// than 65535 operations as BAM's placeholder with the real CIGAR in a
+    /// trailing `CG:B:I` tag (`r[bam_writer.store_long_cigar]`).
     pub fn write_store_record(
         &mut self,
         store: &RecordStore,
@@ -329,9 +330,9 @@ impl<W: Write> BamWriter<W> {
         let aux = rec.aux();
 
         // Validate field limits (matching OwnedBamRecord::to_bam_bytes).
-        // r[impl bam_writer.store_long_cigar_limit]
-        let n_cigar_op = u16::try_from(cigar.len())
-            .map_err(|_| OwnedRecordError::CigarCountOverflow { count: cigar.len() })?;
+        // r[impl bam_writer.store_long_cigar]
+        let cigar = WireCigar::new(cigar, rec.seq_len)
+            .map_err(|e| OwnedRecordError::CigarRefLenTooLong { ref_len: e.ref_len })?;
         if qname.len() > 254 {
             return Err(OwnedRecordError::QnameTooLong { len: qname.len() }.into());
         }
@@ -364,7 +365,7 @@ impl<W: Write> BamWriter<W> {
                 mapq: rec.mapq,
                 l_read_name,
                 flags: rec.flags.raw(),
-                n_cigar_op,
+                n_cigar_op: cigar.n_cigar_op(),
                 l_seq: rec.seq_len as i32,
                 mate_fields: rec.mate_fields,
             },
@@ -375,7 +376,7 @@ impl<W: Write> BamWriter<W> {
         self.buf.push(0);
 
         // CIGAR — typed slab is already in BAM-on-disk byte layout on LE hosts.
-        self.buf.extend_from_slice(crate::bam::cigar::CigarOp::ops_as_bytes(cigar));
+        cigar.write_cigar(&mut self.buf);
 
         super::seq::encode_iupac_bases_into(seq, &mut self.buf);
 
@@ -386,8 +387,8 @@ impl<W: Write> BamWriter<W> {
             self.buf.extend_from_slice(seqair_types::BaseQuality::slice_to_bytes(qual));
         }
 
-        // Aux tags (raw BAM bytes)
-        self.buf.extend_from_slice(aux);
+        // Aux tags (raw BAM bytes), and a long CIGAR's `CG` tag.
+        cigar.write_aux(aux, &mut self.buf);
 
         self.finalize_record(rec.tid, rec.flags.is_unmapped(), beg, end)
     }

@@ -886,7 +886,7 @@ mod tests {
     /// decodes the CIGAR into ops rather than walking the packed bytes.
     #[hegel::test]
     fn reaches_matches_whole_record_end(tc: hegel::TestCase) {
-        use super::super::cigar::{CigarOp, CigarOpType, compute_end_pos};
+        use super::super::cigar::{CigarOp, CigarOpType, PackedCigar, compute_end_pos};
         use super::super::owned_record::OwnedBamRecord;
         use hegel::generators as gs;
         use seqair_types::IupacBase;
@@ -927,8 +927,7 @@ mod tests {
 
         let whole_end = match super::super::record::parse_header(&raw) {
             Ok(h) if !flags.is_unmapped() => {
-                let mut decoded = Vec::new();
-                CigarOp::extend_from_bam_bytes(&mut decoded, &raw[h.var_start..h.cigar_end]);
+                let decoded = PackedCigar::whole_ops(&raw[h.var_start..h.cigar_end]).to_vec();
                 compute_end_pos(rec_pos, &decoded).unwrap_or(rec_pos)
             }
             _ => rec_pos,

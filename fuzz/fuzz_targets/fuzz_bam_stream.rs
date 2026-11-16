@@ -16,9 +16,8 @@ use seqair::bam::writer::BamWriterBuilder;
 /// Call every accessor; the values themselves only have to exist.
 fn touch(record: &RawBamRecord) -> usize {
     let mut n = record.qname().len()
-        + record.cigar().count()
-        + record.cigar_len()
-        + record.stored_cigar_bytes().len()
+        + record.cigar().iter().count()
+        + record.stored_cigar().len()
         + record.packed_seq().len()
         + record.bases().len()
         + usize::from(record.bin())

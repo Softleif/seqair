@@ -7,9 +7,10 @@
 //! and the stored `bin` all survive a read and a write unchanged.
 
 use super::{
-    AuxData, AuxDataError, BamHeader, CigarOp, DecodeError, MateFields,
-    aux::{Aux, AuxLayoutError, AuxValue, find_tag, validate_aux},
-    cigar::CIGAR_S,
+    AuxData, AuxDataError, BamHeader, DecodeError, MateFields,
+    aux::{Aux, AuxLayoutError, validate_aux},
+    cigar::{self, PackedCigar},
+    long_cigar,
     record::{self, read2},
     seq,
 };
@@ -17,6 +18,7 @@ use crate::reader::Tid;
 use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::fmt;
+use std::num::NonZeroU32;
 use thiserror::Error;
 
 /// Fixed part of a BAM record, before the read name.
@@ -82,6 +84,9 @@ pub struct RawBamRecord {
     cigar_end: usize,
     seq_end: usize,
     qual_end: usize,
+    /// Where the `CG` tag of a long CIGAR starts (`r[bam.raw_record.long_cigar]`),
+    /// always the last tag (`r[bam.raw_record.cg_hidden]`); `None` without one.
+    long_cigar_tag: Option<NonZeroU32>,
 }
 
 /// Why an in-place edit of a [`RawBamRecord`] was refused. The record is
@@ -138,6 +143,7 @@ impl Default for RawBamRecord {
             cigar_end: EMPTY_RECORD.len(),
             seq_end: EMPTY_RECORD.len(),
             qual_end: EMPTY_RECORD.len(),
+            long_cigar_tag: None,
         }
     }
 }
@@ -199,7 +205,7 @@ impl RawBamRecord {
         if self.payload.len() > record::MAX_RECORD_SIZE {
             return Err(DecodeError::RecordTooLarge { len: self.payload.len() });
         }
-        let h = record::parse_header(&self.payload)?;
+        let mut h = record::parse_header(&self.payload)?;
         let refs = h.refs.resolve(header)?;
         let name = self.payload.get(FIXED_LEN..h.var_start).unwrap_or_default();
         match name.split_last() {
@@ -207,7 +213,15 @@ impl RawBamRecord {
             Some(_) => return Err(DecodeError::QnameNotTerminated),
             None => return Err(DecodeError::EmptyQname),
         }
-        check_cigar_against_seq(&self.payload, &h, refs.tid.is_some() && h.pos.is_some())?;
+        let placed = refs.tid.is_some() && h.pos.is_some();
+        let settled = settle_long_cigar(&mut self.payload, &h, placed);
+        if settled == Settled::Inline {
+            h = record::parse_header(&self.payload)?;
+        }
+        self.long_cigar_tag = match settled {
+            Settled::Tag(at) => tag_offset(at),
+            Settled::None | Settled::Inline => None,
+        };
         self.tid = refs.tid;
         self.pos = h.pos;
         self.mate = refs.mate_fields;
@@ -215,7 +229,8 @@ impl RawBamRecord {
         self.cigar_end = h.cigar_end;
         self.seq_end = h.seq_end;
         self.qual_end = h.qual_end;
-        Ok(())
+        let from_cg = settled != Settled::None;
+        check_cigar_against_seq(self.cigar(), from_cg, self.flags(), h.seq_len)
     }
 
     /// Whether the stored CIGAR is the placeholder BAM writes for a record
@@ -223,24 +238,23 @@ impl RawBamRecord {
     /// CIGAR in a `CG:B:I` tag (`[SAM1] §4.2.2`), as htslib recognises it
     /// (`r[bam.raw_record.long_cigar]`).
     pub fn has_cg_placeholder(&self) -> bool {
-        self.long_cigar().is_some()
-    }
-
-    /// The real CIGAR, in BAM's packed form, of a record that carries a long
-    /// one in its `CG` tag (`r[bam.raw_record.long_cigar]`).
-    pub(crate) fn long_cigar(&self) -> Option<&[u8]> {
-        long_cigar(
-            self.stored_cigar_bytes(),
-            self.seq_len(),
-            self.tid.is_some() && self.pos.is_some(),
-            self.aux(),
-        )
+        self.long_cigar_tag.is_some()
     }
 
     /// Become [`Self::default`], keeping the payload's allocation.
     fn reset(&mut self) {
         // Destructured, so a new field fails to compile here until it is reset.
-        let Self { payload, tid, pos, mate, cigar_start, cigar_end, seq_end, qual_end } = self;
+        let Self {
+            payload,
+            tid,
+            pos,
+            mate,
+            cigar_start,
+            cigar_end,
+            seq_end,
+            qual_end,
+            long_cigar_tag,
+        } = self;
         payload.clear();
         payload.extend_from_slice(&EMPTY_RECORD);
         *tid = None;
@@ -249,6 +263,7 @@ impl RawBamRecord {
         for offset in [cigar_start, cigar_end, seq_end, qual_end] {
             *offset = EMPTY_RECORD.len();
         }
+        *long_cigar_tag = None;
     }
 
     /// The record's bytes as BAM stores them, without `block_size`.
@@ -315,35 +330,34 @@ impl RawBamRecord {
         self.payload.get(FIXED_LEN..end).unwrap_or_default()
     }
 
-    /// The number of CIGAR operations: of the real CIGAR, for a record that
-    /// carries a long one in its `CG` tag (`r[bam.raw_record.long_cigar]`).
-    pub fn cigar_len(&self) -> usize {
-        self.cigar_packed().len() / 4
-    }
-
     // r[impl bam.raw_record.cigar_access]
-    /// The CIGAR operations — for a record with a long CIGAR, the real ones
-    /// from its `CG` tag, as htslib's reader returns them. See
-    /// [`Self::stored_cigar_bytes`] for the placeholder the record stores.
-    pub fn cigar(&self) -> impl ExactSizeIterator<Item = CigarOp> + '_ {
-        CigarOp::iter_bam_bytes(self.cigar_packed())
+    /// The CIGAR — for a record with a long CIGAR, the real one from its `CG`
+    /// tag, as htslib's reader returns it. See [`Self::stored_cigar`] for the
+    /// placeholder the record stores.
+    pub fn cigar(&self) -> PackedCigar<'_> {
+        match self.long_cigar_tag {
+            Some(tag) => PackedCigar::whole_ops(
+                self.payload
+                    .get(offset(tag).saturating_add(long_cigar::TAG_HEADER_LEN)..)
+                    .unwrap_or_default(),
+            ),
+            None => self.stored_cigar(),
+        }
     }
 
-    /// The real CIGAR in BAM's packed form: the long one, else the stored one.
-    pub(crate) fn cigar_packed(&self) -> &[u8] {
-        self.long_cigar().unwrap_or(self.stored_cigar_bytes())
-    }
-
-    /// The CIGAR field as stored, in BAM's packed form (little-endian `u32`
-    /// per op) — for a long CIGAR, the `<seq_len>S<ref_len>N` placeholder.
-    pub fn stored_cigar_bytes(&self) -> &[u8] {
-        self.payload.get(self.cigar_start..self.cigar_end).unwrap_or_default()
+    /// The CIGAR field exactly as stored — for a long CIGAR, the
+    /// `<seq_len>S<ref_len>N` placeholder, which is no CIGAR of this record.
+    /// For checking a file's bytes; [`Self::cigar`] is the alignment.
+    pub fn stored_cigar(&self) -> PackedCigar<'_> {
+        PackedCigar::whole_ops(
+            self.payload.get(self.cigar_start..self.cigar_end).unwrap_or_default(),
+        )
     }
 
     /// The last reference position the alignment covers, by its CIGAR
     /// (`r[bam.record.end_pos]`); `None` for an unplaced record.
     pub fn end_pos(&self) -> Option<Pos0> {
-        record::compute_end_pos_from_raw(&self.payload)
+        cigar::compute_end_pos(self.pos?, self.cigar())
     }
 
     // r[impl interval.overlap_test]
@@ -404,10 +418,14 @@ impl RawBamRecord {
         }
     }
 
-    /// The aux tags, as stored. Not validated: use [`Aux::iter_checked`] to
-    /// see a malformed tag as an error rather than the end of the tags.
+    // r[impl bam.raw_record.cg_hidden]
+    /// The aux tags, as stored, without the `CG` tag a long CIGAR came from:
+    /// that is the CIGAR now ([`Self::cigar`]), as htslib's reader moves it.
+    /// Not validated: use [`Aux::iter_checked`] to see a malformed tag as an
+    /// error rather than the end of the tags.
     pub fn aux(&self) -> Aux<'_> {
-        Aux::new(self.payload.get(self.qual_end..).unwrap_or_default())
+        let end = self.long_cigar_tag.map_or(self.payload.len(), offset);
+        Aux::new(self.payload.get(self.qual_end..end).unwrap_or_default())
     }
 
     /// Set FLAG in place.
@@ -420,9 +438,9 @@ impl RawBamRecord {
     pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), RawRecordEditError> {
         let old = self.flags();
         self.write_flags(flags);
-        let checked = record::parse_header(&self.payload).and_then(|h| {
-            check_cigar_against_seq(&self.payload, &h, self.tid.is_some() && self.pos.is_some())
-        });
+        let seq_len = u32::try_from(self.seq_len()).unwrap_or(u32::MAX);
+        let checked =
+            check_cigar_against_seq(self.cigar(), self.has_cg_placeholder(), flags, seq_len);
         if checked.is_err() {
             self.write_flags(old);
         }
@@ -516,38 +534,48 @@ impl RawBamRecord {
     }
 
     // r[impl bam.raw_record.edit_aux]
-    /// Edit the aux block: `edit` gets the tags as an [`AuxData`] and the
-    /// record takes what it leaves. Tags it does not touch keep their bytes.
-    /// Costs one copy of the aux block.
+    /// Edit the aux block: `edit` gets the tags [`Self::aux`] shows as an
+    /// [`AuxData`] and the record takes what it leaves. Tags it does not
+    /// touch keep their bytes; a long CIGAR's `CG` tag, which `edit` does not
+    /// see, stays last. Costs one copy of the aux block.
     ///
     /// # Errors
     /// [`RawRecordEditError::MalformedAux`] if the existing tags are not
     /// well-formed, `edit`'s own error, [`RawRecordEditError::RecordTooLarge`], or
     /// [`RawRecordEditError::LongCigarChanged`] if the real CIGAR would
-    /// differ (a `CG` tag removed or rewritten).
+    /// differ: a `CG` tag added that a reader would take as the CIGAR.
     pub fn edit_aux(
         &mut self,
         edit: impl FnOnce(&mut AuxData) -> Result<(), AuxDataError>,
     ) -> Result<(), RawRecordEditError> {
-        let current = self.payload.get(self.qual_end..).unwrap_or_default();
+        let current = self.aux().as_bytes();
         validate_aux(current)?;
         let mut aux = AuxData::from_bytes(current.to_vec());
         edit(&mut aux)?;
-        let len = self.qual_end.saturating_add(aux.as_bytes().len());
+        let tag_start = self.long_cigar_tag.map_or(self.payload.len(), offset);
+        let cg = self.payload.get(tag_start..).unwrap_or_default();
+        let len = self.qual_end.saturating_add(aux.as_bytes().len()).saturating_add(cg.len());
         if len > record::MAX_RECORD_SIZE {
             return Err(RawRecordEditError::RecordTooLarge { len });
         }
-        let after = long_cigar(
-            self.stored_cigar_bytes(),
-            self.seq_len(),
-            self.tid.is_some() && self.pos.is_some(),
-            Aux::new(aux.as_bytes()),
-        );
-        if self.long_cigar() != after {
+        let edited = [aux.as_bytes(), cg].concat();
+        // The record's CIGAR, read back as a reader would from the new tags.
+        let placed = self.tid.is_some() && self.pos.is_some();
+        let after = long_cigar::find(self.stored_cigar(), self.seq_len(), placed, &edited);
+        let unchanged = match (&after, self.long_cigar_tag) {
+            (None, None) => true,
+            (Some(found), Some(_)) => {
+                found.ops == self.cigar() && found.tag.start == aux.as_bytes().len()
+            }
+            _ => false,
+        };
+        if !unchanged {
             return Err(RawRecordEditError::LongCigarChanged);
         }
         self.payload.truncate(self.qual_end);
-        self.payload.extend_from_slice(aux.as_bytes());
+        self.payload.extend_from_slice(&edited);
+        self.long_cigar_tag =
+            after.and_then(|found| tag_offset(self.qual_end.saturating_add(found.tag.start)));
         Ok(())
     }
 
@@ -560,47 +588,86 @@ impl RawBamRecord {
 }
 
 // r[impl bam.raw_record.long_cigar]
-/// See [`RawBamRecord::long_cigar`]. htslib's `bam_tag2cigar` test: the first
-/// op is exactly `<seq_len>S`, the record is placed, and the first `CG` tag is
-/// a `B:I`/`B:i` array of at least `n_cigar` and under 2^29 operations.
-pub(super) fn long_cigar<'a>(
-    cigar: &[u8],
-    seq_len: usize,
-    placed: bool,
-    aux: Aux<'a>,
-) -> Option<&'a [u8]> {
-    let first = CigarOp::iter_bam_bytes(cigar).next()?.to_bam_u32();
-    let placeholder = u32::try_from(seq_len).ok()?.checked_mul(16)? | u32::from(CIGAR_S);
-    if first != placeholder || !placed {
-        return None;
-    }
-    let (Some(AuxValue::ArrayU32(ops)) | Some(AuxValue::ArrayI32(ops))) =
-        find_tag(aux.as_bytes(), *b"CG")
+// r[impl bam.raw_record.cg_hidden]
+/// A `CG` tag's payload offset as [`RawBamRecord`] keeps it: after the
+/// fixed fields, so never 0, and within the size limit, far below 4 GiB.
+fn tag_offset(at: usize) -> Option<NonZeroU32> {
+    NonZeroU32::new(u32::try_from(at).ok()?)
+}
+
+fn offset(tag: NonZeroU32) -> usize {
+    tag.get() as usize
+}
+
+/// What [`settle_long_cigar`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// No `CG` tag holds the CIGAR.
+    None,
+    /// It did, with few enough ops for the CIGAR field: they are there now,
+    /// and the tag is gone.
+    Inline,
+    /// It does, and is the last and only `CG` tag, starting at this payload
+    /// offset.
+    Tag(usize),
+}
+
+/// Put a record whose `CG` tag holds its CIGAR in the shape htslib's
+/// `bam_read1` and `bam_write1` give it: ops that fit BAM's CIGAR field
+/// move there (`bam_tag2cigar`), and a longer CIGAR's tag moves to the end
+/// of the tags, the only `CG` tag. Either way the record's bytes read back as
+/// the same record: moved past another `CG` tag, the tag would no longer be
+/// the first, and a reader would take the other.
+fn settle_long_cigar(payload: &mut Vec<u8>, h: &record::ParsedHeader, placed: bool) -> Settled {
+    let (Some(stored), Some(aux)) =
+        (payload.get(h.var_start..h.cigar_end), payload.get(h.qual_end..))
     else {
-        return None;
+        return Settled::None;
     };
-    let n_ops = ops.len() / 4;
-    (n_ops >= cigar.len() / 4 && n_ops < 1 << 29).then_some(ops)
+    let Some(long) =
+        long_cigar::find(PackedCigar::whole_ops(stored), h.seq_len as usize, placed, aux)
+    else {
+        return Settled::None;
+    };
+    let rest = long.remaining_tags(aux);
+    let before_tags = h.qual_end;
+    if let Ok(n_ops) = u16::try_from(long.ops.len()) {
+        let inline = [
+            payload.get(..h.var_start).unwrap_or_default(),
+            long.ops.as_bytes(),
+            payload.get(h.cigar_end..before_tags).unwrap_or_default(),
+            &rest,
+        ]
+        .concat();
+        *payload = inline;
+        if let Some(field) = payload.get_mut(12..14) {
+            field.copy_from_slice(&n_ops.to_le_bytes());
+        }
+        return Settled::Inline;
+    }
+    let tag = aux.get(long.tag.clone()).unwrap_or_default();
+    let mut settled = payload.get(..before_tags).unwrap_or_default().to_vec();
+    settled.extend_from_slice(&rest);
+    let at = settled.len();
+    settled.extend_from_slice(tag);
+    *payload = settled;
+    Settled::Tag(at)
 }
 
 // r[impl bam.raw_record.cigar_seq]
 /// htslib's read-time sanity check (`bam_read1` and `bam_tag2cigar`): the
 /// long CIGAR of a record carrying one, else the stored CIGAR of a mapped
 /// record, must consume exactly the sequence.
-fn check_cigar_against_seq(
-    payload: &[u8],
-    h: &record::ParsedHeader,
-    placed: bool,
+pub(super) fn check_cigar_against_seq(
+    cigar: PackedCigar<'_>,
+    long: bool,
+    flags: BamFlags,
+    seq_len: u32,
 ) -> Result<(), DecodeError> {
-    let seq_len = h.seq_len;
-    let stored = payload.get(h.var_start..h.cigar_end).unwrap_or_default();
-    let aux = Aux::new(payload.get(h.qual_end..).unwrap_or_default());
-    let checked = match long_cigar(stored, seq_len as usize, placed, aux) {
-        Some(cg) => cg,
-        None if h.n_cigar_ops != 0 && !h.flags.is_unmapped() => stored,
-        None => return Ok(()),
-    };
-    let query_len = super::cigar::query_len(CigarOp::iter_bam_bytes(checked));
+    if !long && (cigar.is_empty() || flags.is_unmapped()) {
+        return Ok(());
+    }
+    let query_len = cigar::query_len(cigar);
     if seq_len == 0 || query_len == u64::from(seq_len) {
         return Ok(());
     }
@@ -611,6 +678,7 @@ fn check_cigar_against_seq(
 #[allow(clippy::unwrap_used, clippy::arithmetic_side_effects, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::bam::CigarOp;
 
     /// A record payload on target 0 at `pos` (or unplaced), named `r`.
     pub(super) fn payload(
@@ -824,7 +892,7 @@ mod tests {
                 .unwrap();
         // htslib takes a CG tag as the real CIGAR only under its own rules
         // (`r[bam.raw_record.long_cigar]`), which a short real CIGAR fails.
-        let walked = decode(if record.has_cg_placeholder() { &real } else { &stored });
+        let walked = decode(if long && real.len() >= stored.len() { &real } else { &stored });
 
         match record.aligned_pairs() {
             Ok(pairs) => {
@@ -841,15 +909,20 @@ mod tests {
     }
 
     // r[verify bam.raw_record.long_cigar]
+    // r[verify bam.raw_record.cg_hidden]
     #[test]
     fn long_cigar_follows_bam_tag2cigar() {
         let placeholder = [op(4, 4), op(3, 3)];
         let real = [op(2, 0), op(1, 1), op(1, 4)];
-        // B:I and B:i both count.
+        let bytes = |ops: &[u32]| ops.iter().flat_map(|o| o.to_le_bytes()).collect::<Vec<_>>();
+        // B:I and B:i both count. Few enough ops for the CIGAR field: they go
+        // there and the tag goes, as `bam_tag2cigar` leaves the record.
         for subtype in *b"Ii" {
             let r = record(true, 0, &placeholder, &cg(subtype, &real)).unwrap();
-            assert_eq!(r.long_cigar(), Some(&cg(subtype, &real)[8..]));
-            assert!(r.has_cg_placeholder());
+            assert_eq!(r.cigar().as_bytes(), bytes(&real));
+            assert_eq!(r.stored_cigar().as_bytes(), bytes(&real));
+            assert!(r.aux().is_empty());
+            assert!(!r.has_cg_placeholder());
         }
         // Unplaced, other subtypes, too few ops, first op not exactly
         // `<seq_len>S`: no long CIGAR.
@@ -861,12 +934,137 @@ mod tests {
             record(true, 0, &[op(4, 0), op(3, 3)], &cg(b'I', &real)),
         ];
         for r in not_long {
-            assert!(!r.unwrap().has_cg_placeholder());
+            let r = r.unwrap();
+            assert_eq!(r.cigar(), r.stored_cigar());
+            assert!(!r.aux().is_empty());
         }
         // Only the first CG tag is looked at.
         let mut aux = cg(b'S', &[1, 2]);
         aux.extend(cg(b'I', &real));
-        assert!(!record(true, 0, &placeholder, &aux).unwrap().has_cg_placeholder());
+        let r = record(true, 0, &placeholder, &aux).unwrap();
+        assert_eq!(r.cigar().as_bytes(), bytes(&placeholder));
+    }
+
+    /// A tag for [`settled_records_read_back_as_htslib_reads_them`]: a `CG`
+    /// array (valid or not), or another tag.
+    #[derive(Debug, Clone)]
+    enum Tag {
+        Cg { subtype: u8, ops: Vec<u32> },
+        Other(Vec<u8>),
+    }
+
+    impl Tag {
+        fn bytes(&self) -> Vec<u8> {
+            match self {
+                Self::Cg { subtype, ops } => cg(*subtype, ops),
+                Self::Other(bytes) => bytes.clone(),
+            }
+        }
+    }
+
+    // r[verify bam.raw_record.long_cigar]
+    // r[verify bam.raw_record.cg_hidden]
+    /// Whatever tags surround it, a record reads as htslib's `bam_read1`
+    /// leaves it — the first `CG` tag decides, and is gone once it is the
+    /// CIGAR — and its bytes read back as the same record.
+    #[hegel::test]
+    fn settled_records_read_back_as_htslib_reads_them(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(5));
+        let real: Vec<u32> = (0..n)
+            .map(|_| {
+                let code = tc.draw_silent(gs::sampled_from(vec![0u32, 1, 2, 3, 7, 8]));
+                op(tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(3)), code)
+            })
+            .collect();
+        let qlen: u32 =
+            real.iter().filter(|&&o| matches!(o & 0xf, 0 | 1 | 4 | 7 | 8)).map(|o| o >> 4).sum();
+        let qlen = qlen.max(1);
+        let real = if real.iter().any(|&o| matches!(o & 0xf, 0 | 1 | 7 | 8)) {
+            real
+        } else {
+            vec![op(qlen, 0)]
+        };
+        let codes = vec![1u8; qlen as usize];
+        let placed = tc.draw(gs::booleans());
+        let stored =
+            if tc.draw(gs::booleans()) { vec![op(qlen, 4), op(9, 3)] } else { real.clone() };
+        let tags: Vec<Tag> = (0..tc.draw(gs::integers::<usize>().max_value(4)))
+            .map(|_| match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+                0 => Tag::Other(b"NMC\x01".to_vec()),
+                1 => Tag::Other(b"RGZg\0".to_vec()),
+                2 => Tag::Cg { subtype: b'S', ops: vec![1] },
+                _ => Tag::Cg {
+                    subtype: tc.draw_silent(gs::sampled_from(vec![b'I', b'i'])),
+                    ops: real.clone(),
+                },
+            })
+            .collect();
+
+        // The oracle, `bam_tag2cigar`'s rules spelled out over the tag list.
+        let first_cg = tags.iter().position(|t| matches!(t, Tag::Cg { .. }));
+        let resolved = placed
+            && stored[0] == op(qlen, 4)
+            && first_cg.is_some_and(|at| {
+                matches!(&tags[at], Tag::Cg { subtype: b'I' | b'i', ops } if ops.len() >= stored.len())
+            });
+        let (want_cigar, want_tags) = if resolved {
+            let mut rest = tags.clone();
+            rest.remove(first_cg.unwrap());
+            (real.clone(), rest)
+        } else {
+            (stored.clone(), tags.clone())
+        };
+        let want_aux: Vec<u8> = want_tags.iter().flat_map(Tag::bytes).collect();
+        let aux: Vec<u8> = tags.iter().flat_map(Tag::bytes).collect();
+        let flags = if placed { 0 } else { 4 };
+
+        let Ok(r) =
+            RawBamRecord::from_payload(payload(placed, flags, &stored, &codes, &aux), &header())
+        else {
+            // Only a placed, mapped record checks its stored CIGAR, and a
+            // resolved one is the real CIGAR, which covers the sequence.
+            assert!(placed && !resolved && stored != real);
+            return;
+        };
+        let want_bytes: Vec<u8> = want_cigar.iter().flat_map(|o| o.to_le_bytes()).collect();
+        assert_eq!(r.cigar().as_bytes(), want_bytes);
+        assert_eq!(r.aux().as_bytes(), want_aux);
+        let again = RawBamRecord::from_payload(r.as_payload().to_vec(), &header()).unwrap();
+        assert_eq!(again.as_payload(), r.as_payload());
+    }
+
+    /// A CIGAR too long for the field keeps its tag, moved to the end and
+    /// hidden; an aux edit keeps it there, and adding another `CG` tag in
+    /// front of it, which a reader would take instead, is refused.
+    #[test]
+    fn a_cigar_past_the_field_keeps_its_tag_last() {
+        let n = usize::from(u16::MAX) + 1;
+        let real: Vec<u32> = (0..n).map(|i| op(1, if i % 2 == 0 { 0 } else { 1 })).collect();
+        let qlen = u32::try_from(n).unwrap();
+        let placeholder = [op(qlen, 4), op(qlen / 2, 3)];
+        let mut aux = b"NMC\x01".to_vec();
+        aux.extend(cg(b'I', &real));
+        aux.extend_from_slice(b"RGZg\0");
+        let codes = vec![1u8; n];
+        let mut r =
+            RawBamRecord::from_payload(payload(true, 0, &placeholder, &codes, &aux), &header())
+                .unwrap();
+        assert!(r.has_cg_placeholder());
+        assert_eq!(r.cigar().len(), n);
+        assert_eq!(r.aux().as_bytes(), b"NMC\x01RGZg\0");
+        assert_eq!(r.end_pos(), Pos0::new(qlen / 2 - 1));
+
+        r.edit_aux(|aux| aux.set_string(*b"XA", b"x")).unwrap();
+        assert_eq!(r.aux().as_bytes(), b"NMC\x01RGZg\0XAZx\0");
+        assert_eq!(r.cigar().len(), n);
+        let again = RawBamRecord::from_payload(r.as_payload().to_vec(), &header()).unwrap();
+        assert_eq!(again.as_payload(), r.as_payload());
+
+        let before = r.as_payload().to_vec();
+        let shadowed = r.edit_aux(|aux| aux.set_array_u32(*b"CG", &[op(qlen, 0)]));
+        assert!(matches!(shadowed, Err(RawRecordEditError::LongCigarChanged)));
+        assert_eq!(r.as_payload(), before);
     }
 
     // r[verify bam.raw_record.cigar_seq]

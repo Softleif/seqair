@@ -238,7 +238,7 @@ fn assert_pileup_parity(sam_name: &str, contig: &str, contig_len: u32) {
     assert_columns_match(&ours, &hts, sam_name);
 }
 
-// r[verify record_store.long_cigar]
+// r[verify record_store.long_cigar+1]
 // r[verify pileup.htslib_compat]
 #[test]
 fn long_cigar_pileup_matches_htslib() {
@@ -258,7 +258,7 @@ fn long_cigar_pileup_matches_htslib() {
     let mut stream = seqair::reader::AlignmentStream::open_path(&bam).unwrap().build().unwrap();
     let raw = stream.records().next().unwrap().unwrap();
     assert!(raw.has_cg_placeholder());
-    assert_eq!(raw.cigar_len(), 65_538);
+    assert_eq!(raw.cigar().len(), 65_538);
 
     let hts = htslib_pileup(&bam, b"long", 0, 100_000);
     let ours = seqair_pileup(&bam, "long", 0, 100_000);

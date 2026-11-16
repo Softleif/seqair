@@ -80,6 +80,7 @@ fn last_base(record: &RawBamRecord, pos: u32) -> u32 {
     }
     let rlen: u32 = record
         .cigar()
+        .iter()
         .map(|op| op.to_bam_u32())
         .filter(|op| matches!(op & 0xF, 0 | 2 | 3 | 7 | 8))
         .map(|op| op >> 4)

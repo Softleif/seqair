@@ -22,7 +22,8 @@ use super::{
 };
 use crate::bam::{
     BamHeader, MateFields,
-    cigar::CigarOp,
+    cigar::{self, CigarOp},
+    long_cigar,
     record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
 };
@@ -394,7 +395,8 @@ impl<'a> Plan<'a> {
     /// Whether a stored tag is decoded: asked for, or a `cF` that says
     /// which of `MD`/`NM` not to generate.
     fn keeps_tag(self, tag: [u8; 2]) -> bool {
-        self.aux.contains(tag) || (self.md_nm && tag == *b"cF")
+        // `CG` may hold the CIGAR (`r[cram.record.long_cigar]`).
+        self.aux.contains(tag) || (self.md_nm && tag == *b"cF") || tag == *b"CG"
     }
 }
 
@@ -1437,6 +1439,20 @@ fn decode_record(
                 explicit_tlen,
             });
         }
+
+        // r[impl cram.record.long_cigar]
+        // As `cram_to_bam` does, a `CG` tag behind a placeholder CIGAR is the
+        // CIGAR. The mate span above keeps the placeholder's, as htslib's.
+        let (end_pos, matching_bases, indel_bases) =
+            if long_cigar::take(cigar_buf, aux_buf, bases_buf.len(), true) {
+                let end = cigar::compute_end_pos(pos_0based, &*cigar_buf).ok_or(
+                    super::reader::CramError::InvalidPosition { value: pos_0based.as_i64() },
+                )?;
+                let (matching, indels) = cigar::calc_matches_indels(cigar_buf);
+                (end, matching, indels)
+            } else {
+                (end_pos, matching_bases, indel_bases)
+            };
 
         let slot = out.push(
             pos_0based,

@@ -3,8 +3,8 @@
 //! [`CigarOp`] is one operation in BAM's packed form (`len << 4 | code`) and
 //! [`CigarOpType`] its kind. A CIGAR comes either decoded, as a `&[CigarOp]`
 //! (how [`OwnedBamRecord`](super::OwnedBamRecord) and the record store keep
-//! it), or packed as BAM stores it, four little-endian bytes per op, which
-//! [`CigarOp::iter_bam_bytes`] decodes on the fly. The functions that measure
+//! it), or packed as BAM stores it, four little-endian bytes per op, as a
+//! [`PackedCigar`], which decodes on the fly. The functions that measure
 //! a CIGAR take either:
 //!
 //! - [`ref_len`] and [`query_len`]: the reference bases it spans and the read
@@ -241,37 +241,6 @@ impl CigarOp {
         Self(u32::from_le_bytes(bytes))
     }
 
-    /// Decode a CIGAR as BAM stores it — four bytes per op, see
-    /// [`from_bam_bytes`](Self::from_bam_bytes) — without copying it into a
-    /// `Vec` first. The bytes need not be aligned for `u32`, which a record's
-    /// CIGAR usually is not (its offset depends on the read name's length).
-    /// A trailing partial op is ignored; a valid record has none.
-    ///
-    /// This decodes the bytes it is given. A record with more than 65 535 ops
-    /// stores a placeholder CIGAR and the real one in its `CG` tag:
-    /// [`RawBamRecord::cigar`](super::RawBamRecord::cigar) yields the real
-    /// ops, while its
-    /// [`stored_cigar_bytes`](super::RawBamRecord::stored_cigar_bytes) are
-    /// the placeholder.
-    ///
-    /// ```
-    /// use seqair::bam::CigarOp;
-    /// use seqair::bam::cigar::CigarOpType;
-    ///
-    /// let ops = [CigarOp::new(CigarOpType::SoftClip, 3), CigarOp::new(CigarOpType::Match, 97)];
-    /// let packed = CigarOp::ops_as_bytes(&ops);
-    /// // An unaligned view, as a record's CIGAR usually is.
-    /// let mut shifted = vec![0u8];
-    /// shifted.extend_from_slice(packed);
-    /// assert!(CigarOp::iter_bam_bytes(&shifted[1..]).eq(ops));
-    /// ```
-    #[inline]
-    pub fn iter_bam_bytes(
-        bytes: &[u8],
-    ) -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator + Clone + '_ {
-        bytes.as_chunks::<4>().0.iter().map(|&op| Self::from_bam_bytes(op))
-    }
-
     /// Reinterpret a slice of ops as their on-the-wire BAM bytes
     /// (LE u32 per op). Safe via `CigarOp: Pod` — `repr(transparent)` over
     /// `u32` with every bit pattern a valid op — and exact because seqair
@@ -280,50 +249,133 @@ impl CigarOp {
     pub fn ops_as_bytes(ops: &[Self]) -> &[u8] {
         bytemuck::cast_slice(ops)
     }
+}
 
-    /// Append BAM-on-disk CIGAR bytes (LE u32 per op) into a typed `Vec<CigarOp>`.
-    ///
-    /// Source bytes are unaligned; this is a single memcpy.
-    /// Caller must ensure `bytes.len()` is a multiple of 4 (true for valid BAM).
+// r[impl cigar.packed]
+/// A CIGAR as BAM packs it: four little-endian bytes per op, `len << 4 |
+/// code`, with no alignment — a record's CIGAR starts after its read name, so
+/// it usually cannot be viewed as `&[CigarOp]`.
+///
+/// The CIGARs records hand out — [`RawBamRecord::cigar`](super::RawBamRecord::cigar),
+/// [`FilterRawFields::cigar`](super::record_store::FilterRawFields::cigar) —
+/// are always the real one: for a record of more than 65535 operations, the
+/// ops of its `CG` tag, never the placeholder BAM stores in their place.
+///
+/// ```
+/// use seqair::bam::CigarOp;
+/// use seqair::bam::cigar::{CigarOpType, PackedCigar};
+///
+/// let ops = [CigarOp::new(CigarOpType::SoftClip, 3), CigarOp::new(CigarOpType::Match, 97)];
+/// // An unaligned view, as a record's CIGAR usually is.
+/// let mut shifted = vec![0u8];
+/// shifted.extend_from_slice(CigarOp::ops_as_bytes(&ops));
+/// let packed = PackedCigar::from_bam_bytes(&shifted[1..]).unwrap();
+/// assert!(packed.iter().eq(ops));
+/// assert_eq!(packed.to_vec(), ops);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct PackedCigar<'a> {
+    /// Invariant: whole ops, a multiple of four bytes.
+    bytes: &'a [u8],
+}
+
+impl<'a> PackedCigar<'a> {
+    /// The ops `bytes` pack, or `None` when they end in a partial op.
+    pub fn from_bam_bytes(bytes: &'a [u8]) -> Option<Self> {
+        bytes.len().is_multiple_of(4).then_some(Self { bytes })
+    }
+
+    /// The whole ops at the start of `bytes`, for callers whose bounds came
+    /// from a validated record (where a trailing partial op cannot occur).
+    pub(crate) fn whole_ops(bytes: &'a [u8]) -> Self {
+        debug_assert!(bytes.len().is_multiple_of(4), "BAM CIGAR bytes must be whole ops");
+        let (ops, _) = bytes.as_chunks::<4>();
+        Self { bytes: ops.as_flattened() }
+    }
+
+    pub fn from_ops(ops: &'a [CigarOp]) -> Self {
+        Self { bytes: CigarOp::ops_as_bytes(ops) }
+    }
+
+    /// The number of ops.
+    pub fn len(self) -> usize {
+        self.bytes.len() / 4
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn first(self) -> Option<CigarOp> {
+        self.iter().next()
+    }
+
     #[inline]
-    pub fn extend_from_bam_bytes(dst: &mut Vec<Self>, bytes: &[u8]) {
-        debug_assert!(bytes.len().is_multiple_of(4), "BAM CIGAR bytes must be multiple of 4");
-        let n_ops = bytes.len() / 4;
-        let n_bytes = n_ops.checked_mul(4).expect("cigar byte length overflow");
-        let new_len = dst.len().checked_add(n_ops).expect("cigar slab len overflow");
+    pub fn iter(self) -> impl ExactSizeIterator<Item = CigarOp> + DoubleEndedIterator + Clone + 'a {
+        self.into_iter()
+    }
+
+    /// The bytes as BAM stores them.
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    // r[impl cigar.slice_from_bam_bytes]
+    /// The ops as a slice without copying, when the bytes happen to be
+    /// 4-byte aligned; `None` otherwise. [`Self::extend_into`] always works.
+    #[inline]
+    pub fn as_ops(self) -> Option<&'a [CigarOp]> {
+        if self.bytes.is_empty() {
+            // An empty `&[u8]`'s dangling pointer need not be 4-aligned.
+            return Some(&[]);
+        }
+        bytemuck::try_cast_slice(self.bytes).ok()
+    }
+
+    /// Append the ops to `dst`: one copy, whatever the alignment.
+    #[inline]
+    pub fn extend_into(self, dst: &mut Vec<CigarOp>) {
+        let n_ops = self.len();
         dst.reserve(n_ops);
+        let new_len = dst.len().saturating_add(n_ops);
         // SAFETY: CigarOp is repr(transparent) over u32 (4 bytes) with a
         // compile-time size guard above. Every bit pattern is a valid
         // CigarOp (op codes 0..=15 all decodable, length field is an
         // unconstrained u28). seqair builds for little-endian targets only, so
         // the in-memory u32 byte order is BAM's on-disk order, and a bytewise
-        // memcpy of n_ops * 4 source bytes produces n_ops valid CigarOp
-        // values. dst has at least n_ops uninit slots after reserve(); we copy
-        // n_bytes into it, then bump len.
+        // memcpy of `self.bytes` (whole ops, the type's invariant) produces
+        // n_ops valid CigarOp values. dst has at least n_ops uninit slots after
+        // reserve(); we copy into them, then bump len.
         unsafe {
             let dst_ptr = dst.as_mut_ptr().add(dst.len()).cast::<u8>();
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr, n_bytes);
+            std::ptr::copy_nonoverlapping(self.bytes.as_ptr(), dst_ptr, self.bytes.len());
             dst.set_len(new_len);
         }
     }
 
-    /// View raw BAM CIGAR bytes as `&[CigarOp]` without copying.
-    ///
-    /// Returns `None` if the length is not a multiple of 4 or the pointer is
-    /// not 4-byte aligned; otherwise this is a zero-cost transmute. BAM CIGAR
-    /// data is **not** guaranteed aligned — the read name length determines
-    /// the start offset, and samtools produces unaligned CIGAR data when
-    /// `l_read_name` is not a multiple of 4. Use
-    /// [`extend_from_bam_bytes`](Self::extend_from_bam_bytes) if alignment
-    /// cannot be guaranteed (it's always correct, just requires a copy).
-    // r[impl cigar.slice_from_bam_bytes]
+    pub fn to_vec(self) -> Vec<CigarOp> {
+        let mut ops = Vec::new();
+        self.extend_into(&mut ops);
+        ops
+    }
+}
+
+impl<'a> IntoIterator for PackedCigar<'a> {
+    type Item = CigarOp;
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, [u8; 4]>, fn(&[u8; 4]) -> CigarOp>;
+
     #[inline]
-    pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
-        if bytes.is_empty() {
-            // An empty `&[u8]`'s dangling pointer need not be 4-aligned.
-            return Some(&[]);
+    fn into_iter(self) -> Self::IntoIter {
+        fn op(bytes: &[u8; 4]) -> CigarOp {
+            CigarOp::from_bam_bytes(*bytes)
         }
-        bytemuck::try_cast_slice(bytes).ok()
+        self.bytes.as_chunks::<4>().0.iter().map(op as fn(&[u8; 4]) -> CigarOp)
+    }
+}
+
+impl std::fmt::Debug for PackedCigar<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -368,7 +420,7 @@ impl std::fmt::Display for CigarStr<'_> {
 ///
 /// `ops` is any sequence of ops: a `&[CigarOp]` or `&Vec<CigarOp>`, a
 /// record's [`RawBamRecord::cigar`](super::RawBamRecord::cigar), or packed
-/// bytes through [`CigarOp::iter_bam_bytes`]. The sum is a `u64` so that no
+/// bytes through [`PackedCigar`]. The sum is a `u64` so that no
 /// CIGAR, however long, can overflow it.
 ///
 /// A CIGAR without reference ops (all soft clips and insertions) spans 0
@@ -384,7 +436,7 @@ impl std::fmt::Display for CigarStr<'_> {
 ///     .map(|(op, len)| CigarOp::new(op, len));
 /// assert_eq!(ref_len(&ops), 23);
 /// // The same ops packed as BAM stores them.
-/// assert_eq!(ref_len(CigarOp::iter_bam_bytes(CigarOp::ops_as_bytes(&ops))), 23);
+/// assert_eq!(ref_len(seqair::bam::cigar::PackedCigar::from_ops(&ops)), 23);
 /// ```
 pub fn ref_len<I>(ops: I) -> u64
 where
@@ -1655,9 +1707,11 @@ mod tests {
     }
 
     // r[verify cigar.slice_from_bam_bytes]
-    /// Round-trip: encode `CigarOp` → BAM LE bytes → `slice_from_bam_bytes` → same ops.
+    // r[verify cigar.packed]
+    /// Round-trip: encode `CigarOp` → BAM LE bytes → `PackedCigar` → same ops,
+    /// at every alignment, by iterating, copying, and (aligned) viewing.
     #[hegel::test]
-    fn roundtrip_slice_from_bam_bytes(tc: TestCase) {
+    fn roundtrip_packed_cigar(tc: TestCase) {
         let ops: Vec<CigarOp> = tc
             .draw(
                 gs::vecs(gs::tuples!(
@@ -1672,24 +1726,32 @@ mod tests {
             .collect();
 
         let bytes: Vec<u8> = ops.iter().flat_map(|op| op.to_bam_u32().to_le_bytes()).collect();
-        // 8 bytes padding ensures 8-byte alignment (≥ 4-byte for CigarOp)
-        let mut buf = vec![0u8; 8];
-        buf.extend_from_slice(&bytes);
-        let aligned = &buf[8..];
+        let shift = tc.draw(gs::integers::<usize>().max_value(3));
+        // A u32 buffer is 4-aligned, so `shift` alone decides the alignment.
+        let mut words = vec![0u32; bytes.len() / 4 + 2];
+        let buf: &mut [u8] = bytemuck::cast_slice_mut(&mut words);
+        buf[shift..shift + bytes.len()].copy_from_slice(&bytes);
+        let packed = PackedCigar::from_bam_bytes(&buf[shift..shift + bytes.len()]).unwrap();
 
-        let result = CigarOp::slice_from_bam_bytes(aligned);
-        assert!(result.is_some(), "aligned buffer must succeed");
-        assert_eq!(result.unwrap(), ops.as_slice());
+        assert_eq!(packed.len(), ops.len());
+        assert!(packed.iter().eq(ops.iter().copied()));
+        assert!(packed.iter().rev().eq(ops.iter().rev().copied()));
+        assert_eq!(packed.to_vec(), ops);
+        assert_eq!(packed.as_ops().is_some(), shift == 0);
+        if let Some(view) = packed.as_ops() {
+            assert_eq!(view, ops.as_slice());
+        }
+        assert_eq!(PackedCigar::from_ops(&ops), packed);
     }
 
     #[test]
-    fn slice_from_bam_bytes_rejects_odd_length() {
-        assert!(CigarOp::slice_from_bam_bytes(&[0u8; 7]).is_none());
+    fn packed_cigar_rejects_a_partial_op() {
+        assert!(PackedCigar::from_bam_bytes(&[0u8; 7]).is_none());
     }
 
     #[test]
-    fn slice_from_bam_bytes_empty_ok() {
-        assert_eq!(CigarOp::slice_from_bam_bytes(&[]), Some(&[][..]));
+    fn packed_cigar_empty_is_a_view() {
+        assert_eq!(PackedCigar::default().as_ops(), Some(&[][..]));
     }
 
     // r[verify cigar.slice_from_bam_bytes]
@@ -1709,7 +1771,7 @@ mod tests {
         let mut any_unaligned = false;
         for off in 0..=3 {
             let sub = &buf[off..off + 4];
-            let result = CigarOp::slice_from_bam_bytes(sub);
+            let result = PackedCigar::from_bam_bytes(sub).unwrap().as_ops();
             if !(sub.as_ptr() as usize).is_multiple_of(4) {
                 assert!(result.is_none(), "unaligned slice at offset {off} must return None");
                 any_unaligned = true;

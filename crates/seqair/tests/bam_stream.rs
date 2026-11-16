@@ -600,9 +600,9 @@ fn assert_agrees_with_htslib(path: &Path, ours: &[RawBamRecord]) {
         assert_eq!(ours.pos().map_or(-1, |p| i64::from(p.as_i32())), theirs.pos(), "{what}: pos");
         assert_eq!(ours.mapq().as_byte(), theirs.mapq(), "{what}: mapq");
         assert_eq!(ours.bin(), theirs.bin(), "{what}: bin");
-        let cigar: Vec<u32> = ours.cigar().map(|op| op.to_bam_u32()).collect();
+        let cigar: Vec<u32> = ours.cigar().iter().map(|op| op.to_bam_u32()).collect();
         assert_eq!(cigar, theirs.raw_cigar(), "{what}: cigar");
-        assert_eq!(ours.cigar_len(), theirs.raw_cigar().len(), "{what}: cigar_len");
+        assert_eq!(ours.cigar().len(), theirs.raw_cigar().len(), "{what}: cigar_len");
         assert_eq!(ours.seq_len(), theirs.seq_len(), "{what}: seq_len");
         let mut seq = Vec::new();
         ours.decode_seq_into(&mut seq);
@@ -650,7 +650,7 @@ fn assert_agrees_with_noodles(path: &Path, ours: &[RawBamRecord]) {
             theirs.mapping_quality().map(u8::from),
             "{what}: mapq"
         );
-        assert_eq!(ours.stored_cigar_bytes(), theirs.cigar().as_ref(), "{what}: cigar");
+        assert_eq!(ours.stored_cigar().as_bytes(), theirs.cigar().as_ref(), "{what}: cigar");
         assert_eq!(ours.packed_seq(), theirs.sequence().as_ref(), "{what}: seq");
         assert_eq!(ours.seq_len(), theirs.sequence().len(), "{what}: seq_len");
         // noodles shows missing qualities as none at all.

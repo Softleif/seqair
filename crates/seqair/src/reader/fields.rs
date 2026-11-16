@@ -3,7 +3,7 @@
 //! refuses every field outside them. See `r[unified.record_fields]`.
 
 use crate::bam::{
-    CigarOp, MateFields, RawBamRecord,
+    MateFields, PackedCigar, RawBamRecord,
     aux::{Aux, AuxLayoutError, AuxTag, AuxValue, FromAuxValue, GetAuxError},
 };
 use crate::reader::Tid;
@@ -253,13 +253,9 @@ impl PartialRecord {
         self.raw.mapq()
     }
 
-    pub fn cigar_len(&self) -> usize {
-        self.raw.cigar_len()
-    }
-
     /// As [`RawBamRecord::cigar`]: a long CIGAR is resolved whatever tags
     /// were requested.
-    pub fn cigar(&self) -> impl ExactSizeIterator<Item = CigarOp> + '_ {
+    pub fn cigar(&self) -> PackedCigar<'_> {
         self.raw.cigar()
     }
 
@@ -518,7 +514,7 @@ mod tests {
     }
 
     fn complete() -> RawBamRecord {
-        use crate::bam::{AuxData, OwnedBamRecord, test_util};
+        use crate::bam::{AuxData, CigarOp, OwnedBamRecord, test_util};
         let mut aux = AuxData::new();
         aux.set_int(*b"NM", 2).unwrap();
         aux.set_string(*b"MC", b"4M").unwrap();

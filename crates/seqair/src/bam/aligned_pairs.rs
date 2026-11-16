@@ -28,7 +28,7 @@
 //! | Soft clips visible | `.with_soft_clips()` on any layer |
 //! | Padding/Unknown visible | `.full()` on any layer |
 
-use super::cigar::{CigarOp, CigarOpType};
+use super::cigar::{CigarOp, CigarOpType, PackedCigar};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
 use seqair_types::{BaseQuality, Pos0, QPos};
 use thiserror::Error;
@@ -354,7 +354,7 @@ impl<'a> AlignedPairs<'a> {
         // Compute the remaining query-consuming CIGAR length and compare to
         // `seq[qpos..]`. We work in u64 so a runaway 32-bit CIGAR can't
         // wrap; real-world records are far below this.
-        let cigar_remaining_qlen = super::cigar::query_len(CigarOp::iter_bam_bytes(self.ops));
+        let cigar_remaining_qlen = super::cigar::query_len(PackedCigar::whole_ops(self.ops));
         let qpos_consumed = u64::from(self.qpos.get());
         let total_qlen = cigar_remaining_qlen.saturating_add(qpos_consumed);
         // total_qlen represents the total query-consuming length the iterator
@@ -396,7 +396,7 @@ impl Iterator for AlignedPairs<'_> {
         if let ExpandingState::PerBase { remaining, .. } = self.expanding {
             count = count.saturating_add(remaining as usize);
         }
-        for op in CigarOp::iter_bam_bytes(self.ops) {
+        for op in PackedCigar::whole_ops(self.ops) {
             let len = op.len();
             if len == 0 {
                 continue;
@@ -680,13 +680,11 @@ impl super::raw_record::RawBamRecord {
     /// position whose CIGAR is not empty, as
     /// [`OwnedBamRecord::aligned_pairs`](super::owned_record::OwnedBamRecord::aligned_pairs).
     pub fn aligned_pairs(&self) -> Result<AlignedPairs<'_>, AlignedPairsError> {
-        let ops = self.cigar_packed();
+        let ops = self.cigar();
         match self.pos() {
-            Some(p) => Ok(AlignedPairs::over(p, ops)),
-            None if ops.is_empty() => Ok(AlignedPairs::over(Pos0::ZERO, ops)),
-            None => Err(AlignedPairsError::UnmappedWithCigar {
-                cigar_ops: CigarOp::iter_bam_bytes(ops).len(),
-            }),
+            Some(p) => Ok(AlignedPairs::over(p, ops.as_bytes())),
+            None if ops.is_empty() => Ok(AlignedPairs::over(Pos0::ZERO, ops.as_bytes())),
+            None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: ops.len() }),
         }
     }
 }

@@ -18,8 +18,8 @@ use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use seqair_types::{BamFlags, BaseQuality, IupacBase};
 
-// r[verify record_store.long_cigar]
-// r[verify bam_writer.store_long_cigar_limit]
+// r[verify record_store.long_cigar+1]
+// r[verify bam_writer.store_long_cigar]
 #[test]
 fn long_cigar_counts_survive_loading_and_realignment() {
     use seqair::bam::cigar::CigarOp;
@@ -33,8 +33,9 @@ fn long_cigar_counts_survive_loading_and_realignment() {
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore) {}
 
         fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
-            assert_eq!(fields.n_cigar_ops as usize, fields.cigar.len() / 4);
-            CigarOp::iter_bam_bytes(fields.cigar).next().unwrap().to_bam_u32() == 16
+            // The filter sees the record as it will be stored.
+            assert!(fields.aux.get::<&[u8]>("CG").is_err());
+            fields.cigar.first().unwrap().to_bam_u32() == 16
         }
     }
 
@@ -97,21 +98,15 @@ fn long_cigar_counts_survive_loading_and_realignment() {
                 seqair::bam::BamWriterBuilder::to_writer(Vec::new(), helpers::header())
                     .build()
                     .unwrap();
-            let written = writer.write_store_record(&store, idx);
-            if n > 65_535 {
-                assert!(matches!(written, Err(seqair::bam::BamWriteError::Record {
-                    source: seqair::bam::OwnedRecordError::CigarCountOverflow { count },
-                }) if count == n));
-            } else {
-                written.unwrap();
-                let (bytes, _) = writer.finish().unwrap();
-                let mut stream =
-                    seqair::reader::AlignmentStream::builder(std::io::Cursor::new(bytes))
-                        .build()
-                        .unwrap();
-                let record = stream.records().next().unwrap().unwrap();
-                assert_eq!(record.cigar().collect::<Vec<_>>(), typed);
-            }
+            writer.write_store_record(&store, idx).unwrap();
+            let (bytes, _) = writer.finish().unwrap();
+            let mut stream = seqair::reader::AlignmentStream::builder(std::io::Cursor::new(bytes))
+                .build()
+                .unwrap();
+            let record = stream.records().next().unwrap().unwrap();
+            assert_eq!(record.has_cg_placeholder(), n > 65_535);
+            assert_eq!(record.cigar().to_vec(), typed);
+            assert!(record.aux().get::<&[u8]>("CG").is_err());
 
             store.set_alignment(idx, Pos0::new(200).unwrap(), &typed).unwrap();
             assert_eq!(store.record(idx).unwrap().cigar(), typed);
@@ -120,7 +115,7 @@ fn long_cigar_counts_survive_loading_and_realignment() {
     }
 }
 
-// r[verify record_store.long_cigar]
+// r[verify record_store.long_cigar+1]
 #[test]
 fn long_cigar_query_length_is_checked_before_storing() {
     // The placeholder consumes four bases, but CG's 1M2M consumes only three.

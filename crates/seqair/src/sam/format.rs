@@ -115,12 +115,12 @@ fn write_record(
 
     // r[impl sam.format.cigar]
     // r[impl sam.format.long_cigar]
-    let long_cigar = record.long_cigar();
-    let cigar = long_cigar.unwrap_or(record.stored_cigar_bytes());
+    // The record already hands out the real CIGAR and hides its `CG` tag.
+    let cigar = record.cigar();
     if cigar.is_empty() {
         out.push(b'*');
     }
-    for op in crate::bam::cigar::CigarOp::iter_bam_bytes(cigar) {
+    for op in cigar {
         out.extend_from_slice(int.format(op.len()).as_bytes());
         out.push(op.op_type().to_sam_char());
     }
@@ -147,7 +147,7 @@ fn write_record(
         }
     }
 
-    write_aux_at(Level::new(), record.aux().as_bytes(), long_cigar.is_some(), out, &mut int)?;
+    write_aux_at(Level::new(), record.aux().as_bytes(), out, &mut int)?;
     Ok(())
 }
 
@@ -155,11 +155,10 @@ fn write_record(
 fn write_aux_at(
     level: Level,
     aux: &[u8],
-    skip_cg: bool,
     out: &mut Vec<u8>,
     int: &mut itoa::Buffer,
 ) -> Result<(), AuxLayoutError> {
-    dispatch!(level, simd => write_aux_simd(simd, aux, skip_cg, out, int))
+    dispatch!(level, simd => write_aux_simd(simd, aux, out, int))
 }
 
 // r[impl sam.format.aux]
@@ -170,7 +169,6 @@ fn write_aux_at(
 fn write_aux_simd<S: Simd>(
     simd: S,
     aux: &[u8],
-    mut skip_cg: bool,
     out: &mut Vec<u8>,
     int: &mut itoa::Buffer,
 ) -> Result<(), AuxLayoutError> {
@@ -180,11 +178,6 @@ fn write_aux_simd<S: Simd>(
         let (tag, value) =
             aux.get(at..end).and_then(whole_tag).ok_or(AuxLayoutError::Truncated { offset: at })?;
         at = end;
-        // The first CG tag is the one `bam_tag2cigar` moved into the CIGAR.
-        if skip_cg && tag == *b"CG" {
-            skip_cg = false;
-            continue;
-        }
         out.push(b'\t');
         out.extend_from_slice(&tag);
         out.push(b':');
@@ -466,10 +459,9 @@ mod kernel_tests {
     #[hegel::test]
     fn write_aux_every_level_matches_fallback(tc: TestCase) {
         let aux = tc.draw(aux_block());
-        let skip_cg = tc.draw(gs::booleans());
         let run = |level| {
             let mut out = b"prefix".to_vec();
-            let result = write_aux_at(level, &aux, skip_cg, &mut out, &mut itoa::Buffer::new());
+            let result = write_aux_at(level, &aux, &mut out, &mut itoa::Buffer::new());
             (result, out)
         };
         let expected = run(Level::fallback());

@@ -45,10 +45,8 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
     let mut record = record_of(&g);
     let len = record.seq_len();
     let original = record.as_payload().to_vec();
-    let packed_start = original.len()
-        - g.tags.iter().map(|t| 2 + t.value.len()).sum::<usize>()
-        - g.qual.len()
-        - len.div_ceil(2);
+    // From the record, not `g`: a `CG` tag holding the CIGAR may have moved.
+    let packed_start = 32 + g.qname.len() + 1 + 4 * record.stored_cigar().len();
     let packed_end = packed_start + len.div_ceil(2);
 
     let new = iupac(&tc, len);
@@ -103,8 +101,10 @@ fn qual_mut_changes_only_the_qualities(tc: TestCase) {
     let g: GenRecord = tc.draw(arb_record(HTSLIB));
     let mut record = record_of(&g);
     let original = record.as_payload().to_vec();
-    let qual_end = original.len() - g.tags.iter().map(|t| 2 + t.value.len()).sum::<usize>();
-    let qual_start = qual_end - g.qual.len();
+    // From the record, not `g`: a `CG` tag holding the CIGAR may have moved.
+    let qual_start =
+        32 + g.qname.len() + 1 + 4 * record.stored_cigar().len() + record.seq_len().div_ceil(2);
+    let qual_end = qual_start + g.qual.len();
 
     let has_qual = g.qual.first().is_some_and(|&q| q != 0xFF);
     assert_eq!(record.qual().is_some(), has_qual);
@@ -203,30 +203,42 @@ fn apply(record: &mut RawBamRecord, edits: &[Edit]) -> Result<(), RawRecordEditE
 }
 
 // r[verify bam.raw_record.edit_aux]
+// r[verify bam.raw_record.cg_hidden]
+/// The edit sees the tags `aux()` shows — the generated ones, less a `CG`
+/// tag the record took its CIGAR from — and leaves the rest of the record,
+/// that tag included, as it was. Only adding a `CG` tag can change the
+/// CIGAR, and that is refused.
 #[hegel::test(test_cases = pinned::cases(200))]
 fn edit_aux_keeps_untouched_tags_byte_for_byte(tc: TestCase) {
     let g: GenRecord = tc.draw(arb_record(HTSLIB));
     let mut record = record_of(&g);
     let original = record.as_payload().to_vec();
+    let cigar = record.cigar().to_vec();
+    let mut visible = g.tags.clone();
+    let encoded = |tags: &[GenTag]| {
+        let mut out = Vec::new();
+        tags.iter().for_each(|t| t.encode(&mut out));
+        out
+    };
+    if record.aux().as_bytes() != encoded(&visible) {
+        let cg = visible.iter().position(|t| t.key == *b"CG").expect("only CG is taken");
+        visible.remove(cg);
+    }
+    assert_eq!(record.aux().as_bytes(), encoded(&visible));
     let edits = draw_edits(&tc, &g);
-    let expected = GenRecord { tags: model_tags(&g.tags, &edits), ..g.clone() };
+    let expected = model_tags(&visible, &edits);
     let header = header();
 
-    // The edit is refused exactly when the real CIGAR would differ.
-    let expected_record = RawBamRecord::from_payload(expected.payload(), &header);
-    let same_cigar = expected_record.as_ref().is_ok_and(|e| {
-        e.has_cg_placeholder() == record.has_cg_placeholder()
-            && e.cigar().collect::<Vec<_>>() == record.cigar().collect::<Vec<_>>()
-    });
     match apply(&mut record, &edits) {
         Ok(()) => {
-            assert!(same_cigar);
-            assert_eq!(record.as_payload(), expected.payload());
-            let reread = RawBamRecord::from_payload(record.into_payload(), &header).unwrap();
-            assert_eq!(reread.as_payload(), expected.payload());
+            assert_eq!(record.aux().as_bytes(), encoded(&expected));
+            assert_eq!(record.cigar().to_vec(), cigar);
+            let reread = RawBamRecord::from_payload(record.as_payload().to_vec(), &header).unwrap();
+            assert_eq!(reread.as_payload(), record.as_payload());
+            assert_eq!(reread.cigar().to_vec(), cigar);
         }
         Err(RawRecordEditError::LongCigarChanged) => {
-            assert!(!same_cigar);
+            assert!(expected.iter().any(|t| t.key == *b"CG"));
             assert_eq!(record.as_payload(), original);
         }
         Err(e) => panic!("{e}"),
@@ -249,8 +261,9 @@ fn a_failing_aux_edit_leaves_the_record_alone() {
 }
 
 // r[verify bam.raw_record.edit_aux]
+// r[verify bam.raw_record.cg_hidden]
 #[test]
-fn the_cg_tag_of_a_long_cigar_cannot_be_removed_or_changed() {
+fn a_cg_tag_that_fits_the_cigar_field_moves_there() {
     let (m, s, n) = (raw_record_gen::op(2, 0), raw_record_gen::op(4, 4), raw_record_gen::op(5, 3));
     let real: Vec<u8> =
         [m, raw_record_gen::op(1, 2), m].iter().flat_map(|o| o.to_le_bytes()).collect();
@@ -270,21 +283,14 @@ fn the_cg_tag_of_a_long_cigar_cannot_be_removed_or_changed() {
         qual: vec![30; 4],
         tags: vec![array_tag(*b"CG", b'I', &real, 3)],
     };
+    // As `bam_tag2cigar` leaves it: the ops in the CIGAR field, no tag.
     let mut record = record_of(&g);
-    assert!(record.has_cg_placeholder());
-    let before = record.as_payload().to_vec();
-    let removed = record.edit_aux(|aux| {
-        aux.remove(*b"CG");
-        Ok::<(), AuxDataError>(())
-    });
-    assert!(matches!(removed, Err(RawRecordEditError::LongCigarChanged)));
-    let changed = record.edit_aux(|aux| aux.set_array_u32(*b"CG", &[m, m]));
-    assert!(matches!(changed, Err(RawRecordEditError::LongCigarChanged)));
-    assert_eq!(record.as_payload(), before);
-    // Same ops under another subtype are the same CIGAR.
-    let ops: Vec<i32> = [m, raw_record_gen::op(1, 2), m].iter().map(|&o| o as i32).collect();
-    record.edit_aux(|aux| aux.set_array_i32(*b"CG", &ops)).unwrap();
-    assert_eq!(record.cigar().count(), 3);
+    assert!(!record.has_cg_placeholder());
+    assert_eq!(record.stored_cigar().as_bytes(), real);
+    assert!(record.aux().is_empty());
+    // Now a `CG` tag is just a tag: the CIGAR is no placeholder.
+    record.edit_aux(|aux| aux.set_array_u32(*b"CG", &[m, m])).unwrap();
+    assert_eq!(record.cigar().as_bytes(), real);
 }
 
 fn samtools_line(path: &std::path::Path) -> Vec<Vec<u8>> {

@@ -121,7 +121,7 @@ fn read_htslib(cram: &Path) -> Vec<Decoded> {
         // record it just read, and `record` outlives this borrow.
         let data = unsafe { std::slice::from_raw_parts(inner.data, inner.l_data as usize) };
         let aux_start = usize::from(inner.core.l_qname)
-            + record.cigar_len() * 4
+            + record.cigar().len() * 4
             + record.seq_len().div_ceil(2)
             + record.seq_len();
         out.push(Decoded {

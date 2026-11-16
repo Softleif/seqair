@@ -8,6 +8,7 @@ use crate::bam::{
     cigar::{self, CigarOp},
     flags::BamFlags,
     index::Chunk,
+    long_cigar,
     record::DecodeError,
     record_store::RecordStore,
     region_buf::{BlockCache, RegionBuf},
@@ -769,6 +770,24 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         // r[impl sam.reader.fields.aux]
         encode::parse_aux_fields(aux_text, aux, aux_buf)?;
     }
+
+    // r[impl sam.reader.long_cigar]
+    // A `CG` tag behind a placeholder CIGAR is the CIGAR, as `sam_parse1`
+    // reads it; the region test above took the placeholder's span, which a
+    // well-formed placeholder shares.
+    let end_pos = if long_cigar::take(cigar_buf, aux_buf, bases.len(), true) {
+        let end_pos = if flags.is_unmapped() {
+            pos
+        } else {
+            cigar::compute_end_pos(pos, &*cigar_buf).unwrap_or(pos)
+        };
+        if end_pos.as_i64() < start {
+            return Ok(None);
+        }
+        end_pos
+    } else {
+        end_pos
+    };
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
     let rnext_field = fields.get(6).copied().unwrap_or(b"*");

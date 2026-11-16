@@ -136,8 +136,7 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
         // span from the raw CIGAR. Guarantee a minimum 1bp span so a read
         // always occupies a slot.
         let end = fields.end_pos.map(Pos0::as_u64).unwrap_or_else(|| {
-            let span =
-                super::cigar::ref_len(super::cigar::CigarOp::iter_bam_bytes(fields.cigar)).max(1);
+            let span = super::cigar::ref_len(fields.cigar).max(1);
             start.saturating_add(span.saturating_sub(1))
         });
 
@@ -188,7 +187,6 @@ mod tests {
             end_pos: None,
             flags: BamFlags::empty(),
             mapq: MappingQuality::from_byte(60),
-            n_cigar_ops: 1,
             seq_len: 0,
             matching_bases: 0,
             indel_bases: 0,
@@ -196,8 +194,8 @@ mod tests {
             mate_fields: crate::bam::MateFields::default(),
             qname: b"r",
             qual_bytes: &[],
-            aux_bytes: &[],
-            cigar,
+            aux: crate::bam::aux::Aux::new(&[]),
+            cigar: crate::bam::PackedCigar::from_bam_bytes(cigar).expect("whole ops"),
             seq: Sequence::Iupac(&[]),
         }
     }

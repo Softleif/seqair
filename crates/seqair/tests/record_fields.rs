@@ -24,7 +24,6 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::bam::aux::{AuxValue, GetAuxError};
-use seqair::bam::{BamWriterBuilder, RawBamRecord};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::{
     AlignmentStream, AuxTags, Field, FormatDetectionError, IndexPath, IndexedReader, PartialRecord,
@@ -247,7 +246,7 @@ fn snap(rec: PartialRecord) -> Snap {
         rec.pos(),
         rec.flags(),
         rec.mapq(),
-        rec.cigar().map(|c| c.to_string()).collect::<String>(),
+        rec.cigar().iter().map(|c| c.to_string()).collect::<String>(),
         rec.mate_fields(),
         rec.end_pos(),
     );
@@ -682,10 +681,24 @@ fn arb_fields_with_cg(tc: &TestCase) -> RecordFields {
     fields_from(n, s, q, aux)
 }
 
+/// The uncompressed BAM header for the one-contig files these tests write.
+fn bam_header_bytes() -> Vec<u8> {
+    let text = format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:{CONTIG}\tLN:{CONTIG_LEN}\n");
+    let mut out = b"BAM\x01".to_vec();
+    out.extend_from_slice(&(text.len() as i32).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(&1i32.to_le_bytes());
+    out.extend_from_slice(&(CONTIG.len() as i32 + 1).to_le_bytes());
+    out.extend_from_slice(CONTIG.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&(CONTIG_LEN as i32).to_le_bytes());
+    out
+}
+
 fn check_long_cigar(rec: &PartialRecord, want: &[u32], fields: &RecordFields, what: &str) {
-    let got: Vec<u32> = rec.cigar().map(|op| op.to_bam_u32()).collect();
+    let got: Vec<u32> = rec.cigar().iter().map(|op| op.to_bam_u32()).collect();
     assert_eq!(got, want, "{what}: cigar");
-    assert_eq!(rec.cigar_len(), want.len(), "{what}: cigar_len");
+    assert_eq!(rec.cigar().len(), want.len(), "{what}: cigar_len");
     if !fields.aux().contains(*b"CG") {
         assert!(
             matches!(rec.aux().get::<i64>(*b"CG"), Err(GetAuxError::NotRequested { .. })),
@@ -695,7 +708,8 @@ fn check_long_cigar(rec: &PartialRecord, want: &[u32], fields: &RecordFields, wh
 }
 
 // r[verify unified.partial_record.no_payload]
-// r[verify record_store.long_cigar]
+// r[verify record_store.long_cigar+1]
+// r[verify sam.reader.long_cigar]
 /// A record whose CIGAR lives in a `CG` tag behind the `<l_seq>S<ref_len>N`
 /// placeholder shows its real CIGAR through `PartialRecord::cigar` whatever
 /// tags were requested, from SAM text and from a BAM that keeps the
@@ -715,14 +729,47 @@ fn a_long_cigar_is_resolved_whatever_tags_were_requested(tc: TestCase) {
          r0\t0\t{CONTIG}\t10\t30\t{placeholder}\t*\t0\t0\t{seq}\t*\tNM:i:3\tCG:B:I,{}\tRG:Z:g1\n",
         cg.join(",")
     );
-    let mut stream = AlignmentStream::builder(std::io::Cursor::new(sam.into_bytes()))
+    let mut stream = AlignmentStream::builder(std::io::Cursor::new(sam.clone().into_bytes()))
         .fields(fields.clone())
         .build()
         .expect("sam stream");
-    let header = stream.header().clone();
     let recs: Vec<_> = stream.records().collect::<Result<_, _>>().expect("records");
     assert_eq!(recs.len(), 1);
     check_long_cigar(&recs[0], &want, &fields, "sam");
+
+    // The store holds the real CIGAR, its end and counts, and no `CG` tag,
+    // whichever reader filled it.
+    let check_store = |store: &RecordStore, what: &str| {
+        assert_eq!(store.len(), 1, "{what}");
+        let rec = store.record(store.indices().next().unwrap()).unwrap();
+        let got: Vec<u32> = rec.cigar().iter().map(|op| op.to_bam_u32()).collect();
+        assert_eq!(got, want, "{what}: cigar");
+        assert_eq!(rec.end_pos, Pos0::new(9 + ref_len - 1).unwrap(), "{what}: end");
+        let decoded: Vec<_> = rec.cigar().to_vec();
+        let (matching, indels) = seqair::bam::cigar::calc_matches_indels(&decoded);
+        assert_eq!((rec.matching_bases, rec.indel_bases), (matching, indels), "{what}: counts");
+        assert!(
+            !seqair::bam::aux::iter_tags(rec.aux()).any(|(tag, _)| tag == *b"CG"),
+            "{what}: CG stored"
+        );
+    };
+
+    // (a') The same SAM, bgzipped and indexed, through the indexed reader:
+    // its own parser, not the stream's encoder.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sam_gz = dir.path().join("long.sam.gz");
+    let gz = Command::new("bgzip").arg("-c").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
+    let mut gz = gz.expect("bgzip");
+    gz.stdin.take().unwrap().write_all(sam.as_bytes()).expect("feed bgzip");
+    let out = gz.wait_with_output().expect("bgzip");
+    assert!(out.status.success());
+    std::fs::write(&sam_gz, out.stdout).expect("write sam.gz");
+    run(Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz), "tabix");
+    let mut reader = IndexedReader::builder(&sam_gz).fields(fields.clone()).open().expect("open");
+    let tid = reader.header().tid(CONTIG).expect("contig");
+    let mut store = RecordStore::new();
+    reader.fetch_into(tid, span(), &mut store).expect("fetch");
+    check_store(&store, "indexed sam");
 
     // (b) BAM, packed by hand: a writer of a short CIGAR would not keep the
     // placeholder, and samtools folds a CG tag back into the CIGAR.
@@ -749,22 +796,25 @@ fn a_long_cigar_is_resolved_whatever_tags_were_requested(tc: TestCase) {
         p.extend_from_slice(&op.to_le_bytes());
     }
     p.extend_from_slice(b"RGZg1\0");
-    let record = RawBamRecord::from_payload(p, &header).expect("payload");
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    // Written as packed: a `RawBamRecord` would move a CIGAR this short into
+    // the CIGAR field, as htslib does.
     let bam = dir.path().join("long.bam");
-    let mut w = BamWriterBuilder::to_path(&bam, &header).build().expect("writer");
-    w.write_raw(&record).expect("write");
-    w.finish().expect("finish");
+    let mut w = seqair::io::BgzfWriter::new(Vec::new());
+    w.write_all(&bam_header_bytes()).expect("header");
+    w.write_all(&(p.len() as i32).to_le_bytes()).expect("block_size");
+    w.write_all(&p).expect("record");
+    std::fs::write(&bam, w.finish().expect("bgzf")).expect("write");
     run(Command::new("samtools").arg("index").arg(&bam), "samtools index");
 
-    // The file keeps the placeholder form, and the whole record reads back
-    // with the real CIGAR resolved.
+    // The whole record reads back with the real CIGAR resolved, the ops in
+    // the CIGAR field and the tag gone.
     let mut full = AlignmentStream::open_path(&bam).expect("open").build().expect("build");
     let full: Vec<_> = full.records().collect::<Result<_, _>>().expect("records");
     let raw = full[0].clone();
-    assert!(raw.has_cg_placeholder(), "the BAM must hold the placeholder");
-    assert_eq!(raw.stored_cigar_bytes().len(), 8);
+    assert!(!raw.has_cg_placeholder());
+    assert_eq!(raw.stored_cigar().len(), want.len());
+    assert!(raw.aux().get::<&[u8]>("CG").is_err());
 
     let mut stream = AlignmentStream::open_path(&bam)
         .expect("open")
@@ -783,12 +833,5 @@ fn a_long_cigar_is_resolved_whatever_tags_were_requested(tc: TestCase) {
 
     let mut store = RecordStore::new();
     reader.fetch_into(tid, span(), &mut store).expect("fetch");
-    assert_eq!(store.len(), 1);
-    let rec = store.record(store.indices().next().unwrap()).unwrap();
-    assert_eq!(rec.cigar().iter().map(|op| op.to_bam_u32()).collect::<Vec<_>>(), want);
-    assert_eq!(rec.end_pos, Pos0::new(9 + ref_len - 1).unwrap());
-    assert_eq!(
-        seqair::bam::aux::iter_tags(rec.aux()).any(|(tag, _)| tag == *b"CG"),
-        fields.aux().contains(*b"CG")
-    );
+    check_store(&store, "bam fetch");
 }

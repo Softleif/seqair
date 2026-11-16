@@ -53,7 +53,7 @@ fn check(got: &PartialRecord, full: &RawBamRecord, fields: &RecordFields, at: &s
     assert_eq!(got.flags(), full.flags(), "{at}: flags");
     assert_eq!(got.mapq(), full.mapq(), "{at}: mapq");
     assert_eq!(got.mate_fields(), full.mate_fields(), "{at}: mate");
-    assert_eq!(got.cigar().collect::<Vec<_>>(), full.cigar().collect::<Vec<_>>(), "{at}: cigar");
+    assert_eq!(got.cigar().to_vec(), full.cigar().to_vec(), "{at}: cigar");
     assert_eq!(got.end_pos(), full.end_pos(), "{at}: end_pos");
     assert_eq!(got.seq_len(), full.seq_len(), "{at}: seq_len");
     assert_eq!(got.qname().ok(), fields.names().then(|| full.qname()), "{at}: qname");

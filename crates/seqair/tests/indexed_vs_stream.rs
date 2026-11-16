@@ -334,7 +334,7 @@ fn expected(record: &RawBamRecord) -> Option<View> {
 }
 
 fn placed_view(record: &RawBamRecord, tid: u32, pos: Pos0) -> View {
-    let cigar: Vec<u32> = record.cigar().map(|op| op.to_bam_u32()).collect();
+    let cigar: Vec<u32> = record.cigar().iter().map(|op| op.to_bam_u32()).collect();
     let rlen: u32 =
         cigar.iter().filter(|&&op| matches!(op & 0xF, 0 | 2 | 3 | 7 | 8)).map(|op| op >> 4).sum();
     let end_pos = if record.flags().is_unmapped() || rlen == 0 {

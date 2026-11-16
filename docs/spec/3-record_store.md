@@ -133,12 +133,17 @@ On construction, the store MUST pre-allocate all six vectors with estimated capa
 r[record_store.push_raw+3]
 `push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `IupacBase` codes in the bases slab, every code kept (`r[seq.iupac_bulk+3]`).
 
-r[record_store.long_cigar]
+r[record_store.long_cigar+1]
 When a BAM record carries a long CIGAR in its `CG` tag, `push_raw` MUST resolve
 it using the same rules as `RawBamRecord` (`r[bam.raw_record.long_cigar]`), before
 filtering or discarding unrequested auxiliary tags. The filter's CIGAR, the
 stored CIGAR and all derived alignment fields MUST describe the resolved
-operations, not the placeholder. `SlimRecord` and `FilterRawFields` MUST use a
+operations, not the placeholder, and neither the filter's tags nor the aux slab
+MUST hold the `CG` tag: as in htslib, it is the CIGAR now. The SAM and CRAM
+readers resolve before `push_fields` (`r[sam.reader.long_cigar]`,
+`r[cram.record.long_cigar]`), so the store never holds a placeholder or a
+resolved `CG` tag, whichever reader filled it. The BAM reader's pre-push
+overlap test MUST use the same resolved CIGAR's end (`compute_end_pos_from_raw`). `SlimRecord` and `FilterRawFields` MUST use a
 `u32` operation count; `push_fields` and `set_alignment` MUST also preserve
 counts above 65535 without truncation.
 
