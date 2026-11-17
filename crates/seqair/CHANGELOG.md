@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Pileups without mate linking, for callers that resolve mates themselves or deliberately count both mates (from sstadick's perbase work). `RecordStore::prepare_for_pileup_without_mate_links` returns a `PileupInput` with the same columns as `prepare_for_pileup`, but no alignment has a `mate_idx` or is `in_mate_overlap`, and links made earlier are cleared. `Readers::pileup(..).without_mate_links()` and `StreamPileup::without_mate_links()` reach it without building the store by hand. The default still links mates.
+
 ### Changed
 
 - **One model for long CIGARs.** BAM's `<l_seq>S<ref_len>N` placeholder with the real CIGAR in a `CG:B:I` tag is now purely a wire-format matter: every reader resolves it on the way in, as htslib's `bam_tag2cigar` does, and every BAM writer writes it on the way out, as `bam_write1` does. In between, a CIGAR is its real operations, and once a `CG` tag is the CIGAR no `CG` tag stays among the tags (htslib keeps any but the one it took, which a later reader may take for the CIGAR).
@@ -25,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A BAM writer leaves out a stale `CG` tag that a reader would take for the record's CIGAR: always for a CIGAR written in the long form, and for one written inline that starts as the placeholder does.
 - A `CG` CIGAR that does not account for SEQ is refused by every reader (`CigarQueryLenMismatch`, or `CigarSeqLenMismatch` from SAM text), as htslib refuses it; the indexed SAM and CRAM readers stored it.
 - The indexed SAM reader no longer drops a record from a region by its placeholder's span: the real CIGAR's span decides.
+
+### Performance
+
+- The pileup writes a plain match (a base inside an `M`, `=` or `X` run), the common column entry, directly instead of through the general path that built an op of any variant. chr12 NA12878 20–30 Mb on M4: pileup 1.30 s → 1.15 s (−11.5%). Idea and first version from rob-p's follow-up to sstadick's perbase benchmarks.
 
 ## v0.10.1 (2026-11-13)
 
