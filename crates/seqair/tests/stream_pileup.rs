@@ -301,6 +301,15 @@ fn col(tid: u32, column: &PileupColumn<'_, ()>) -> Col {
     }
 }
 
+/// Without mate links, no alignment may name a mate, even one the column
+/// does not hold (which `Entry::mate` cannot see).
+fn assert_unlinked(column: &PileupColumn<'_, ()>) {
+    for a in column.alignments() {
+        assert_eq!(a.mate_idx(), None, "an unlinked pileup names no mate");
+        assert_eq!(a.fragment_idx(), a.record_idx(), "an unlinked read is its own fragment");
+    }
+}
+
 /// The oracle: one whole-contig segment per contig through the indexed path.
 fn indexed_columns(bam: &Path, fasta: &Path, depth: DepthLimit, link_mates: bool) -> Vec<Col> {
     let mut readers = Readers::open(bam, fasta).unwrap();
@@ -313,15 +322,24 @@ fn indexed_columns(bam: &Path, fasta: &Path, depth: DepthLimit, link_mates: bool
         let plan = if link_mates { plan } else { plan.without_mate_links() };
         let mut pileup = plan.run().unwrap();
         while let Some(column) = pileup.pileups() {
+            if !link_mates {
+                assert_unlinked(&column);
+            }
             cols.push(col(segment.tid().as_u32(), &column));
         }
     }
     cols
 }
 
-fn streamed_columns<E: CustomizeRecordStore<Extra = ()>>(mut pileup: StreamPileup<E>) -> Vec<Col> {
+fn streamed_columns<E: CustomizeRecordStore<Extra = ()>>(
+    mut pileup: StreamPileup<E>,
+    link_mates: bool,
+) -> Vec<Col> {
     let mut cols = Vec::new();
     while let Some((tid, column)) = pileup.pileups().unwrap() {
+        if !link_mates {
+            assert_unlinked(&column);
+        }
         cols.push(col(tid.as_u32(), &column));
     }
     cols
@@ -400,7 +418,7 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
         .with_window_budget(budget)
         .with_reference(IndexedFastaReader::open(&fasta).unwrap());
     let pileup = if link_mates { pileup } else { pileup.without_mate_links() };
-    let actual = streamed_columns(pileup);
+    let actual = streamed_columns(pileup, link_mates);
 
     let positions = |cols: &[Col]| cols.iter().map(|c| (c.tid, c.pos)).collect::<Vec<_>>();
     assert_eq!(positions(&actual), positions(&expected), "column positions");
@@ -505,6 +523,7 @@ fn unchecked_records_may_be_out_of_order(tc: TestCase) {
         streamed_columns(
             StreamPileup::new(stream, RejectSecondary, DepthLimit::Unlimited)
                 .with_window_len(NonZeroU32::new(window).unwrap()),
+            true,
         )
     };
     assert_eq!(columns(&with_strays), columns(&lines));
@@ -563,7 +582,7 @@ fn a_pile_deeper_than_the_budget_grows_past_it() {
                     .unwrap();
             let pileup =
                 StreamPileup::new(stream, (), DepthLimit::Unlimited).with_window_budget(budget);
-            streamed_columns(pileup)
+            streamed_columns(pileup, true)
         };
         let three = NonZeroU32::new(3).unwrap();
         let tiny = WindowBudget { records: three, slab_len: NonZeroU32::new(1 << 20).unwrap() };

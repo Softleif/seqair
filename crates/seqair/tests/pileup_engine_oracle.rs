@@ -96,6 +96,12 @@ struct Case {
     region: (u32, u32),
     /// Load through `push_raw` (BAM bytes) rather than `push_fields`.
     via_raw: bool,
+    /// The order `reads` are pushed in, a permutation of their indices.
+    push_order: Vec<usize>,
+    /// Link mates before preparing, so preparation must undo or redo it.
+    prelink: bool,
+    /// Prepare with `prepare_for_pileup` rather than without mate links.
+    link_mates: bool,
 }
 
 #[hegel::composite]
@@ -117,7 +123,25 @@ fn arb_case(tc: &TestCase) -> Case {
     let start = tc.draw_silent(gs::integers::<u32>().max_value(40));
     let last = tc.draw_silent(gs::integers::<u32>().min_value(start).max_value(140));
     let via_raw = tc.draw_silent(gs::booleans());
-    Case { reads, pair_starts, overhang, max_depth, region: (start, last), via_raw }
+    let mut push_order: Vec<usize> = (0..reads.len()).collect();
+    if tc.draw_silent(gs::booleans()) {
+        for i in (1..push_order.len()).rev() {
+            push_order.swap(i, tc.draw_silent(gs::integers::<usize>().max_value(i)));
+        }
+    }
+    let prelink = tc.draw_silent(gs::booleans());
+    let link_mates = tc.draw_silent(gs::booleans());
+    Case {
+        reads,
+        pair_starts,
+        overhang,
+        max_depth,
+        region: (start, last),
+        via_raw,
+        push_order,
+        prelink,
+        link_mates,
+    }
 }
 
 fn build_store(case: &Case) -> PileupInput<()> {
@@ -127,7 +151,8 @@ fn build_store(case: &Case) -> PileupInput<()> {
         mate_of[i] = Some(i + 1);
         mate_of[i + 1] = Some(i);
     }
-    for (i, r) in case.reads.iter().enumerate() {
+    for &i in &case.push_order {
+        let r = &case.reads[i];
         let p = Pos0::new(r.pos).unwrap();
         let end_pos = if r.unmapped { p } else { compute_end_pos(p, &r.ops).unwrap() };
         let (matching, indels) = calc_matches_indels(&r.ops);
@@ -182,7 +207,14 @@ fn build_store(case: &Case) -> PileupInput<()> {
         let idx = idx.expect("no filter");
         assert_eq!(store.record(idx).unwrap().seq(), r.seq, "the store keeps every code");
     }
-    store.prepare_for_pileup().input
+    if case.prelink {
+        let _stats = store.link_mates();
+    }
+    if case.link_mates {
+        store.prepare_for_pileup().input
+    } else {
+        store.prepare_for_pileup_without_mate_links()
+    }
 }
 
 /// One column entry, with every field a consumer can read off it.
@@ -289,18 +321,20 @@ fn run_oracle(case: &Case) -> Vec<(u32, Vec<Entry>)> {
                     (PileupOp::SoftClip { qpos, base, qual }, Indel::None)
                 }
             };
-            let in_mate_overlap = rec.mate_overlap().is_some_and(|ov| {
-                let o = Offset::new(oh);
-                let start = ov.start.checked_sub_offset(o).unwrap_or(Pos0::ZERO);
-                let end = ov.end.checked_add_offset(o).unwrap_or(Pos0::MAX);
-                (start..end).contains(&pos)
-            });
+            // Without links, no stale one may survive, prelinked or not.
+            let in_mate_overlap = case.link_mates
+                && rec.mate_overlap().is_some_and(|ov| {
+                    let o = Offset::new(oh);
+                    let start = ov.start.checked_sub_offset(o).unwrap_or(Pos0::ZERO);
+                    let end = ov.end.checked_add_offset(o).unwrap_or(Pos0::MAX);
+                    (start..end).contains(&pos)
+                });
             entries.push(Entry {
                 record_idx: idx.get(),
                 op,
                 indel_after,
                 in_mate_overlap,
-                mate_idx: rec.mate_idx().map(|m| m.get()),
+                mate_idx: rec.mate_idx().filter(|_| case.link_mates).map(|m| m.get()),
                 mapq: rec.mapq.as_byte(),
                 flags: rec.flags.raw(),
                 seq_len: rec.seq_len,
@@ -326,11 +360,13 @@ fn run_oracle(case: &Case) -> Vec<(u32, Vec<Entry>)> {
 // r[verify pileup.soft_clip_overhang.emit]
 // r[verify pileup_indel.complex_indel]
 // r[verify pileup_indel.insertion_len]
+// r[verify record_store.pileup_input.without_mates]
 /// Every column the engine yields is the column a stateless per-position
 /// lookup builds, for arbitrary CIGARs (zero-length ops, padding, `D I`,
 /// `N I`, hard and soft clips), `SEQ=*`, every IUPAC code, unmapped reads,
 /// linked mates, soft-clip overhang, and depth caps, loaded through
-/// `push_raw` or `push_fields`.
+/// `push_raw` or `push_fields` in any order, prepared with or without mate
+/// links (after linking once already, or not).
 #[hegel::test]
 fn engine_matches_stateless_oracle(tc: TestCase) {
     let case = tc.draw(arb_case().print_as_debug());
