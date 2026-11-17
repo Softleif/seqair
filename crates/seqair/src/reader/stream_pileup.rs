@@ -120,7 +120,8 @@ struct Yielding<U> {
 ///   `fragment_idx` the read's own index) where a whole-contig pileup links
 ///   them; do not rely on either for such mates. `samtools mpileup` has the
 ///   same limit: it pairs a read with its mate only while both are in its
-///   buffer.
+///   buffer. With [`without_mate_links`](Self::without_mate_links), no mate
+///   is linked at all.
 /// - **The depth cap is a whole-contig one.** With
 ///   [`DepthLimit::PerColumn`] the [`DepthCap`] sees each contig's records
 ///   once, in order, and keeps exactly the reads an indexed pileup over one
@@ -485,7 +486,8 @@ where
     }
 
     // r[impl pileup_stream.mates+1]
-    /// Link `store`'s mates and start an engine yielding `start..=last`.
+    /// Prepare `store` (linking its mates unless opted out) and start an
+    /// engine yielding `start..=last`.
     fn start_engine(
         &mut self,
         tid: Tid,

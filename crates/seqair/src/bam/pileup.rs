@@ -911,7 +911,9 @@ impl<U> PileupEngine<U> {
     /// relies on ascending position order and linked mates and checks neither:
     /// an unsorted store loses whole reads without reporting a gap, and an
     /// unlinked one makes every alignment look like it has no mate. Only
-    /// [`RecordStore::prepare_for_pileup`] mints that type.
+    /// [`RecordStore::prepare_for_pileup`] mints that type, or
+    /// [`RecordStore::prepare_for_pileup_without_mate_links`] for a caller
+    /// that opts out of the mates.
     ///
     /// `region` is the closed interval of positions to report columns for.
     // r[impl interval.span_type]

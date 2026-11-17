@@ -326,13 +326,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// readers.pileup(segment, depth).mutate(&mut realign).run()?;       // + hook
     /// readers.pileup(segment, depth).with_reference(r.clone()).run()?;  // + reference
     /// readers.pileup(segment, depth).with_reference(r).mutate(&mut realign).run()?;
+    /// readers.pileup(segment, depth).without_mate_links().run()?;      // count both mates
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// Nothing is read until `run`, and the options are independent — which is
-    /// why this is a plan and not four methods: the last line above had no
-    /// spelling when each combination needed its own entry point.
+    /// why this is a plan and not a method per combination: the fourth line
+    /// above had no spelling when each combination needed its own entry point.
     ///
     /// `segment` must come from [`segments`](Self::segments) — there is no
     /// other way to construct one. The segment's `tid`, `start`, `end`, and

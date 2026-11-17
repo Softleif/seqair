@@ -384,8 +384,9 @@ pub struct RecordStore<U = ()> {
     /// `reach[i]` is the largest `end_pos` among the mapped records at
     /// indices `..=i`, in position order — non-decreasing by construction, so
     /// the first record that can overlap a window is one binary search away.
-    /// Built by [`prepare_for_pileup`](Self::prepare_for_pileup), which is
-    /// the only way to obtain a [`PileupInput`], and meaningful only on the
+    /// Built by [`prepare_for_pileup`](Self::prepare_for_pileup) or
+    /// [`prepare_for_pileup_without_mate_links`](Self::prepare_for_pileup_without_mate_links),
+    /// the only ways to obtain a [`PileupInput`], and meaningful only on the
     /// store it hands out: a push or a move after that would leave it stale,
     /// which is why it is derived at that one point rather than maintained.
     reach: Vec<Pos0>,

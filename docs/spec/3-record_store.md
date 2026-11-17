@@ -290,7 +290,8 @@ unlinked store reports `mate_idx() == None` and `in_mate_overlap() == false` on
 every alignment, which is exactly what a record with no mate looks like, so a
 consumer that deduplicates overlapping mates keeps both.
 
-Both MUST therefore be unrepresentable rather than documented.
+Both MUST therefore be unrepresentable rather than documented: an unsorted
+input cannot be built, and an unlinked one only by asking for it.
 `PileupEngine::new` and `PileupEngine::with_scratch` MUST take a `PileupInput`,
 not a `RecordStore`. `PileupInput` MUST have no public constructor;
 `RecordStore::prepare_for_pileup(self) -> Prepared` MUST be the default way to

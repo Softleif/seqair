@@ -188,15 +188,15 @@ rely on `mate_idx` or `fragment_idx` for mates that do not overlap; for mates
 that overlap they are always set, and that is what deduplicating overlapping
 mates needs. `StreamPileup`'s documentation MUST say so.
 
-r[pileup_stream.without_mate_links]
-`StreamPileup::without_mate_links()` MUST prepare every window with
-`RecordStore::prepare_for_pileup_without_mate_links`
-(`r[record_store.pileup_input.without_mates]`): columns MUST be those of the
-default pileup, but no alignment carries a `mate_idx` or is `in_mate_overlap`.
-
 htslib's mpileup is no different: `overlap_push` pairs a read with its mate only
 while both are in its buffer, which is exactly the reads that overlap the
 current position.
+
+r[pileup_stream.without_mate_links]
+`StreamPileup::without_mate_links()` is the one exception to linking: it MUST
+prepare every window with `RecordStore::prepare_for_pileup_without_mate_links`
+(`r[record_store.pileup_input.without_mates]`): columns MUST be those of the
+default pileup, but no alignment carries a `mate_idx` or is `in_mate_overlap`.
 
 Input with repeated primary qnames (`r[record_store.link_mates.qname_uniqueness]`)
 MAY pair differently from the whole-contig pileup, since "first free pair wins"
