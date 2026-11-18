@@ -3,7 +3,7 @@
 
 use seqair_types::SmallVec;
 
-// r[impl vcf_record.genotype_encoding]
+// r[impl vcf_record.genotype_encoding+2]
 /// Genotype for a single sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Genotype {
@@ -46,7 +46,7 @@ impl Genotype {
 mod tests {
     use super::*;
 
-    // r[verify vcf_record.genotype_encoding]
+    // r[verify vcf_record.genotype_encoding+2]
     #[test]
     fn genotype_construction() {
         let gt = Genotype::unphased(0, 1);

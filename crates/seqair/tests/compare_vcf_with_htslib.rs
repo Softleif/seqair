@@ -189,6 +189,27 @@ fn bcftools_reads_a_partially_phased_gt() {
     );
 }
 
+/// A haploid call has no separator, so "every separator is phased" holds and
+/// its one allele carries the phase bit: VCF 4.5's BCF table encodes haploid
+/// `1` as `0x05`. Unset, htslib renders the leading indicator it cannot infer:
+/// `/1`.
+// r[verify vcf_record.gt_first_phase+2]
+#[test]
+fn bcftools_reads_a_haploid_gt_without_a_leading_indicator() {
+    if !has_bcftools() {
+        eprintln!("skipping: bcftools not found");
+        return;
+    }
+
+    let setup = shared_setup();
+    let tmp =
+        write_seqair_bcf_with_gt(&setup, 1000, Base::C, Base::G, 99.0, 100, Genotype::haploid(1));
+
+    let vcf_text = bcftools_view(tmp.path()).unwrap();
+    let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
+    assert!(fields[9].starts_with("1:"), "expected haploid GT 1, got: {}", fields[9]);
+}
+
 // r[verify bcf_writer.gt_encoding]
 #[test]
 fn bcftools_reads_seqair_phased_gt() {
