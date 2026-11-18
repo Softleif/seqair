@@ -1,7 +1,7 @@
 //! The rANS Nx16 encoder's fast path (`r[cram_writer.rans_nx16.simd]`):
 //! order-1 counts that do not serialize on repeated pairs, order-1 tables
-//! for the alphabet's rows only, and SIMD kernels for the interleaved
-//! states, as htscodecs' `rANS_static32x16pr_neon.c` codes them. Every
+//! over the alphabet only, SIMD kernels for the interleaved states, as
+//! htscodecs' `rANS_static32x16pr_neon.c` codes them, and for PACK. Every
 //! function here has a scalar counterpart in the parent module, the
 //! reference it must match byte for byte.
 
@@ -9,7 +9,7 @@ use super::{
     Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize_into, order_1_header,
     order_1_shift, target, write_row,
 };
-use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4, u64x2};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u16x8, u32x4, u64x2};
 use fearless_simd_macros::simd;
 use std::cell::RefCell;
 use std::thread::LocalKey;
@@ -602,6 +602,99 @@ fn code_o1<S: Simd, const M: usize>(
     words.at = local.at;
 }
 
+/// The parent's `pack_indices` a vector at a time: `data`'s symbols, each
+/// one of `syms` (in order, at most 16), as their indices `per_byte` (2, 4
+/// or 8) a byte, the first in the lowest bits; `code` maps a symbol to its
+/// index for the bytes after the last whole vector.
+#[allow(clippy::arithmetic_side_effects, reason = "per_byte ∈ {2, 4, 8}")]
+pub(super) fn pack_indices(
+    level: Level,
+    data: &[u8],
+    syms: &[u8],
+    code: &[u8; 256],
+    per_byte: usize,
+) -> Vec<u8> {
+    debug_assert!(syms.len() <= 16 && syms.is_sorted());
+    let mut out = Vec::with_capacity(data.len().div_ceil(per_byte));
+    let whole = data.len() - data.len() % (16 * per_byte);
+    let (body, tail) = data.split_at(whole);
+    match per_byte {
+        2 => dispatch!(level, simd => pack_kernel::<_, 2>(simd, body, syms, &mut out)),
+        4 => dispatch!(level, simd => pack_kernel::<_, 4>(simd, body, syms, &mut out)),
+        _ => dispatch!(level, simd => pack_kernel::<_, 8>(simd, body, syms, &mut out)),
+    }
+    out.extend(super::pack_indices(tail, code, per_byte));
+    out
+}
+
+/// [`pack_indices`] over whole runs of `16·K` bytes, each 16 output bytes.
+#[simd]
+#[allow(clippy::indexing_slicing, reason = "sixteen and K ≤ 8 vectors of a 16·K-byte chunk")]
+#[allow(clippy::arithmetic_side_effects, reason = "u8 lanes wrap; s − min < 16 in the table")]
+fn pack_kernel<S: Simd, const K: usize>(simd: S, data: &[u8], syms: &[u8], out: &mut Vec<u8>) {
+    let (Some(&min), Some(&max)) = (syms.first(), syms.last()) else {
+        return;
+    };
+    // Close symbols index a 16-entry table; others count the symbols at or
+    // below them (the map is sorted).
+    let mut table = [0u8; 16];
+    let close = max - min < 16;
+    if close {
+        for (i, &s) in syms.iter().enumerate() {
+            table[usize::from(s - min)] = u8::try_from(i).unwrap_or(0);
+        }
+    }
+    let table = u8x16::from_slice(simd, &table);
+    let base = u8x16::splat(simd, min);
+    let mut bounds = [u8x16::splat(simd, 0); 15];
+    for (b, &s) in bounds.iter_mut().zip(syms.get(1..).unwrap_or_default()) {
+        *b = u8x16::splat(simd, s);
+    }
+    let bounds = bounds.get(..syms.len().saturating_sub(1)).unwrap_or_default();
+    for chunk in data.chunks_exact(16 * K) {
+        let mut v = [u8x16::splat(simd, 0); K];
+        for (k, x) in v.iter_mut().enumerate() {
+            let bytes = u8x16::from_slice(simd, &chunk[16 * k..][..16]);
+            *x = if close { table.swizzle_dyn(bytes - base) } else { rank(simd, bytes, bounds) };
+        }
+        // Halve the vectors, doubling the bits a byte holds, until one is left.
+        let shifts: &[u32] = match K {
+            2 => &[4],
+            4 => &[6, 4],
+            _ => &[7, 6, 4],
+        };
+        let mut n = K;
+        for &shift in shifts {
+            n /= 2;
+            for k in 0..n {
+                v[k] = merge(v[2 * k], v[2 * k + 1], shift);
+            }
+        }
+        let mut bytes = [0u8; 16];
+        v[0].store_slice(&mut bytes);
+        out.extend_from_slice(&bytes);
+    }
+}
+
+/// How many of `bounds` each byte is at or above.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "vector lanes wrap; a true lane is −1")]
+fn rank<S: Simd>(simd: S, bytes: u8x16<S>, bounds: &[u8x16<S>]) -> u8x16<S> {
+    let mut index = u8x16::splat(simd, 0);
+    for &b in bounds {
+        index -= bytes.simd_ge(b).to_vector().bitcast::<u8x16<S>>();
+    }
+    index
+}
+
+/// Each pair of bytes of `a` then `b`, both under `2^(8 − shift)`, as one,
+/// the first in the low bits.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "shift < 16")]
+fn merge<S: Simd>(a: u8x16<S>, b: u8x16<S>, shift: u32) -> u8x16<S> {
+    let (a, b): (u16x8<S>, u16x8<S>) = (a.bitcast(), b.bitcast());
+    (a | a >> shift).narrow(b | b >> shift)
+}
 /// The states, then the words, already in decode order.
 fn finish(out: &mut Vec<u8>, states: &[u32], words: &[u8]) {
     out.reserve(states.len().saturating_mul(4).saturating_add(words.len()));
