@@ -4,35 +4,13 @@
 
 > _[VCF43] §1.1.1 "File format" — `##fileformat=VCFvX.Y` required first line_
 
-r[vcf_header.file_format]
-The header MUST begin with a `##fileformat=VCFvX.Y` line. The default version is VCFv4.3.
+r[vcf_header.file_format+2]
+Every header MUST carry its version as a typed, ordered `VcfVersion` (`major`, `minor`, with constants `V4_0` … `V4_5`), exposed by `VcfHeader::version()`, so that "is this header new enough" is a comparison and not a string parse. `to_vcf_text()` MUST emit `##fileformat=VCFv{major}.{minor}` as the first line. There is no string-returning accessor.
 
-r[vcf_header.file_format.single_version]
-A cardinality is versioned: `Number=M` is defined by VCF 4.5 ("one value for
-each possible base modification for the corresponding ChEBI ID") and by no
-earlier version, so a header declaring 4.3 while using `M` promises a grammar it
-then violates, and nothing downstream can tell.
+r[vcf_header.file_format.single_version+2]
+A header built with the builder MUST declare `VcfVersion::V4_5` (`VcfHeader::WRITE_VERSION`), with no setter. A cardinality is versioned — `Number=M` is defined by VCF 4.5 and by no earlier version — so a built header that could declare an older version could promise a grammar its fields violate. Emitting one version removes that class of mismatch; backwards compatibility with readers older than 4.5 is not a goal.
 
-seqair MUST therefore emit exactly one version, `VcfHeader::FILE_FORMAT`
-(`VCFv4.5`), and MUST NOT expose a setter for it. Backwards compatibility with
-older readers is explicitly not a goal; removing the choice removes the class of
-mismatch, which a per-field version floor would only have detected.
-
-`Number` MUST therefore expose `min_vcf_version()`, the earliest version
-defining it, and the builder MUST track the maximum over every registered INFO
-and FORMAT field. At `build`:
-
-- when no version was set explicitly, the header MUST declare
-  `max(VcfVersion::DEFAULT, floor)`;
-- when one was set and is at least the floor, it MUST be kept — cardinalities
-  set a floor, not the value, because a field may be versioned in ways its
-  `Number` cannot express (a 4.5 reserved key such as `M5mC` with `Number=.`);
-- when one was set and is below the floor, `build` MUST fail with
-  `VersionTooLow`, naming the field that raised it, rather than silently
-  adjusting a version the caller explicitly asked for.
-
-The version MUST be a typed, ordered `VcfVersion` rather than a string, so that
-"is this header new enough" is a comparison and not a parse.
+A parsed header (`r[vcf_header.parse]`) MUST keep the version its file declared, and writing it back out MUST declare that version: its definitions are the file's own, and the file's version is the one that describes them. Rules whose meaning depends on the version — the first allele's phase bit (`r[vcf_record.gt_first_phase]`), the reference span (`r[vcf_values.rlen]`) — MUST take it from the header of the record being read.
 
 r[vcf_header.builder]
 Headers MUST be constructed via a typestate builder that enforces field registration order at compile time. The builder progresses through phases — Contigs → Filters → Infos → Formats → Samples — and each phase only exposes methods appropriate for that stage. Phase transitions consume the builder and return the next phase; phases may be skipped. `build()` is available from any phase. Duplicate-ID and type-constraint errors are returned as typed errors.
@@ -94,7 +72,7 @@ r[vcf_header.parse]
 `VcfHeader::parse(text: &str)` MUST parse VCF header text — the `##` meta-information lines followed by the `#CHROM` line — as found at the start of a VCF file or in a BCF header's `l_text` block (trailing NUL bytes stripped). Structured lines (`##INFO=<…>`, `##FORMAT=<…>`, `##FILTER=<…>`, `##contig=<…>`, and any other `##key=<…>`) MUST be parsed as comma-separated `key=value` pairs where a value may be double-quoted and a quoted value may contain `\"` and `\\` escapes, commas and `=`. The `#CHROM` line MUST be tab-separated; the eight fixed column names MUST match exactly; a `FORMAT` column followed by sample names is optional.
 
 r[vcf_header.parse.version]
-The first line MUST be `##fileformat=VCFvMAJOR.MINOR`. It MUST be parsed into a typed, ordered `VcfVersion` exposed by `VcfHeader::version()`. A missing or malformed line MUST fail with a typed error. Headers built with the builder keep declaring `VcfHeader::FILE_FORMAT`.
+The first line MUST be `##fileformat=VCFvMAJOR.MINOR`. It MUST be parsed into a `VcfVersion` (`r[vcf_header.file_format+2]`). A missing or malformed line, or a major version other than 4, MUST fail with a typed error. A 4.x minor version newer than 4.5 MUST be accepted with a `warn!`, read with the 4.5 rules.
 
 r[vcf_header.parse.defs]
 INFO and FORMAT lines MUST yield `InfoDef`/`FormatDef` with a parsed `Number` (integer, `A`, `R`, `G`, `M`, `.`) and `ValueType`. An unknown `Number` or `Type` token MUST fail with a typed error naming the field. Constraints the writer enforces but real files violate (a `Flag` with a `Number` other than 0, a `Number` that disagrees with the spec's reserved definition) MUST be accepted with a `warn!`, since rejecting them would refuse files htslib and bcftools read.
