@@ -1,14 +1,15 @@
-//! Criterion benchmarks for the CRAM writer's rANS Nx16 encoder: the scalar
-//! loops (the reference), the SIMD kernels, and htscodecs'
+//! Criterion benchmarks for the CRAM writer's rANS encoders. Nx16: the
+//! scalar loops (the reference), the SIMD kernels, and htscodecs'
 //! `rans_compress_to_4x16` (linked through `hts-sys`), each without
-//! transforms, at order 0 and 1 with 4 and 32 states.
+//! transforms, at order 0 and 1 with 4 and 32 states. 4×8: the reference
+//! loops, the fast path, and htscodecs' `rans_compress`, at order 0 and 1.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "benches")]
 #![allow(clippy::cast_possible_truncation, clippy::indexing_slicing, reason = "benches")]
 
 use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair::cram::rans_nx16::decode;
-use seqair::cram::writer::{rans_nx16_encode, rans_nx16_encode_methods};
+use seqair::cram::writer::{rans_nx16_encode, rans_nx16_encode_methods, rans4x8_encode};
 use seqair_types::Pos0;
 use std::hint::black_box;
 
@@ -111,5 +112,37 @@ fn rans_nx16_encode_bench(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, rans_nx16_encode_bench);
+fn rans4x8_encode_bench(c: &mut Criterion) {
+    let (quals, bases) = bam_blocks();
+    let inputs: Vec<(String, Vec<u8>)> = vec![
+        ("qual_4k".into(), quals[..4096].to_vec()),
+        ("qual_64k".into(), quals[..65_536].to_vec()),
+        ("qual_1m".into(), quals[..quals.len().min(1 << 20)].to_vec()),
+        ("bases_64k".into(), bases[..65_536].to_vec()),
+        ("random_64k".into(), random(65_536)),
+    ];
+    for (name, data) in &inputs {
+        let mut group = c.benchmark_group(format!("rans4x8_encode/{name}"));
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        for (order_1, label) in [(false, "o0"), (true, "o1")] {
+            let coded = rans4x8_encode(data, order_1, false).unwrap();
+            assert!(coded == rans4x8_encode(data, order_1, true).unwrap(), "{name} {label}");
+            assert!(seqair::cram::rans::decode(&coded).unwrap() == *data, "{name} {label}");
+            group.bench_function(BenchmarkId::new("reference", label), |b| {
+                b.iter(|| rans4x8_encode(black_box(data), order_1, true).unwrap());
+            });
+            group.bench_function(BenchmarkId::new("fast", label), |b| {
+                b.iter(|| rans4x8_encode(black_box(data), order_1, false).unwrap());
+            });
+            group.bench_function(BenchmarkId::new("htscodecs", label), |b| {
+                b.iter(|| {
+                    htscodecs::rans_compress_4x8(black_box(data), u8::from(order_1)).unwrap()
+                });
+            });
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(benches, rans_nx16_encode_bench, rans4x8_encode_bench);
 criterion_main!(benches);
