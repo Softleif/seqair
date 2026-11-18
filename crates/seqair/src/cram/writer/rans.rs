@@ -16,11 +16,43 @@ pub(super) enum Order {
 const TOTAL: u32 = 4095;
 const LOWER_BOUND: u32 = 1 << 23;
 
-/// A symbol's slot range in a frequency table.
+/// A symbol's slot range in a frequency table, and the reciprocal that
+/// divides by its frequency.
 #[derive(Debug, Clone, Copy, Default)]
 struct Symbol {
     start: u32,
     freq: u32,
+    /// `⌈2^(31+shift) / freq⌉`.
+    rcp: u32,
+    shift: u32,
+}
+
+impl Symbol {
+    /// htscodecs' `RansEncSymbolInit` reciprocal, the state doubled rather
+    /// than the shift lowered so `freq = 1` needs no bias:
+    /// `⌊x / f⌋ = ⌊2x·m / 2^32⌋ >> s` with `s = ⌈log2 f⌉`,
+    /// `m = ⌈2^(31+s) / f⌉`, exact for every `x < 2^31` (the error
+    /// `m·f − 2^(31+s) < f ≤ 2^s`, times `x`, stays below `2^(31+s)`).
+    #[allow(clippy::arithmetic_side_effects, reason = "1 ≤ freq ≤ 4095: s ≤ 12, m < 2^32")]
+    #[allow(clippy::cast_possible_truncation, reason = "m < 2^32")]
+    fn new(start: u32, freq: u32) -> Self {
+        if freq == 0 {
+            return Self { start, freq, rcp: 0, shift: 0 };
+        }
+        let shift = 32 - (freq - 1).leading_zeros();
+        let rcp = ((1u64 << (31 + shift)) + u64::from(freq) - 1) / u64::from(freq);
+        debug_assert!(rcp <= u64::from(u32::MAX));
+        Self { start, freq, rcp: rcp as u32, shift }
+    }
+
+    /// `⌊x / freq⌋` for `x < 2^31`.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation, reason = "the high half of a u64 product")]
+    #[allow(clippy::arithmetic_side_effects, reason = "a u32 times a u32 fits a u64")]
+    fn quotient(self, x: u32) -> u32 {
+        debug_assert!(x < 1 << 31);
+        ((u64::from(x.wrapping_shl(1)) * u64::from(self.rcp)) >> 32) as u32 >> self.shift
+    }
 }
 
 type Table = [Symbol; 256];
@@ -141,18 +173,22 @@ fn encode_order_1(data: &[u8], table: &mut Vec<u8>, rev: &mut Vec<u8>) -> Option
 }
 
 /// `RansEncPutSymbol`: renormalize (bytes written backwards into `rev`),
-/// then encode.
-#[allow(clippy::arithmetic_side_effects, reason = "freq ≥ 1, so the division cannot fail")]
+/// then encode, dividing by the symbol's reciprocal.
+#[inline]
 fn put(x: &mut u32, rev: &mut Vec<u8>, sym: Symbol) {
     debug_assert!(sym.freq > 0, "encoding a symbol without frequency");
-    let freq = sym.freq.max(1);
-    let x_max = ((LOWER_BOUND >> 12) << 8).saturating_mul(freq);
+    let x_max = ((LOWER_BOUND >> 12) << 8).saturating_mul(sym.freq.max(1));
     while *x >= x_max {
         #[allow(clippy::cast_possible_truncation, reason = "the low byte")]
         rev.push(*x as u8);
         *x >>= 8;
     }
-    *x = ((*x / freq) << 12).wrapping_add(*x % freq).wrapping_add(sym.start);
+    // x < 2^31 after renormalization: (q << 12) + x % f + start, as
+    // x + start + q·(4096 − f).
+    let q = sym.quotient(*x);
+    *x = x
+        .wrapping_add(sym.start)
+        .wrapping_add(q.wrapping_mul((1u32 << 12).saturating_sub(sym.freq)));
 }
 
 /// Scale `counts` to frequencies summing to [`TOTAL`], each present symbol
@@ -187,7 +223,7 @@ fn normalize(counts: &[u32; 256]) -> Table {
     let mut table = [Symbol::default(); 256];
     let mut start = 0u32;
     for (sym, &f) in table.iter_mut().zip(&freq) {
-        *sym = Symbol { start, freq: f };
+        *sym = Symbol::new(start, f);
         start = start.saturating_add(f);
     }
     table
@@ -290,6 +326,24 @@ mod tests {
         assert_eq!(table.iter().map(|s| s.freq).sum::<u32>(), TOTAL);
         for (s, &c) in table.iter().zip(&counts) {
             assert_eq!(s.freq > 0, c > 0);
+        }
+    }
+
+    // r[verify cram_writer.rans4x8]
+    /// The reciprocal divides exactly: every frequency, at the states that
+    /// stress it (0, the multiples of `f` and their neighbours, `2^31 − 1`)
+    /// and at drawn ones.
+    #[hegel::test]
+    fn the_reciprocal_divides_exactly(tc: TestCase) {
+        let f = tc.draw(gs::integers::<u32>().min_value(1).max_value(TOTAL));
+        let sym = Symbol::new(0, f);
+        let top = (1u32 << 31) - 1;
+        let k = tc.draw(gs::integers::<u32>().max_value(top / f));
+        let drawn = tc.draw(gs::integers::<u32>().max_value(top));
+        for x in
+            [0, 1, f - 1, f, k * f, (k * f).saturating_sub(1), (k * f + 1).min(top), top, drawn]
+        {
+            assert_eq!(sym.quotient(x), x / f, "x {x}, f {f}");
         }
     }
 
