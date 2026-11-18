@@ -19,6 +19,7 @@ use seqair::bam::stream::BamStreamReader;
 use seqair::cram::stream::CramStreamReader;
 use seqair::cram::writer::{CramVersion, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
+use seqair::io::CompressionLevel;
 use seqair::sam::format::format_sam_record;
 use seqair_types::BaseQuality;
 use std::path::{Path, PathBuf};
@@ -626,10 +627,13 @@ impl Default for Options {
 fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (PathBuf, PathBuf) {
     type Writer = seqair::cram::writer::CramWriter<Vec<u8>>;
     let (header, records) = stream_bam(bam);
-    let write = |threads: usize, f: &dyn Fn(&mut Writer)| {
+    // The comparisons between inputs store blocks raw: the records' bytes
+    // are what they compare, and the codec search dominates a debug build.
+    let write_at = |level: CompressionLevel, threads: usize, f: &dyn Fn(&mut Writer)| {
         let reference = IndexedFastaReader::open(fasta).unwrap();
         let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
             .write_index(true)
+            .compression_level(level)
             .compression_threads(threads)
             .records_per_slice(options.records_per_slice)
             .version(options.version)
@@ -649,6 +653,8 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
             }
         }
     };
+    let write =
+        |threads: usize, f: &dyn Fn(&mut Writer)| write_at(CompressionLevel::Level0, threads, f);
     let raw = write(0, &raw_of(false));
     let owned = write(0, &|w| {
         for r in records {
@@ -685,10 +691,11 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
         }
     });
     assert!(write(0, &raw_of(true)) == stored, "write_store_record and write_raw differ");
+    let (cram, index) = write_at(CompressionLevel::default(), 0, &raw_of(false));
     let path = dir.join("ours.cram");
-    std::fs::write(&path, raw.0).unwrap();
+    std::fs::write(&path, cram).unwrap();
     let crai = dir.join("ours.cram.crai");
-    std::fs::write(&crai, raw.1).unwrap();
+    std::fs::write(&crai, index).unwrap();
     (path, crai)
 }
 

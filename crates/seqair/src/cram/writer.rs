@@ -1,25 +1,81 @@
-//! CRAM 3.0 writer against a reference FASTA, next to
+//! CRAM writer: CRAM 3.1 (or 3.0) against a reference FASTA, next to
 //! [`BamWriter`](crate::bam::BamWriter) and taking the same inputs.
 //!
 //! The writer is the inverse of seqair's CRAM reader: each read is stored as
 //! its differences from the reference, every data series and tag in a block
-//! of its own, one slice per container. Input must be coordinate-sorted.
+//! of its own compressed by whichever codec is smallest, one slice per
+//! container, mates linked within a slice. Input must be coordinate-sorted.
+//! A record CRAM cannot store as it is gets a typed [`CramWriteError`] and
+//! leaves the writer usable; what reads back differently (`=`/`X` CIGAR
+//! operations as `M`, `MD`/`NM` regenerated, …) is listed in the
+//! `r[cram_writer.fidelity]` rule of the spec.
 //!
-//! ```no_run
-//! use seqair::bam::BamHeader;
+//! Records written and read back:
+//!
+//! ```
+//! use seqair::bam::{BamHeader, OwnedBamRecord};
+//! use seqair::bam::cigar::{CigarOp, CigarOpType};
+//! use seqair::cram::stream::CramStreamReader;
 //! use seqair::cram::writer::CramWriterBuilder;
 //! use seqair::fasta::IndexedFastaReader;
-//! use std::path::Path;
+//! use seqair_types::{IupacBase, Pos0};
+//! # let fasta = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+//! #     .join("../../tests/data/unplaced_multiref.fa");
 //!
-//! let header = BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n")?;
-//! let reference = IndexedFastaReader::open(Path::new("ref.fa"))?;
-//! let mut writer = CramWriterBuilder::to_path(Path::new("out.cram"), &header, reference)
+//! // The FASTA's chr1 starts ACGTACGTAC.
+//! let header = BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:200\n@SQ\tSN:chr2\tLN:200\n")?;
+//! let chr1 = header.tid("chr1");
+//! let record = OwnedBamRecord::builder(chr1, Pos0::new(2), b"read1".to_vec())
+//!     .cigar(vec![CigarOp::new(CigarOpType::Match, 6)])
+//!     .seq(IupacBase::from_ascii_slice(b"GTTCGT")) // one substitution
+//!     .build()?;
+//!
+//! let reference = IndexedFastaReader::open(&fasta)?;
+//! let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
 //!     .write_index(true)
 //!     .build()?;
-//! // writer.write(&record)?; …
+//! writer.write(&record)?;
+//! let (cram, index) = writer.finish()?;
+//! assert_eq!(index.map(|i| i.entries().len()), Some(1)); // one slice
+//!
+//! let mut reader = CramStreamReader::new(&cram[..])?;
+//! let mut decoder = reader.decoder(&fasta)?;
+//! let mut records = Vec::new();
+//! while let Some(container) = reader.next_container()? {
+//!     decoder.decode(&container, &mut records)?;
+//! }
+//! assert_eq!(records[0].qname(), b"read1");
+//! assert_eq!(records[0].pos(), Pos0::new(2));
+//! // The decode regenerates MD and NM from the reference.
+//! assert_eq!(records[0].aux().as_bytes(), b"MDZ2A3\0NMC\x01");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A coordinate-sorted BAM rewritten as CRAM, with its index, on four
+//! compression threads (see also `examples/cram_write.rs`):
+//!
+//! ```no_run
+//! use seqair::bam::{BamHeader, RawBamRecord};
+//! use seqair::bam::stream::BamStreamReader;
+//! use seqair::cram::writer::CramWriterBuilder;
+//! use seqair::fasta::IndexedFastaReader;
+//! use std::fs::File;
+//! use std::path::Path;
+//!
+//! let mut bam = BamStreamReader::new(File::open("in.bam")?)?;
+//! let header = BamHeader::from_template(bam.header());
+//! let reference = IndexedFastaReader::open(Path::new("ref.fa"))?;
+//! let mut writer = CramWriterBuilder::to_path(Path::new("out.cram"), &header, reference)
+//!     .compression_threads(4)
+//!     .write_index(true)
+//!     .build()?;
+//! let mut record = RawBamRecord::default();
+//! while bam.read_record(&mut record)? {
+//!     writer.write_raw(&record)?;
+//! }
 //! let (_file, index) = writer.finish()?;
 //! if let Some(index) = index {
-//!     index.write_crai(std::fs::File::create("out.cram.crai")?)?;
+//!     index.write_crai(File::create("out.cram.crai")?)?;
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

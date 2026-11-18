@@ -5,8 +5,9 @@
 //! See [`Readers`] for examples.
 //!
 //! It also includes VCF/BCF writers with type-safe allele representation and
-//! single-pass index co-production.
-//! See [`vcf`] for examples.
+//! single-pass index co-production (see [`vcf`] for examples), a BAM writer
+//! ([`bam::BamWriter`]) and a CRAM 3.0/3.1 writer ([`cram::writer`]), both
+//! of which co-produce their index.
 
 // BAM, CRAM and BCF are little-endian on disk, and the readers and writers
 // view CIGARs, qualities and integer arrays in place as their native types.
