@@ -34,6 +34,7 @@ pub mod tok3;
 #[doc(hidden)]
 pub mod tok3_reference;
 pub mod varint;
+pub mod writer;
 
 pub use index::CramIndexError;
 pub use reader::CramError;

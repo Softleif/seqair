@@ -1751,7 +1751,7 @@ pub(crate) struct MdNm {
 }
 
 impl MdNm {
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         self.md.clear();
         self.nm = 0;
         self.dist = 0;
@@ -1774,7 +1774,7 @@ impl MdNm {
 
     /// `n` implicit matches over `reference` (`None` past its end); a
     /// reference `N` is a mismatch.
-    fn matches(&mut self, reference: Option<&[u8]>, n: usize) {
+    pub(crate) fn matches(&mut self, reference: Option<&[u8]>, n: usize) {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
         match reference {
             Some(bases) => {
@@ -1796,7 +1796,7 @@ impl MdNm {
     }
 
     /// `X`: a substitution of the reference base, `None` past its end.
-    fn substitution(&mut self, ref_base: Option<u8>) {
+    pub(crate) fn substitution(&mut self, ref_base: Option<u8>) {
         match ref_base {
             Some(b) => self.mismatch(ref_ascii(b)),
             None => {
@@ -1807,7 +1807,7 @@ impl MdNm {
     }
 
     /// `B`: a read base stored as it is, a mismatch wherever it lies.
-    fn read_base(&mut self, ref_base: Option<u8>) {
+    pub(crate) fn read_base(&mut self, ref_base: Option<u8>) {
         self.flush();
         match ref_base {
             Some(b) => {
@@ -1837,7 +1837,7 @@ impl MdNm {
         self.dist = 0;
     }
 
-    fn deletion(&mut self, reference: &[u8], start: usize, n: usize) {
+    pub(crate) fn deletion(&mut self, reference: &[u8], start: usize, n: usize) {
         self.flush();
         let Some(have) = reference.get(start..) else {
             self.dist = -1;
@@ -1855,8 +1855,14 @@ impl MdNm {
         }
     }
 
-    fn insertion(&mut self, n: usize) {
+    pub(crate) fn insertion(&mut self, n: usize) {
         self.nm = self.nm.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+
+    /// The read's `MD` value and `NM`, once its features are applied.
+    pub(crate) fn finish(&mut self) -> (&[u8], u32) {
+        self.flush();
+        (&self.md, self.nm)
     }
 
     /// Append the tags that are wanted, `MD:Z` then `NM` as the smallest

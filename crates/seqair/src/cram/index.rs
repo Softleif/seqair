@@ -117,7 +117,7 @@ impl CramIndex {
         Ok(Self::from_entries(entries))
     }
 
-    fn from_entries(mut entries: Vec<CraiEntry>) -> Self {
+    pub(crate) fn from_entries(mut entries: Vec<CraiEntry>) -> Self {
         entries.sort_by_key(|e| (e.ref_id, e.start0()));
         let mut reach = Vec::with_capacity(entries.len());
         let mut previous: Option<(Option<u32>, u64)> = None;
@@ -128,6 +128,30 @@ impl CramIndex {
             previous = Some((e.ref_id, furthest));
         }
         CramIndex { entries, reach }
+    }
+
+    // r[impl cram_writer.crai]
+    /// Write the index as a `.crai` file: gzip-compressed, one tab-separated
+    /// line per slice, as `samtools index` writes it.
+    ///
+    /// # Errors
+    /// Errors writing to `out`.
+    pub fn write_crai(&self, out: impl std::io::Write) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+        for e in &self.entries {
+            let ref_id = e.ref_id.map_or(-1, i64::from);
+            writeln!(
+                gz,
+                "{ref_id}\t{}\t{}\t{}\t{}\t{}",
+                e.alignment_start,
+                e.alignment_span,
+                e.container_offset,
+                e.slice_offset,
+                e.slice_size
+            )?;
+        }
+        gz.finish()?.flush()
     }
 
     /// Find all index entries whose range overlaps the 0-based inclusive region

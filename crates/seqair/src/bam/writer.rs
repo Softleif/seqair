@@ -413,13 +413,13 @@ impl<W: Write> BamWriter<W> {
 /// [`BamWriterBuilder::build`].
 #[derive(Debug)]
 pub struct ToPath<'a> {
-    path: &'a Path,
+    pub(crate) path: &'a Path,
 }
 
 /// Target marker: writer targets a caller-supplied [`Write`] sink.
 #[derive(Debug)]
 pub struct ToWriter<W> {
-    writer: W,
+    pub(crate) writer: W,
 }
 
 /// Configuration builder for [`BamWriter`].

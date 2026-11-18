@@ -60,10 +60,13 @@ r[cram_writer.slice_header]
 The slice header MUST give the slice's reference id, alignment start and span, record count, record counter, block count (the core block and every external block), the content ids of its external blocks, embedded reference `-1`, and the MD5 of the uppercased reference bases over its extent — sixteen zero bytes for a slice of unplaced records or one written without the reference.
 
 r[cram_writer.blocks]
-Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. An external block MUST be written for each data series and tag the slice uses, and only for those; the compression header lists encodings for exactly those series.
+Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. An external block MUST be written for each data series and tag that has data in the slice, and only for those. The compression header MUST list an encoding for every data series all the same: htslib's decoder refuses a slice that lacks the encoding of a series it reads, even when it reads nothing of it (`QS` for a record without bases), and finds an absent block empty.
 
 r[cram_writer.compression]
-Each block's data MUST be stored by whichever of the writer's codecs gives the fewest bytes, raw included; phase 1 offers gzip (at the builder's `compression_level`) and rANS 4×8 order 0 and order 1 (`r[cram_writer.rans4x8]`). The choice is per block and changes no decoded byte.
+Each block's data MUST be stored by whichever of the writer's codecs gives the fewest bytes, raw included; phase 1 offers gzip (at the builder's `compression_level`) and rANS 4×8 order 0 and order 1 (`r[cram_writer.threads]
+`CramWriterBuilder::compression_threads(n)` MUST assemble and compress containers on `n` worker threads while the calling thread encodes the next slice, and write them in order; `n = 0` (the default) does it on the calling thread. The file and its index MUST be byte for byte those of the single-threaded writer: a slice's content and its codec choices depend on its records only.
+
+r[cram_writer.rans4x8]`). The choice is per block and changes no decoded byte.
 
 r[cram_writer.rans4x8]
 The rANS 4×8 encoder MUST write streams `r[cram.codec.rans4x8]` decodes to the input, order 0 and order 1, with each table's frequencies summing to 4095, as htscodecs normalizes them (its decoder takes 4095 or 4096), every present symbol at least 1. Order 1 needs four bytes at least; a block too small for it is not tried with it. The decoder is its oracle: every input MUST round-trip.
@@ -124,6 +127,9 @@ A slice on a reference the FASTA lacks MUST be written without it (`RR` false): 
 
 r[cram_writer.md_nm]
 The writer MUST drop a record's `MD:Z` tag when it is byte for byte the `MD` a decode generates from the stored features (`r[cram.stream.md_nm]`), and its `NM` tag when its value is the generated `NM`; otherwise it keeps them. No tag is generated, so none is dropped, for an unmapped record, SEQ `*`, or a slice without the reference.
+
+r[cram_writer.md_nm.past_reference_end]
+A record with a deletion that runs past its reference's end MUST keep `MD` and `NM` as they are, and MUST flag the ones it lacks in a `cF:C` tag (bit 1 `MD`, bit 2 `NM`), htslib's private flags, which every reader drops (`r[cram.record.cf_tag]`). htslib's decoder fails such a record whenever it generates either tag ("CRAM CIGAR extends beyond slice reference extents"), even in files htslib wrote.
 
 ## Fidelity
 
