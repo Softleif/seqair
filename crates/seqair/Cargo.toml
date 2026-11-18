@@ -120,5 +120,9 @@ harness = false
 name = "fqzcomp"
 harness = false
 
+[[bench]]
+name = "cram_encode"
+harness = false
+
 [lints]
 workspace = true
