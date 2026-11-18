@@ -43,9 +43,11 @@ fn svlen_on_ref(alt: &[u8]) -> bool {
 }
 
 /// An integer as htslib reads one for the length: `.`, anything that does
-/// not parse and anything outside `i32` count as 0.
+/// not parse, and anything outside `i32` or in BCF's reserved band below
+/// `i32::MIN + 8` (htslib stores those as missing) count as 0.
 fn int_or_zero(token: &[u8]) -> i64 {
-    parse_i32(token).ok().flatten().map_or(0, i64::from)
+    let reserved = i32::MIN.saturating_add(8);
+    parse_i32(token).ok().flatten().filter(|&v| v >= reserved).map_or(0, i64::from)
 }
 
 /// The columns [`text_rlen`] reads.
