@@ -327,10 +327,10 @@ fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
     reason = "counts ≤ data.len() < 2^32; each quarter start was counted once as a pair"
 )]
 fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], level: Level) -> Vec<u8> {
+    // Only the first table can hold counts: the merge below empties the
+    // others' rows of every context it touched.
     for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
-        for c in &mut o1.counts {
-            c[ctx << 8..][..256].fill(0);
-        }
+        o1.counts[0][ctx << 8..][..256].fill(0);
         *dirty = false;
     }
     let counts = &mut *o1.counts;
