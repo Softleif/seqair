@@ -152,7 +152,12 @@ fn build(read: &Read, refs: &[Vec<u8>; 2], header: &BamHeader, i: usize) -> Opti
         }
     } else {
         let n = read.bases.len().min(60);
-        seq.extend(read.bases.iter().take(n).map(|&b| IupacBase::from_ascii(READ_LETTERS[usize::from(b) % 16])));
+        seq.extend(
+            read.bases
+                .iter()
+                .take(n)
+                .map(|&b| IupacBase::from_ascii(READ_LETTERS[usize::from(b) % 16])),
+        );
     }
     if read.bases.first() == Some(&255) {
         seq.clear(); // SEQ `*`
@@ -173,7 +178,8 @@ fn build(read: &Read, refs: &[Vec<u8>; 2], header: &BamHeader, i: usize) -> Opti
         template_len: NonZeroI32::new(t),
     });
     // Neighbours without a drawn name share one, so the writer may attach them.
-    let mut name = if read.name.is_empty() { format!("p{}", i / 2) } else { format!("r{i}_") }.into_bytes();
+    let mut name =
+        if read.name.is_empty() { format!("p{}", i / 2) } else { format!("r{i}_") }.into_bytes();
     name.extend(read.name.iter().take(20).map(|b| b % 94 + b'!').filter(|&b| b != b'@'));
     let record = OwnedBamRecord {
         tid,
@@ -219,7 +225,12 @@ fuzz_target!(|input: Input| {
     let dir = tempfile::tempdir().unwrap();
     let contigs = [("c0".to_string(), refs[0].clone()), ("c1".to_string(), refs[1].clone())];
     let fasta = cram_roundtrip::write_fasta(dir.path(), &contigs);
-    let rps = u32::from(input.records_per_slice % 8).max(1) * if input.records_per_slice > 128 { 10_000 } else { 1 };
-    let version = if input.threads & 0x80 == 0 { CramVersion::V3_1(CramProfile::Normal) } else { CramVersion::V3_0 };
+    let rps = u32::from(input.records_per_slice % 8).max(1)
+        * if input.records_per_slice > 128 { 10_000 } else { 1 };
+    let version = match input.threads >> 6 {
+        0 | 1 => CramVersion::V3_1(CramProfile::Normal),
+        2 => CramVersion::V3_1(CramProfile::Archive),
+        _ => CramVersion::V3_0,
+    };
     cram_roundtrip::check(&header, &fasta, &records, usize::from(input.threads % 3), rps, version);
 });
