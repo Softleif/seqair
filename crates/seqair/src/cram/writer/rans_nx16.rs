@@ -310,7 +310,8 @@ fn pack_with(data: &[u8], counts: &[u32; 256]) -> Option<(Vec<u8>, Vec<u8>)> {
         3 | 4 => 4,
         _ => 2,
     };
-    Some((meta, pack_indices(data, &code, per_byte)))
+    let packed = simd::pack_indices(Level::new(), data, meta.get(1..)?, &code, per_byte);
+    Some((meta, packed))
 }
 
 /// htscodecs' `hts_rle_encode`: the metadata (the run symbols, as a count
@@ -951,6 +952,44 @@ mod tests {
             })
             .collect();
         assert_eq!(pack_indices(&data, &code, per_byte), want);
+    }
+
+    // r[verify cram_writer.rans_nx16.simd]
+    // r[verify io.simd_portable]
+    /// The PACK kernel's bytes at every level, for symbols close together
+    /// (a table) and spread out (a count of the symbols below), against
+    /// packing symbol by symbol.
+    #[hegel::test]
+    fn the_pack_kernel_packs_symbol_by_symbol(tc: TestCase) {
+        let base: u8 = tc.draw(gs::integers::<u8>());
+        let spread: u16 = tc.draw(gs::integers::<u16>().min_value(1).max_value(256));
+        let n: usize = tc.draw(gs::integers::<usize>().min_value(1).max_value(16));
+        let mut syms: Vec<u8> = (0..n)
+            .map(|_| base.wrapping_add((tc.draw(gs::integers::<u16>()) % spread) as u8))
+            .collect();
+        syms.sort_unstable();
+        syms.dedup();
+        let data: Vec<u8> =
+            draw_data(&tc).iter().map(|&b| syms[usize::from(b) % syms.len()]).collect();
+        let per_byte = match syms.len() {
+            ..=2 => 8,
+            3 | 4 => 4,
+            _ => 2,
+        };
+        let bits = 8 / per_byte;
+        let index = |b: u8| syms.iter().position(|&s| s == b).unwrap() as u8;
+        let want: Vec<u8> = data
+            .chunks(per_byte)
+            .map(|c| c.iter().enumerate().fold(0, |byte, (k, &b)| byte | index(b) << (k * bits)))
+            .collect();
+        let mut code = [0u8; 256];
+        for &s in &syms {
+            code[usize::from(s)] = index(s);
+        }
+        for level in crate::simd_levels::levels() {
+            let got = simd::pack_indices(level, &data, &syms, &code, per_byte);
+            assert!(got == want, "{level:?}: {syms:?}, {per_byte} a byte, {} bytes", data.len());
+        }
     }
 
     #[hegel::test]
