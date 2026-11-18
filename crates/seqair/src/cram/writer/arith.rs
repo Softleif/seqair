@@ -79,7 +79,6 @@ impl ArithFlags {
 
 /// The combinations htslib tries for a block above compression level 1
 /// (`ARITH_PR0`, `PR64`, `PR128`, `PR192`, `PR1`, `PR9`, `PR129`, `PR193`).
-#[allow(dead_code, reason = "the writer's codec choice plumbs the profile in")]
 pub(super) const PROFILE: [ArithFlags; 8] = [
     ArithFlags::from_byte(0),
     ArithFlags::from_byte(FLAG_RLE),
@@ -93,7 +92,6 @@ pub(super) const PROFILE: [ArithFlags; 8] = [
 
 /// `data` as an arithmetic coder stream, or `None` when it is too large for
 /// the format's sizes (htscodecs refuses more than `i32::MAX` bytes).
-#[allow(dead_code, reason = "the writer's codec choice plumbs the encoder in")]
 pub(super) fn encode(data: &[u8], flags: ArithFlags) -> Option<Vec<u8>> {
     i32::try_from(data.len()).ok()?;
     if flags.stripe && data.len() > STRIPE_MIN {

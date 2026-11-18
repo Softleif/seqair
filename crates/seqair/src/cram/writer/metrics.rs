@@ -33,10 +33,15 @@ pub(super) enum Method {
     Rans4x8Order1,
     Nx16(u8),
     Tok3,
+    /// An entry of [`super::arith::PROFILE`].
+    Arith(u8),
+    /// An entry of [`super::fqzcomp::Strategy::ALL`].
+    Fqz(u8),
 }
 
 /// A total order on methods, for ties: raw, then the rANS codecs, then
-/// gzip and the name tokeniser, which cost more to decode.
+/// gzip and the name tokeniser, then the arithmetic coder and fqzcomp, each
+/// slower to decode than the one before.
 pub(super) fn rank(method: Method) -> u16 {
     match method {
         Method::Raw => 0,
@@ -45,6 +50,8 @@ pub(super) fn rank(method: Method) -> u16 {
         Method::Nx16(i) => 3_u16.saturating_add(u16::from(i)),
         Method::Gzip => 300,
         Method::Tok3 => 301,
+        Method::Arith(i) => 400_u16.saturating_add(u16::from(i)),
+        Method::Fqz(i) => 500_u16.saturating_add(u16::from(i)),
     }
 }
 

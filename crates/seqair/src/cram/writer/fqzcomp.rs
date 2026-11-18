@@ -44,7 +44,6 @@ pub(super) enum Strategy {
 }
 
 impl Strategy {
-    #[allow(dead_code, reason = "the writer's codec choice plumbs the strategies in")]
     pub(super) const ALL: [Self; 4] = [Self::Fqz, Self::FqzB, Self::FqzC, Self::FqzD];
 
     /// htscodecs' `strat_opts` row: qbits, qshift, pbits, pshift, dbits,
@@ -63,7 +62,6 @@ impl Strategy {
 /// stream picked and coded with `strategy`. `None` when the records' lengths
 /// do not add up to the qualities, or the block is too large for the
 /// format's sizes.
-#[allow(dead_code, reason = "the writer's codec choice plumbs the encoder in")]
 pub(super) fn encode(
     qualities: &[u8],
     records: &[QualRecord],

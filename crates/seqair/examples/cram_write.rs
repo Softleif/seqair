@@ -2,13 +2,13 @@
 //! time both.
 //!
 //! ```text
-//! cargo run --release --example cram_write -- in.bam ref.fa out.cram [threads] [3.0|3.1]
+//! cargo run --release --example cram_write -- in.bam ref.fa out.cram [threads] [3.0|3.1|archive]
 //! ```
 #![allow(clippy::print_stdout, reason = "example output")]
 
 use seqair::bam::BamWriterBuilder;
 use seqair::bam::stream::BamStreamReader;
-use seqair::cram::writer::{CramVersion, CramWriterBuilder};
+use seqair::cram::writer::{CramProfile, CramVersion, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -20,8 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let threads: usize = args.next().map_or(Ok(0), |t| t.to_string_lossy().parse())?;
     let version = match args.next().as_deref().and_then(|v| v.to_str()) {
-        None | Some("3.1") => CramVersion::V3_1,
+        None | Some("3.1") => CramVersion::V3_1(CramProfile::Normal),
         Some("3.0") => CramVersion::V3_0,
+        Some("archive") => CramVersion::V3_1(CramProfile::Archive),
         Some(other) => return Err(format!("unknown CRAM version {other}").into()),
     };
 

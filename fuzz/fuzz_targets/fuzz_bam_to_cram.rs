@@ -6,7 +6,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use seqair::bam::stream::BamStreamReader;
-use seqair::cram::writer::CramVersion;
+use seqair::cram::writer::{CramProfile, CramVersion};
 use seqair_fuzz::cram_roundtrip;
 
 fuzz_target!(|data: &[u8]| {
@@ -30,5 +30,5 @@ fuzz_target!(|data: &[u8]| {
     }
     let dir = tempfile::tempdir().unwrap();
     let fasta = cram_roundtrip::write_fasta(dir.path(), &contigs);
-    cram_roundtrip::check(&header, &fasta, &records, 0, 10_000, CramVersion::V3_1);
+    cram_roundtrip::check(&header, &fasta, &records, 0, 10_000, CramVersion::V3_1(CramProfile::Normal));
 });
