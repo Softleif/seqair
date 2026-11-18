@@ -12,7 +12,7 @@ use crate::bam::mate::MateFields;
 use crate::cram::compression_header::SubstitutionMatrix;
 use crate::cram::slice::MdNm;
 use crate::reader::Tid;
-use seqair_types::{BamFlags, IupacBase, MappingQuality, Pos0};
+use seqair_types::{BamFlags, IupacBase, MappingQuality, Pos0, SmallVec};
 
 /// Where a record sits in the sort order: its reference and position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,10 @@ pub(super) struct Checked {
     has_nm: bool,
     /// An unmapped record whose CIGAR or MAPQ is not stored.
     pub drops_alignment: bool,
+    /// Where each tag ends in the record's aux bytes (the next starts
+    /// there), as `check` found them, so `encode` need not parse the values
+    /// again: a string's end is a scan for its NUL.
+    tag_ends: SmallVec<u32, 8>,
 }
 
 /// One aux tag's bytes.
@@ -80,6 +84,8 @@ struct Tag<'a> {
     value: &'a [u8],
     /// A `Z` or `H` value holds a TAB (before its NUL).
     tab: bool,
+    /// The offset in the aux bytes just past the value.
+    end: usize,
 }
 
 /// A `Z`/`H` value's length up to its NUL (`None` without one) and whether
@@ -130,7 +136,7 @@ fn tags(aux: &[u8]) -> impl Iterator<Item = Result<Tag<'_>, CramWriteError>> {
             return Some(Err(CramWriteError::InvalidAux));
         };
         pos = end;
-        Some(Ok(Tag { head, value: aux.get(start..end).unwrap_or_default(), tab }))
+        Some(Ok(Tag { head, value: aux.get(start..end).unwrap_or_default(), tab, end }))
     })
 }
 
@@ -217,8 +223,12 @@ pub(super) fn check(
         .map_err(|_| CramWriteError::ValueTooLarge { what: "read length", value: read_len })?;
 
     let (mut has_md, mut has_nm) = (false, false);
+    let mut tag_ends = SmallVec::new();
     for tag in tags(view.aux) {
-        let Tag { head: [a, b, ty], tab, .. } = tag?;
+        let Tag { head: [a, b, ty], tab, end, .. } = tag?;
+        let end = u32::try_from(end)
+            .map_err(|_| CramWriteError::ValueTooLarge { what: "aux data", value: end as u64 })?;
+        tag_ends.push(end);
         let name = AuxTag([a, b]);
         // The tag dictionary is NUL-separated; SAM allows no other names.
         if !a.is_ascii_alphabetic() || !b.is_ascii_alphanumeric() {
@@ -248,6 +258,19 @@ pub(super) fn check(
         has_md,
         has_nm,
         drops_alignment,
+        tag_ends,
+    })
+}
+
+/// The tags `check` found in `aux`, without parsing their values again.
+fn checked_tags<'a>(aux: &'a [u8], ends: &'a [u32]) -> impl Iterator<Item = Tag<'a>> + 'a {
+    let mut start = 0usize;
+    ends.iter().filter_map(move |&end| {
+        let end = usize::try_from(end).ok()?;
+        let tag = aux.get(start..end)?;
+        let (&[a, b, ty], value) = tag.split_first_chunk::<3>()?;
+        start = end;
+        Some(Tag { head: [a, b, ty], value, tab: false, end })
     })
 }
 
@@ -408,7 +431,7 @@ pub(super) fn encode(
     let mut read_group = -1;
     let line = &mut scratch.line;
     line.clear();
-    for tag in tags(view.aux).map_while(Result::ok) {
+    for tag in checked_tags(view.aux, &checked.tag_ends) {
         let [a, b, ty] = tag.head;
         let drop = match &[a, b] {
             b"RG" if ty == b'Z' && read_group < 0 => {
