@@ -89,7 +89,8 @@ The tok3 encoder (CRAM 3.1 name tokeniser, method 8, [CRAMcodecs] §6) MUST writ
 ## Compression header
 
 r[cram_writer.preservation_map]
-The preservation map MUST give `RN` true, `AP` true (positions are deltas), `RR` true for a slice written against the reference and false otherwise, `SM` the substitution matrix `r[cram_writer.substitution]` uses, and `TD` the slice's tag lines in the order of their first use.
+The preservation map MUST give `RN` true, `AP` true (positions are deltas), `RR` true for a slice written against the reference and false otherwise, `SM` the substitution matrix `r[cram_writer.substitution+2]
+A mismatching read base MUST be an `X` feature (`BS`) when the read base is `A`, `C`, `G` or `T`, or is `N` against an `A`, `C`, `G` or `T`, and otherwise a `B` feature (`BA` and its quality in `QS`), as htslib chooses. The substitution matrix MUST be the slice's own: for each reference base, codes 0–3 name the other bases from the one the slice substitutes for it most often to the least, ties in the order `ACGTN` lists them, so the commonest substitutions (a C→T conversion, say) all store code 0 and `BS` compresses to little. A reference base other than `ACGT` uses the `N` row, as the decoder does. htslib writes one fixed matrix.
 
 r[cram_writer.data_series]
 Every data series MUST be encoded `EXTERNAL`, each in a block of its own content id. `RN`, `IN` and `SC` MUST be `BYTE_ARRAY_STOP` with stop byte 0; `BB` MUST be `BYTE_ARRAY_LEN` with external length and external bytes, in two blocks.
