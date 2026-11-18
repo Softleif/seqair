@@ -2,13 +2,13 @@
 //! time both.
 //!
 //! ```text
-//! cargo run --release --example cram_write -- in.bam ref.fa out.cram [threads]
+//! cargo run --release --example cram_write -- in.bam ref.fa out.cram [threads] [3.0|3.1]
 //! ```
 #![allow(clippy::print_stdout, reason = "example output")]
 
 use seqair::bam::BamWriterBuilder;
 use seqair::bam::stream::BamStreamReader;
-use seqair::cram::writer::CramWriterBuilder;
+use seqair::cram::writer::{CramVersion, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -19,6 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: cram_write <in.bam> <ref.fa> <out.cram> [threads]".into());
     };
     let threads: usize = args.next().map_or(Ok(0), |t| t.to_string_lossy().parse())?;
+    let version = match args.next().as_deref().and_then(|v| v.to_str()) {
+        None | Some("3.1") => CramVersion::V3_1,
+        Some("3.0") => CramVersion::V3_0,
+        Some(other) => return Err(format!("unknown CRAM version {other}").into()),
+    };
 
     let mut reader = BamStreamReader::new(std::fs::File::open(&bam)?)?;
     let records = reader.records().collect::<Result<Vec<_>, _>>()?;
@@ -27,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut writer = CramWriterBuilder::to_path(&cram, &header, IndexedFastaReader::open(&fasta)?)
         .compression_threads(threads)
+        .version(version)
         .build()?;
     let built = start.elapsed();
     for record in &records {
