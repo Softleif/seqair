@@ -267,6 +267,7 @@ pub(super) fn encode(
     slice.int(Series::Rl, checked.read_len);
     slice.begin_record(kind, pos1, checked.read_len);
     slice.reach(checked.end);
+    slice.reference_id(view.tid, pos1, if unmapped { pos1 } else { pos1.max(checked.end) });
 
     let name_start = slice.len(Series::Rn);
     slice.bytes(Series::Rn, view.qname);

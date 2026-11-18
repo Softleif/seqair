@@ -436,7 +436,7 @@ fn archive_slices_are_larger() {
     assert!(normal > archive, "{normal} vs {archive}");
 }
 
-// r[verify cram_writer.crai]
+// r[verify cram_writer.crai+2]
 /// The index the writer builds is the one `samtools index` builds for its
 /// output, and seqair's indexed reader queries the file with it.
 #[test]
@@ -487,7 +487,9 @@ use seqair::bam::{AuxData, RecordStore};
 use seqair_types::IupacBase;
 use std::fmt::Write as _;
 
-const CONTIGS: [(&str, usize); 2] = [("chr1", 3000), ("chr2", 1500)];
+/// Several, so that slices of few records switch the writer to
+/// multi-reference slices (`r[cram_writer.multi_ref]`).
+const CONTIGS: [(&str, usize); 4] = [("chr1", 3000), ("chr2", 1500), ("chr3", 700), ("chr4", 400)];
 
 /// xorshift, for bases: their values shrink to nothing useful.
 struct Rng(u64);
@@ -537,7 +539,8 @@ fn reference_bases(rng: &mut Rng) -> Vec<Vec<u8>> {
 fn write_fasta(dir: &Path, refs: &[Vec<u8>]) -> PathBuf {
     let path = dir.join("ref.fa");
     let mut text = String::new();
-    for ((name, _), bases) in CONTIGS.iter().zip(refs) {
+    // An empty one is left out.
+    for ((name, _), bases) in CONTIGS.iter().zip(refs).filter(|(_, b)| !b.is_empty()) {
         writeln!(text, ">{name}").unwrap();
         for line in bases.chunks(60) {
             writeln!(text, "{}", std::str::from_utf8(line).unwrap()).unwrap();
@@ -760,13 +763,14 @@ fn normalized(line: &str) -> String {
 struct Options {
     records_per_slice: u32,
     version: CramVersion,
-    /// The FASTA the CRAM is written against lacks `chr2`.
-    lacks_chr2: bool,
+    /// The FASTA the CRAM is written against lacks `chr4`, the last
+    /// reference, which a multi-reference slice of the others ends before.
+    lacks_chr4: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { records_per_slice: 10_000, version: CramVersion::default(), lacks_chr2: false }
+        Self { records_per_slice: 10_000, version: CramVersion::default(), lacks_chr4: false }
     }
 }
 
@@ -858,17 +862,17 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
 // r[verify cram_writer.record.read_group]
 // r[verify cram_writer.record.unmapped]
 // r[verify cram_writer.record.mate]
-// r[verify cram_writer.mates]
+// r[verify cram_writer.mates+2]
 // r[verify cram_writer.record.order]
 // r[verify cram_writer.record.flags]
 // r[verify cram_writer.record.position]
 // r[verify cram_writer.record.quality]
 // r[verify cram_writer.record.mapq]
 // r[verify cram_writer.slicing+2]
-// r[verify cram_writer.container_header]
-// r[verify cram_writer.slice_header]
-// r[verify cram_writer.slice_extent]
-// r[verify cram_writer.preservation_map]
+// r[verify cram_writer.container_header+2]
+// r[verify cram_writer.slice_header+2]
+// r[verify cram_writer.slice_extent+2]
+// r[verify cram_writer.preservation_map+2]
 // r[verify cram_writer.data_series+2]
 /// Drawn reads written by seqair read back as samtools' CRAM 3.0 of them
 /// does, through samtools and through seqair; and every input writes the
@@ -898,7 +902,7 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
             CramVersion::V3_1(CramProfile::Normal),
             CramVersion::V3_1(CramProfile::Archive),
         ])),
-        lacks_chr2: tc.draw(gs::booleans()),
+        lacks_chr4: tc.draw(gs::booleans()),
     };
     let calmd = tc.draw(gs::booleans());
     let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, calmd, options);
@@ -947,9 +951,14 @@ fn assert_reads_back_as_samtools_cram_does(
     let dir = tempfile::tempdir().unwrap();
     let full = tempfile::tempdir().unwrap();
     let full_fasta = write_fasta(full.path(), refs);
-    // Without chr2, its slices embed a reference built from their reads.
-    let fasta =
-        if options.lacks_chr2 { write_fasta(dir.path(), &refs[..1]) } else { full_fasta.clone() };
+    // Without chr4, its slices embed a reference built from their reads.
+    let fasta = if options.lacks_chr4 {
+        let mut lacking = refs.to_vec();
+        lacking[3].clear();
+        write_fasta(dir.path(), &lacking)
+    } else {
+        full_fasta.clone()
+    };
     let sam = dir.path().join("in.sam");
     std::fs::write(&sam, header_text() + records).unwrap();
     let mut bam = dir.path().join("in.bam");
@@ -966,7 +975,7 @@ fn assert_reads_back_as_samtools_cram_does(
     }
 
     let (ours, crai) = write_each_way(dir.path(), &bam, &fasta, options);
-    // r[verify cram_writer.crai]
+    // r[verify cram_writer.crai+2]
     let samtools_crai = dir.path().join("samtools.crai");
     samtools(&["index", "-o", samtools_crai.to_str().unwrap(), ours.to_str().unwrap()]);
     assert_eq!(crai_lines(&crai), crai_lines(&samtools_crai), "the index is samtools index's");
@@ -1006,17 +1015,17 @@ fn assert_reads_back_as_samtools_cram_does(
         assert!(stderr.contains("beyond slice reference extents"), "{stderr}");
         return false;
     }
-    // A chr2 record without MD/NM reads back without them when chr2's slice
+    // A chr4 record without MD/NM reads back without them when chr4's slice
     // embeds its reference (`r[cram_writer.embedded_reference.md_nm]`),
-    // where htslib generates them from the FASTA's chr2.
+    // where htslib generates them from the FASTA's chr4.
     let input = samtools_lines(&bam, &full_fasta);
     let expected: Vec<String> = String::from_utf8(theirs_read.stdout)
         .unwrap()
         .lines()
         .zip(&input)
         .map(|(line, input)| {
-            let on_chr2 = line.split('\t').nth(2) == Some("chr2");
-            if !(options.lacks_chr2 && on_chr2) {
+            let on_chr4 = line.split('\t').nth(2) == Some("chr4");
+            if !(options.lacks_chr4 && on_chr4) {
                 return normalized(line);
             }
             let generated = |tag: &str| {
@@ -1192,6 +1201,69 @@ fn a_reference_the_fasta_lacks_without_aligned_bases_is_written_without_it() {
     assert!(!embeds_a_reference(&ours));
 }
 
+// r[verify cram_writer.multi_ref]
+// r[verify cram_writer.multi_ref.records]
+// r[verify cram_writer.crai+2]
+// r[verify cram_writer.slicing+2]
+/// One read each on chr1 and chr2 makes two small slices; the next slices
+/// hold several references, chr3's reads and chr4's, until a full slice of
+/// chr4's alone switches multi-reference slices off again. Read back through
+/// samtools, seqair and noodles as samtools' own CRAM, indexed as
+/// `samtools index` indexes it.
+#[test]
+fn few_reads_on_many_references_share_slices() {
+    let refs = reference_bases(&mut Rng(9));
+    let read = |name: String, contig: usize, pos: usize| {
+        let (rname, len) = CONTIGS[contig];
+        let pos = pos % (len - 10);
+        let bases = std::str::from_utf8(&refs[contig][pos..pos + 10]).unwrap().to_ascii_uppercase();
+        format!("{name}\t0\t{rname}\t{}\t60\t10M\t*\t0\t0\t{bases}\t*\n", pos + 1)
+    };
+    let mut text = read("a".into(), 0, 5) + &read("b".into(), 1, 5);
+    text += &read("c1".into(), 2, 5);
+    text += &read("c2".into(), 2, 9);
+    for i in 0..80 {
+        text += &read(format!("d{i}"), 3, 3 * i);
+    }
+    text += "u1\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\t*\nu2\t4\t*\t0\t0\t*\t*\t0\t0\tAC\t*\n";
+    // Slices of at most 40 records are small below 4.
+    let options = Options { records_per_slice: 40, ..Options::default() };
+    assert!(assert_reads_back_as_samtools_cram_does(&refs, &text, true, options));
+
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = write_fasta(dir.path(), &refs);
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, header_text() + &text).unwrap();
+    let bam = dir.path().join("in.bam");
+    samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
+    let (_, crai) = write_each_way(dir.path(), &bam, &fasta, options);
+    // Reference id, and the container's offset.
+    let entries: Vec<(String, String)> = crai_lines(&crai)
+        .iter()
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f[0].to_owned(), f[3].to_owned())
+        })
+        .collect();
+    let refs_by_container: Vec<Vec<&str>> = entries
+        .chunk_by(|a, b| a.1 == b.1)
+        .map(|c| c.iter().map(|(r, _)| r.as_str()).collect())
+        .collect();
+    assert_eq!(
+        refs_by_container,
+        [
+            vec!["0"],
+            vec!["1"],
+            // Multi-reference from here, until 40 records of chr4 alone.
+            vec!["2", "3"],
+            vec!["3"],
+            vec!["3"],
+            // Unplaced records are never in one.
+            vec!["-1"],
+        ]
+    );
+}
+
 /// The block sizes `samtools cram-size -v` reports for `series` in `cram`.
 fn series_bytes(cram: &Path, series: &str) -> usize {
     samtools(&["cram-size", "-v", cram.to_str().unwrap()])
@@ -1201,7 +1273,7 @@ fn series_bytes(cram: &Path, series: &str) -> usize {
         .sum()
 }
 
-// r[verify cram_writer.mates]
+// r[verify cram_writer.mates+2]
 /// Pairs the decode rebuilds are attached and read back as they were
 /// through samtools, seqair and noodles; others detached. Attachment shows
 /// as a `CF` block: the first of a pair has `CF` 0x5, the second 0x1, where

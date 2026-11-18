@@ -55,7 +55,7 @@ enum Link {
     Upstream,
 }
 
-// r[impl cram_writer.mates]
+// r[impl cram_writer.mates+2]
 /// `CF` and the mate series of `records`, whose names are in `names` (the
 /// `RN` block).
 pub(super) fn series(records: &[MateRecord], names: &[u8]) -> MateSeries {
@@ -127,10 +127,12 @@ pub(super) fn series(records: &[MateRecord], names: &[u8]) -> MateSeries {
 /// (htslib's CRAM flag `0x10` is CRAM 4's), so a pair that would need one
 /// is detached.
 ///
-/// Both must be mapped: for a pair with an unmapped read, noodles computes
+/// Both must be mapped on one reference: for a pair with an unmapped read,
+/// or one across references (in a multi-reference slice), noodles computes
 /// a TLEN where htslib and seqair give 0.
 fn rebuilds(a: &MateRecord, b: &MateRecord) -> bool {
-    if a.flags.is_unmapped() || b.flags.is_unmapped() {
+    // htslib's decode gives a pair across references TLEN 0, noodles one.
+    if a.flags.is_unmapped() || b.flags.is_unmapped() || a.tid != b.tid {
         return false;
     }
     let start = |r: &MateRecord| r.pos.map_or(-1, Pos0::as_i64);
@@ -195,7 +197,7 @@ mod tests {
         }
     }
 
-    // r[verify cram_writer.mates]
+    // r[verify cram_writer.mates+2]
     /// A pair whose fields the decode rebuilds is attached: the first record
     /// downstream, nothing detached. A wrong PNEXT or a TLEN the decode
     /// would compute otherwise keeps both detached.

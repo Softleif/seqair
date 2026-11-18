@@ -259,6 +259,10 @@ pub struct CramWriter<W: Write> {
     /// Slices back from the pool, to fill again.
     spare: Vec<SliceBuilder>,
     records_per_slice: u32,
+    /// The next slice holds several references (`r[cram_writer.multi_ref]`).
+    multi_ref: bool,
+    /// The slice before the current one held few records.
+    last_slice_small: bool,
     warned_unmapped_alignment: bool,
     scratch: Scratch,
     poisoned: bool,
@@ -306,6 +310,8 @@ impl<W: Write> CramWriter<W> {
                 CramVersion::V3_1(CramProfile::Archive) => container::ARCHIVE_RECORDS,
                 _ => container::MAX_RECORDS,
             }),
+            multi_ref: false,
+            last_slice_small: false,
             warned_unmapped_alignment: false,
             scratch: Scratch::default(),
             poisoned: false,
@@ -394,13 +400,12 @@ impl<W: Write> CramWriter<W> {
             return Err(CramWriteError::Poisoned);
         }
         let checked = record::check(view, &self.header, self.last)?;
-        let kind = match view.tid {
-            Some(tid) => SliceKind::Mapped { tid, reference: self.header.reference(tid).is_some() },
-            None => SliceKind::Unplaced,
-        };
+        let mut kind = self.kind_of(view.tid);
         // r[impl cram_writer.slicing+2]
         if self.slice.ends_before(kind, checked.read_len, self.records_per_slice) {
             self.flush_slice().inspect_err(|_| self.poisoned = true)?;
+            // The slice's end may have switched multi-reference slices on or off.
+            kind = self.kind_of(view.tid);
         }
         let (drops_alignment, placement) = (checked.drops_alignment, checked.placement);
         match kind {
@@ -423,6 +428,18 @@ impl<W: Write> CramWriter<W> {
         Ok(())
     }
 
+    /// The kind of slice a record on `tid` goes in.
+    fn kind_of(&self, tid: Option<Tid>) -> SliceKind {
+        match tid {
+            Some(tid) if self.header.reference(tid).is_none() => {
+                SliceKind::Mapped { tid, reference: false }
+            }
+            None => SliceKind::Unplaced,
+            Some(_) if self.multi_ref => SliceKind::Multi,
+            Some(tid) => SliceKind::Mapped { tid, reference: true },
+        }
+    }
+
     /// Encode a record into the slice, against the FASTA's reference where
     /// the slice is stored against it.
     fn encode(
@@ -431,15 +448,15 @@ impl<W: Write> CramWriter<W> {
         view: &RecordView<'_>,
         checked: &record::Checked,
     ) -> Result<(), CramWriteError> {
-        if let SliceKind::Mapped { tid, reference: true } = kind {
+        let tid = match kind {
+            SliceKind::Mapped { tid, reference: true } => Some(tid),
+            SliceKind::Multi => view.tid,
+            SliceKind::Mapped { reference: false, .. } | SliceKind::Unplaced => None,
+        };
+        if let Some(tid) = tid {
             self.load_reference(tid)?;
         }
-        let reference = match kind {
-            SliceKind::Mapped { reference: true, .. } => {
-                self.reference.as_ref().map(|(_, bases)| SliceRef::fasta(bases))
-            }
-            _ => None,
-        };
+        let reference = tid.and(self.reference.as_ref()).map(|(_, bases)| SliceRef::fasta(bases));
         record::encode(
             &mut self.slice,
             kind,
@@ -501,6 +518,17 @@ impl<W: Write> CramWriter<W> {
         if let SliceKind::Mapped { tid, reference: false } = kind {
             self.encode_held(tid);
         }
+        // r[impl cram_writer.multi_ref]
+        // htslib's `cram_put_bam_seq`: two small slices in a row switch
+        // multi-reference slices on; one holding a single reference id off.
+        let n = self.slice.n_records();
+        let small = u64::from(n) + 8 < (u64::from(self.records_per_slice) + 8) / 4;
+        if kind == SliceKind::Multi {
+            self.multi_ref = self.slice.reference_runs() > 1;
+        } else if small && self.last_slice_small {
+            self.multi_ref = true;
+        }
+        self.last_slice_small = small;
         let reference = match kind {
             SliceKind::Mapped { tid, reference: true } => self
                 .reference
@@ -511,7 +539,7 @@ impl<W: Write> CramWriter<W> {
         };
         let length = match kind {
             SliceKind::Mapped { tid, .. } => self.header.target_len(tid),
-            SliceKind::Unplaced => 0,
+            SliceKind::Multi | SliceKind::Unplaced => 0,
         };
         let frame = self.slice.frame(self.slices, self.record_counter, length, reference);
         self.slices = self.slices.saturating_add(1);
@@ -519,7 +547,7 @@ impl<W: Write> CramWriter<W> {
         match &mut self.pool {
             None => {
                 let assembled = self.slice.assemble(&frame, &mut self.codecs)?;
-                self.emit(kind, &assembled)?;
+                self.emit(&assembled)?;
                 self.slice.clear();
             }
             Some(pool) => {
@@ -536,7 +564,7 @@ impl<W: Write> CramWriter<W> {
     fn drain(&mut self, all: bool) -> Result<(), CramWriteError> {
         while let Some(done) = self.pool.as_mut().map(|p| p.next(all)).transpose()?.flatten() {
             let Done { mut slice, result, .. } = done;
-            self.emit(slice.kind().unwrap_or(SliceKind::Unplaced), &result?)?;
+            self.emit(&result?)?;
             slice.clear();
             self.spare.push(slice);
         }
@@ -544,22 +572,21 @@ impl<W: Write> CramWriter<W> {
     }
 
     /// Write a container, and index its slice.
-    fn emit(&mut self, kind: SliceKind, assembled: &Assembled) -> Result<(), CramWriteError> {
+    fn emit(&mut self, assembled: &Assembled) -> Result<(), CramWriteError> {
         let container_offset = self.out.written;
         self.out.write_all(&assembled.bytes)?;
-        // r[impl cram_writer.crai]
+        // r[impl cram_writer.crai+2]
         if let Some(index) = &mut self.index {
-            index.push(CraiEntry {
-                ref_id: match kind {
-                    SliceKind::Mapped { tid, .. } => Some(tid.as_u32()),
-                    SliceKind::Unplaced => None,
-                },
-                alignment_start: assembled.alignment_start,
-                alignment_span: assembled.alignment_span,
-                container_offset,
-                slice_offset: assembled.slice_offset,
-                slice_size: assembled.slice_size,
-            });
+            for &(tid, alignment_start, alignment_span) in &assembled.spans {
+                index.push(CraiEntry {
+                    ref_id: tid.map(Tid::as_u32),
+                    alignment_start,
+                    alignment_span,
+                    container_offset,
+                    slice_offset: assembled.slice_offset,
+                    slice_size: assembled.slice_size,
+                });
+            }
         }
         Ok(())
     }

@@ -130,7 +130,7 @@ impl CramIndex {
         CramIndex { entries, reach }
     }
 
-    // r[impl cram_writer.crai]
+    // r[impl cram_writer.crai+2]
     /// Write the index as a `.crai` file: gzip-compressed, one tab-separated
     /// line per slice, as `samtools index` writes it.
     ///
