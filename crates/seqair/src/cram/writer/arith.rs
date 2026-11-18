@@ -3,7 +3,7 @@
 //! (`arith_dynamic.c`) writes it.
 
 use super::rans::Order;
-use super::rans_nx16::{Coder, pack, put_uint7};
+use super::rans_nx16::{pack, put_uint7};
 use crate::cram::range_coder::{AdaptiveModel, RangeEncoder};
 
 // r[impl cram_writer.arith]
@@ -112,7 +112,7 @@ fn encode_stream(data: &[u8], mut byte: u8, sized: bool) -> Option<Vec<u8>> {
         byte |= FLAG_NO_SIZE;
     }
 
-    let packed = if byte & FLAG_PACK != 0 { pack(data, Coder::Scalar) } else { None };
+    let packed = if byte & FLAG_PACK != 0 { pack(data) } else { None };
     let mut body = data;
     match &packed {
         Some((meta, packed)) => {
