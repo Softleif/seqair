@@ -104,12 +104,98 @@ fn refused_records_leave_the_writer_usable() {
         assert!(expected(&err), "{err:?}");
     }
     w.write(&mapped(6, b"second", b"CGTTTG")).unwrap();
-    let (cram, index) = w.finish().unwrap();
+    let refused = w.finish().unwrap();
 
+    let mut clean = writer(dir.path(), &header(""));
+    clean.write(&mapped(5, b"first", b"ACGTTT")).unwrap();
+    clean.write(&mapped(6, b"second", b"CGTTTG")).unwrap();
+    let clean = clean.finish().unwrap();
+    assert!(refused.0 == clean.0, "a refused record left a trace in the file");
+    assert_eq!(refused.1.unwrap().entries(), clean.1.unwrap().entries());
+}
+
+/// A sink that fails once it has taken `left` bytes.
+struct Failing {
+    left: usize,
+}
+
+impl std::io::Write for Failing {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.left {
+            return Err(std::io::Error::other("full"));
+        }
+        self.left -= buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// r[verify cram_writer.validate_before_write]
+/// A sink error writing a slice poisons the writer, threaded or not.
+#[test]
+fn a_sink_error_poisons_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    for threads in [0, 2] {
+        let reference = IndexedFastaReader::open(&fasta(dir.path())).unwrap();
+        let mut w =
+            CramWriterBuilder::to_writer(Failing { left: 1000 }, &header(""), reference)
+                .compression_threads(threads)
+                .records_per_slice(1)
+                .build()
+                .unwrap();
+        let mut failed = None;
+        for i in 0..20 {
+            if let Err(e) = w.write(&mapped(i, b"r", b"ACGT")) {
+                failed = Some(e);
+                break;
+            }
+        }
+        assert!(matches!(failed, Some(CramWriteError::Io { .. })), "{failed:?}");
+        assert!(matches!(w.write(&mapped(30, b"r", b"AC")), Err(CramWriteError::Poisoned)));
+        assert!(matches!(w.finish(), Err(CramWriteError::Poisoned)));
+    }
+}
+
+// r[verify cram_writer.tags]
+// r[verify cram_writer.blocks]
+/// Hundreds of tag lines in one slice (a `TL` of more than one ITF8 byte),
+/// and zero-length CIGAR operations, which read back as nothing.
+#[test]
+fn many_tag_lines_and_zero_length_operations_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = writer(dir.path(), &header(""));
+    let mut expected = Vec::new();
+    for i in 0..300u32 {
+        let mut r = mapped(1, format!("r{i}").as_bytes(), b"CGTA");
+        for bit in 0..9 {
+            if i >> bit & 1 == 1 {
+                r.aux.set_int([b'X', b'0' + u8::try_from(bit).unwrap()], i64::from(i)).unwrap();
+            }
+        }
+        expected.push(r.aux.as_bytes().to_vec());
+        w.write(&r).unwrap();
+    }
+    let mut zero = mapped(2, b"zero", b"GTAC");
+    zero.cigar = vec![
+        CigarOp::new(CigarOpType::Match, 2),
+        CigarOp::new(CigarOpType::Insertion, 0),
+        CigarOp::new(CigarOpType::Match, 0),
+        CigarOp::new(CigarOpType::Deletion, 0),
+        CigarOp::new(CigarOpType::Match, 2),
+    ];
+    w.write(&zero).unwrap();
+    let (cram, _) = w.finish().unwrap();
     let records = read_back(dir.path(), &cram);
-    let names: Vec<&[u8]> = records.iter().map(|r| r.qname()).collect();
-    assert_eq!(names, [&b"first"[..], b"second"]);
-    assert_eq!(index.unwrap().entries().len(), 1);
+    // Matches only: the decode generates MD/NM after the stored tags.
+    for (record, aux) in records.iter().zip(&expected) {
+        assert!(record.aux().as_bytes().starts_with(aux));
+    }
+    let last = records.last().unwrap();
+    assert_eq!(last.qname(), b"zero");
+    assert_eq!(last.cigar().iter().collect::<Vec<_>>(), [CigarOp::new(CigarOpType::Match, 4)]);
 }
 
 // r[verify cram_writer.header_m5]

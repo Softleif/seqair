@@ -463,7 +463,6 @@ mod tests {
     // ── LTF8 known values ──────────────────────────────────────────────
 
     // r[verify cram.ltf8]
-    // r[verify cram_writer.blocks]
     #[hegel::test]
     fn written_ltf8_reads_back(tc: TestCase) {
         // Shifted, so every byte length is drawn, not only the longest.

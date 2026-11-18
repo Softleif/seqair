@@ -262,9 +262,34 @@ mod tests {
             })
             .collect();
         for order in [Order::Zero, Order::One] {
-            if let Some(encoded) = encode(&data, order) {
+            let encoded = encode(&data, order);
+            let expected_some = match order {
+                Order::Zero => !data.is_empty(),
+                Order::One => data.len() >= 4,
+            };
+            assert_eq!(encoded.is_some(), expected_some, "{order:?} of {} bytes", data.len());
+            if let Some(encoded) = encoded {
                 assert_eq!(decode(&encoded).unwrap(), data, "{order:?}");
             }
+        }
+    }
+
+    /// Every table sums to 4095, htscodecs' total, with each present symbol
+    /// at least 1; the decoder takes 4096 too, so a round trip cannot tell.
+    #[hegel::test]
+    fn frequencies_sum_to_htscodecs_total(tc: TestCase) {
+        let mut counts = [0u32; 256];
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(256));
+        for c in counts.iter_mut().take(n) {
+            *c = tc.draw(gs::integers::<u32>().max_value(1_000_000));
+        }
+        if counts.iter().all(|&c| c == 0) {
+            counts[0] = 1;
+        }
+        let table = normalize(&counts);
+        assert_eq!(table.iter().map(|s| s.freq).sum::<u32>(), TOTAL);
+        for (s, &c) in table.iter().zip(&counts) {
+            assert_eq!(s.freq > 0, c > 0);
         }
     }
 

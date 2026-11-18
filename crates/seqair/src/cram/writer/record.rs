@@ -468,7 +468,9 @@ impl Features<'_, '_> {
             let r = read.saturating_add(i);
             let base = view.seq.get(r).copied().unwrap_or(IupacBase::N);
             let ref_base = reference.get(g).copied();
-            if ref_base.is_some_and(|rb| IupacBase::from_ascii(rb) == base) {
+            // The same letter, as htslib compares them: a reference letter
+            // that is no IUPAC code (or `U`) reads as `N` but is no match.
+            if ref_base == Some(base.to_ascii()) {
                 continue;
             }
             self.matches(run_start, g);
