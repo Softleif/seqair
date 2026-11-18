@@ -62,6 +62,9 @@ All string fields (IDs, descriptions, contig names, sample names) MUST use `Smol
 r[vcf_header.ordered_maps]
 INFO, FORMAT, FILTER, and contig maps MUST preserve insertion order. This is required for BCF dictionary index assignment and for deterministic VCF output.
 
+r[vcf_header.contigs]
+`VcfHeader::contigs()` MUST yield every contig as `(ContigId, &ContigDef)` in contig dictionary order (BCF `rid` order, which `ContigId::index()` gives) and expose no map type for contigs. A header with two contig accessors in two orders, one an `IndexMap`, was misread by every htslib port: htslib numbers contigs by `rid`. `ContigId::name()` MUST return the `&SmolStr` it holds, so a caller keeps the name without allocating.
+
 ## Parsing
 
 A header read from a file is the same `VcfHeader` type the writer builds, so a reader's header can be handed to a writer (`r[vcf_reader.passthrough_header]`).

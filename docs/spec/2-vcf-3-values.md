@@ -6,18 +6,33 @@ Fields are read through the same typed keys the writer uses (`InfoKey<V>`, `Form
 
 ## Keys
 
-r[vcf_values.keys]
-`VcfHeader` MUST resolve keys by name: `info_key::<V>(name) -> Result<InfoKey<V>, KeyError>`, `format_key::<V>(name)`, `filter(name) -> Result<FilterId, _>`, `contig(name) -> Result<ContigId, _>`. Resolution MUST check the marker against the header's declaration through a `FieldKind` trait on each marker: `UnknownField { name }` for an undeclared name, `TypeMismatch { name, declared, requested }` when the `ValueType` disagrees, `NumberMismatch { name, declared }` when the cardinality cannot hold (a `Scalar` needs `Number=1`, a `Flag` needs `Type=Flag`, `Gt` needs the FORMAT `GT` field).
+r[vcf_values.keys+2]
+`VcfHeader` MUST resolve keys by name: `info_key::<V>(name) -> Result<InfoKey<V>, KeyError>`, `format_key::<V>(name)`, `filter(name) -> Result<FilterId, _>`, `contig(name) -> Result<ContigId, _>`. A header resolves only what it declares: it is what a writer writes, and the keys it hands out are valid for writing. Resolution MUST check the marker against the declaration through a `FieldKind` trait on each marker: `UnknownField { name, kind }` for an undeclared name, naming the section (`KeyKind`), `TypeMismatch { name, declared, requested }` when the `ValueType` disagrees, `NumberMismatch { name, declared }` when the cardinality cannot hold (a `Scalar` needs `Number=1`, a `Flag` needs `Type=Flag`, `Gt` needs the FORMAT `GT` field).
+
+r[vcf_values.file_keys]
+Readers resolve keys through their file: `file.info_key::<V>(name)` and `file.format_key::<V>(name)` (and the same on `PlanContext`) MUST resolve against the file's field table (`r[vcf_reader.field_table]`):
+
+| name | result |
+|---|---|
+| declared in the header | the header's key (`r[vcf_values.keys+2]`) |
+| reserved, undeclared (VCF text) | a key checked against the reserved `Type`/`Number`; `debug!` |
+| other undeclared (VCF text), `V` is `Str` or `Any` | a key, the name added to the table now; one `warn!` per name |
+| other undeclared, any other `V`, or any undeclared name in BCF | `UnknownField { name, kind }` |
+
+A key the header does not declare MUST carry the file's own id rather than the header's, so the file's readers accept it and every writer refuses it as foreign (`r[vcf_values.header_brand+2]`): a writer would write a dictionary index its header lacks.
+
+r[vcf_values.optional_keys]
+`info_key_opt`/`format_key_opt` MUST return `Result<Option<Key<V>>, KeyError>`: `Ok(None)` exactly where the plain form fails with `UnknownField`, every other error kept. An optional annotation (GIAB has no CPG, many headers no SVTYPE) is then one `?` and one `Option`. There MUST NOT be a `get(Option<&Key>)`: the `Option` belongs to the plan, not to every record.
 
 r[vcf_values.field_kind]
 `FieldKind` MUST be the single source of a marker's `ValueType` and accepted `Number`s, used by reader key resolution and by the writer's `InfoFieldDef`/`FormatFieldDef`, so a definition whose marker disagrees with its declared `ValueType` (`InfoFieldDef::<Scalar<i32>>` with `ValueType::Float`) can no longer be written.
 
-r[vcf_values.header_brand]
-Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
+r[vcf_values.header_brand+2]
+Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. A key of a file's field table that its header does not declare carries a second id, the file's own, which that file's records accept as well. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
 
 ## Access
 
-> r[vcf_values.access]
+> r[vcf_values.access+2]
 > `get(&key)` MUST return `Result<V::Out<'_>, VcfReadError>`, with `Err` only for malformed data, and:
 >
 > | marker | `Out` | absent or `.` |
@@ -28,8 +43,11 @@ Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.bran
 > | `Flag` | `bool` | `false` |
 > | `Str` | `Option<&str>` | `None` |
 > | `Gt` | `Option<GenotypeRef<'_>>` | `None` |
+> | `Any` | `Option<DynValue<'_>>` | absent: `None`; `.`: `Some(v)` with `v.is_missing()` |
 >
-> `Values` and `OptValues` MUST be `ExactSizeIterator`s with `get(i)` over the vector as stored, whatever its integer width. A field absent from the record and a field present as `.` are both `None`: VCF lets a sample drop trailing FORMAT fields, so callers cannot rely on the difference.
+> `Values` and `OptValues` MUST be `ExactSizeIterator`s with `get(i)` over the vector as stored, whatever its integer width; `Values::to_array::<N>()` MUST give `Some([T; N])` exactly when it holds `N` elements. `OptArr<T>` reads a field of any `Number` (it is the lenient key: `Number=.` GQ, a scalar declared as a vector); `Arr<T>` fails with `MissingElement` on an inner `.`. `Any` resolves for any declared type and reads the field as its declaration says (`r[vcf_values.dynamic+2]`).
+>
+> `get` folds a field absent from the record and a field present as `.` into the marker's absent value; `has(&key) -> Result<bool, VcfReadError>`, on `Info` and every sample view and for every marker, MUST tell them apart: for INFO, whether the record holds the key; for FORMAT, whether the record's FORMAT column names it, whatever the sample's value (a sample may drop trailing fields, which reads as `.`). So absent is `!has`, and `.` is `has` with an absent `get`. `has` on one sample's view MUST need only that sample's section: HiPhase phases a variant whose GQ is absent but not one whose GQ is `.`, and asking for every sample to learn it costs a column decode.
 
 r[vcf_values.bcf_sentinels]
 BCF values MUST be decoded at their stored width (int8, int16, int32, float) and widened. The per-width missing value (`0x80`, `0x8000`, `0x8000_0000`; float bits `0x7F80_0001`) MUST become `None`, and the end-of-vector value (`0x81`, `0x8001`, `0x8000_0001`; float bits `0x7F80_0002`) MUST end the vector, never yielded. Floats MUST be compared by bit pattern: any other NaN is a value, `Some(NaN)`.
@@ -40,8 +58,8 @@ VCF text integers MUST parse as an optional sign and decimal digits into `i32`; 
 r[vcf_values.text_strings]
 String values MUST be returned as stored, after UTF-8 validation (`from_utf8`, typed error); percent-encoding (`%3A`, …) MUST NOT be decoded, matching htslib, so VCF and BCF reads agree. BCF strings MUST be trimmed at their first NUL (padding).
 
-r[vcf_values.gt]
-`GenotypeRef` MUST yield each allele as `Option<u16>` (`None` for `.`) with its phase, read the first allele's phase bit per `r[vcf_record.gt_first_phase]`, handle a ploidy that varies per sample (BCF pads with end-of-vector), and convert to the writer's owned `Genotype`.
+r[vcf_values.gt+2]
+`GenotypeRef` MUST yield each allele as `Option<u16>` (`None` for `.`) with its phase, offer `get(i)` and `ploidy()`, read the first allele's phase bit per `r[vcf_record.gt_first_phase]`, handle a ploidy that varies per sample (BCF pads with end-of-vector), and convert to the writer's owned `Genotype`.
 
 r[vcf_values.qual]
 `qual()` MUST return `Option<f32>`: `None` for `.` or BCF's missing bit pattern, the stored `f32` otherwise, negative, huge and NaN values included. It MUST NOT return `Phred`: that type is `f64`, documented non-negative, and its `as_int` clamps to 0..=99, while QUAL values reach the thousands. BCF to BCF stays bit-exact.
@@ -49,24 +67,24 @@ r[vcf_values.qual]
 r[vcf_values.duplicates]
 When a record holds the same INFO or FORMAT key twice, the first occurrence MUST win, as htslib's lookups do, and the reader MUST log one `warn!` per file. (The writer keeps the last write of a key, `r[record_encoder.info_dedup+2]`; that is about writing, not reading.)
 
-r[vcf_values.dynamic]
-`Info::iter()` and the sample views MUST offer untyped iteration over the declared fields present, yielding the field's header definition and a `DynValue` (`Int(Values<i32>)`, `Float(Values<f32>)`, `Flag`, `Str(&str)`, with missing elements as `Option`), for generic tools such as `convert` and `view`.
+r[vcf_values.dynamic+2]
+`Info::iter()` and the sample views MUST offer untyped iteration over the fields present, yielding each field's name, its definition in the field table (the header's, a reserved one, or the undeclared `String` one) and a `DynValue` (`Int(OptValues<i32>)`, `Float(OptValues<f32>)`, `Flag`, `Str(Option<&str>)`, `Gt(Option<GenotypeRef>)`), for generic tools such as `convert` and `view`. The iterator MUST be one layer of `Result`: a section that does not index is its first item's error. `DynValue::is_missing()` MUST say whether the value is `.`, whatever its variant.
 
 r[vcf_values.dynamic.missing]
 A number vector missing as a whole — `.` in VCF text, an empty vector or a lone missing value in BCF — MUST read as a `DynValue` with no elements. VCF text cannot spell an empty vector, so this is the only reading on which the formats agree (`r[vcf_values.equivalence]`).
 
 ## Reference span
 
-r[vcf_values.rlen]
-A record's end MUST be `start + rlen − 1`. For BCF, `rlen` is the stored field. For VCF text, `rlen` MUST be computed as htslib's `get_rlen` computes it for the file's version — the REF length, extended by INFO END, by the SVLEN of symbolic structural-variant alleles, and by FORMAT LEN of `<*>` — because indexes were built from that value and a reader that disagrees misses records. A differential test MUST compare the computed end with the `rlen` bcftools writes when converting the same text to BCF, on generated records covering every input.
+r[vcf_values.rlen+2]
+A record's end MUST be `start + rlen − 1`. For BCF, `rlen` is the stored field. For VCF text, `rlen` MUST be computed as htslib's `get_rlen` computes it for the file's version — the REF length, extended by INFO END, by the SVLEN of symbolic structural-variant alleles, and by FORMAT LEN of `<*>` — because indexes were built from that value and a reader that disagrees misses records. END, SVLEN and LEN count when the field table (`r[vcf_reader.field_table]`) gives them `Type=Integer`: declared so, or not declared at all, as tabix reads them (htslib's text parser reads an undeclared one as a String and ignores it). A differential test MUST compare the computed end with the `rlen` bcftools writes when converting the same text to BCF, on generated records covering every input.
 
 ## Per-record index
 
 r[vcf_values.index]
 A section's index MUST be one list of present fields in record order (`DictId`, kind, byte span) and an epoch-stamped table with one `u32` per dictionary id (`epoch << 16 | slot`), so a lookup is one table read, an epoch compare and one list read; an absent key is an epoch mismatch. Advancing the epoch replaces clearing; on wrap the table is zeroed. There is one representation for VCF and BCF and for every record size: on real files a linear scan beats the table by at most ~5 ns per record below ~16 keys, inside the noise, and a second code path is not worth it.
 
-r[vcf_values.text_resolution]
-VCF text keys MUST be mapped to `DictId`s through a table built once per file from the header: open addressing at ≤ 50% load, each slot holding the key's first 8 bytes, its length and its id, keys longer than 8 bytes verified against one flat name buffer. The hash MUST be one 8-byte load (plus the last 8 bytes for longer keys). A perfect hash measured no faster than this table on real headers and is not used.
+r[vcf_values.text_resolution+2]
+VCF text keys MUST be mapped to `DictId`s through a table built once per file from the header and the reserved keys it does not declare: open addressing at ≤ 50% load, each slot holding the key's first 8 bytes, its length and its id, keys longer than 8 bytes verified against one flat name buffer. The hash MUST be one 8-byte load (plus the last 8 bytes for longer keys). A perfect hash measured no faster than this table on real headers and is not used. Keys appended to the field table later are found in a second, locked map consulted only when the first misses, so a file whose keys are all declared never takes the lock.
 
 ## Equivalence
 

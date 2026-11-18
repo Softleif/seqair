@@ -14,8 +14,8 @@ The reader MUST read plain-text VCF, BGZF-compressed VCF and BCF 2.2 (BGZF-frame
 r[vcf_reader.file]
 `VcfFile::open(path)` MUST parse the header (`r[vcf_header.parse]`) and locate an index by the names of `r[index.locate]` (VCF: `csi`, then `tbi`; BCF: `csi`). A missing index MUST NOT fail the open: sequential reading works without one, and only a query fails, with `VcfReadError::NoIndex`. An index that exists but does not parse MUST fail the open.
 
-r[vcf_reader.file.shared]
-`VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the text-key lookup table (`r[vcf_values.text_resolution]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
+r[vcf_reader.file.shared+2]
+`VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the field table (`r[vcf_reader.field_table]`) and its text-key lookup (`r[vcf_values.text_resolution+2]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared+2]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
 
 ## Readers
 
@@ -69,8 +69,16 @@ The records of all partitions of a file, concatenated in partition order, MUST e
 
 ## Undeclared fields
 
-r[vcf_reader.undeclared]
-An INFO or FORMAT key that a VCF text record uses but the header does not declare MUST be ignored — it gets no index entry and no typed key can reach it — and the reader MUST log a single `warn!` per file naming the first such key and saying that further undeclared keys are ignored too. BCF records refer to fields by dictionary index, so an index the dictionary lacks is a malformed record and MUST fail with a typed error.
+r[vcf_reader.field_table]
+A VCF text file's INFO and FORMAT keys MUST resolve against a field table: the header's string dictionary, extended with
+
+- every VCF 4.5 reserved INFO and FORMAT key (the specification's tables of reserved INFO keys and genotype keys, and its structural-variant INFO and FORMAT keys; the `M[0-9]+[ACGTUN]` patterns excepted) that the header does not declare in that section, with its reserved `Type` and `Number`;
+- every other key a record uses or a caller resolves, as `Type=String, Number=.`.
+
+Keys new to the dictionary get ids past the header's (the reserved ones first, then others in order of first use); a name the header declares in the other section keeps its id. The table is append-only and shared by every reader of the file, so a record read on one thread and a key resolved on another agree on the id. htslib adds an undeclared key to its header as `Type=String` too (with `Number=1`; `Str` reads either) but knows no reserved definitions; noodles applies the reserved ones. Without either, aardvark's undeclared `SVTYPE` and `TRID` silently turned breakends and tandem repeats into insertions. A BCF file's table is its header's dictionary alone: a BCF record names fields by dictionary index, so an index the dictionary lacks is a malformed record and MUST fail with a typed error.
+
+r[vcf_reader.undeclared+2]
+Reading an undeclared key MUST be visible in the log even when no record is ever indexed: resolving a reserved key the header does not declare logs a `debug!`, resolving any other undeclared key logs one `warn!` per name ("not declared in the header, read as String"), and a record that uses an undeclared key that VCF does not reserve and nobody resolved logs a single `warn!` per file naming the first such key. A warning only on access never fires for the caller who could not resolve the key and so never reads it.
 
 r[vcf_reader.undeclared.filter]
 A VCF text FILTER name the header does not declare MUST still fail the record (`FilterStatus::Failed`), so a record never passes for a filter the header forgot; no `FilterId` can name it, so `Failed` does not list it, and it counts towards the same single `warn!` per file. htslib instead adds the name to its header; seqair's header is shared and immutable. Dropping the name would turn a record whose only filter is undeclared into `Missing`, which `bcf_has_filter` and many callers count as passing.
@@ -80,8 +88,11 @@ A VCF text FILTER name the header does not declare MUST still fail the record (`
 r[vcf_reader.limits]
 Before allocating, the reader MUST reject: a VCF text line longer than 256 MiB; a BCF record whose `l_shared + l_indiv` exceeds 256 MiB; more alleles than BCF's 16-bit `n_allele` allows; a genotype ploidy above 256; a BCF typed vector whose declared length runs past its section. Each is a distinct typed error (`r[io.fuzz.alloc_limits]`).
 
-r[vcf_reader.errors]
-Errors MUST be a `VcfReadError` enum (wrapping `BgzfError`, `VcfHeaderError`, the index errors) with typed variants only (`r[io.errors.typed_variants]`). Every per-record error MUST carry the record's ordinal in the stream and, when the input is BGZF, the record's virtual offset.
+r[vcf_reader.errors+2]
+Errors MUST be a `VcfReadError` enum (wrapping `BgzfError`, `VcfHeaderError`, the index errors) with typed variants only (`r[io.errors.typed_variants]`). Every per-record error MUST say where the record is, as far as the reader knows: its 1-based number in the stream, its 1-based line for VCF text read from the start, its virtual offset when the input is BGZF, the file's path, and its `CHROM:POS` once those decoded. A malformed text value MUST carry the offending bytes (the first 64). An error's `Display` MUST NOT repeat its source: error reporters (anyhow, color_eyre) print the chain, and a message that embeds its cause prints it twice. A key error MUST say which section (`KeyKind`: INFO, FORMAT, FILTER) it looked in; an unknown sample MUST be one variant (`KeyError::UnknownSample`) whether a component or a user type resolved it; a BCF contig index outside the header's contig dictionary is `RecordError::ContigIndexOutOfRange`, distinct from `VcfReadError::UnknownContig { name }`.
+
+r[vcf_reader.debug]
+`Debug` of a record component, of a record view and of `VcfFile` MUST NOT print the file's shared state (header, dictionaries, tables): it prints what the record holds — contig and positions, IDs, alleles, QUAL, FILTER names, the fields present with their values — so a record in a log line or a panic message stays short. `Locus` MUST implement `Display` as `CHROM:POS`, `CHROM:START-END` when it spans more than one position.
 
 r[vcf_reader.fuzz]
 There MUST be fuzz targets for BCF records, VCF text records, header parsing, and a full-stack target that opens a VCF or BCF from bytes and reads every field of every record through `FullRecord` (`r[io.fuzz.readers]`).
