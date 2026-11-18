@@ -216,6 +216,15 @@ impl IupacBase {
         reverse_complement_at(Level::new(), bases);
     }
 
+    // r[impl types.iupac_base.ascii_prefix]
+    /// How many leading `bases`, up to the shorter of the two slices, are
+    /// the letter `ascii` holds there ([`Self::to_ascii`], so a lower-case
+    /// byte never matches): the length of a run of matches against a
+    /// reference.
+    pub fn ascii_prefix_len(bases: &[Self], ascii: &[u8]) -> usize {
+        ascii_prefix_len_at(Level::new(), bases, ascii)
+    }
+
     // r[impl types.iupac_base.as_codes_mut]
     /// The codes of `bases`, to write in place: how a bulk kernel (here and
     /// in `seqair`) fills an `IupacBase` buffer without an intermediate one.
@@ -263,6 +272,40 @@ fn to_ascii_at(level: Level, bases: &[IupacBase], out: &mut Vec<u8>) {
         let codes = bytemuck::cast_slice(bases);
         dispatch!(level, simd => map_into(simd, Nibble(&IupacBase::ASCII), codes, dst));
     }
+}
+
+// r[impl io.simd_portable]
+fn ascii_prefix_len_at(level: Level, bases: &[IupacBase], ascii: &[u8]) -> usize {
+    let codes: &[u8] = bytemuck::cast_slice(bases);
+    dispatch!(level, simd => ascii_prefix(simd, codes, ascii))
+}
+
+/// The leading positions where `ASCII[code] == byte`. Whole vectors compare
+/// at once; the first unequal lane is the lowest clear bit of the mask.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn ascii_prefix<S: Simd>(simd: S, codes: &[u8], ascii: &[u8]) -> usize {
+    let n = S::u8s::LEN;
+    let len = codes.len().min(ascii.len());
+    let (codes, ascii) =
+        (codes.get(..len).unwrap_or_default(), ascii.get(..len).unwrap_or_default());
+    let table = Nibble(&IupacBase::ASCII);
+    let lanes = if n >= 64 { u64::MAX } else { (1u64 << n).wrapping_sub(1) };
+    let mut done = 0usize;
+    for (c, a) in codes.chunks_exact(n).zip(ascii.chunks_exact(n)) {
+        let letters = table.vector(simd, S::u8s::from_slice(simd, c));
+        let unequal = !letters.simd_eq(S::u8s::from_slice(simd, a)).to_bitmask() & lanes;
+        if unequal != 0 {
+            return done.saturating_add(unequal.trailing_zeros() as usize);
+        }
+        done = done.saturating_add(n);
+    }
+    let tail =
+        codes.get(done..).unwrap_or_default().iter().zip(ascii.get(done..).unwrap_or_default());
+    done.saturating_add(tail.take_while(|&(&c, &a)| table.scalar(c) == a).count())
 }
 
 // r[impl io.simd_portable]
@@ -751,5 +794,30 @@ mod tests {
             let known = matches!(b, IupacBase::A | IupacBase::C | IupacBase::G | IupacBase::T);
             assert_eq!(b.to_base() == Base::Unknown, !known);
         }
+    }
+
+    // r[verify types.iupac_base.ascii_prefix]
+    // r[verify io.simd_portable]
+    /// The bases' own letters with one byte changed (to another letter, its
+    /// lower case, or any byte), cut to a drawn length: the prefix ends at
+    /// the change at every level, as the scalar loop finds it.
+    #[hegel::test]
+    fn ascii_prefix_finds_the_first_mismatch_at_every_level(tc: TestCase) {
+        let bases = any_bases(&tc);
+        let mut ascii = IupacBase::to_ascii_slice(&bases);
+        if !ascii.is_empty() {
+            let at = tc.draw(gs::integers::<usize>().max_value(ascii.len() - 1));
+            ascii[at] = match tc.draw(gs::integers::<u8>().max_value(2)) {
+                0 => ascii[at].to_ascii_lowercase(),
+                1 => tc.draw(gs::integers::<u8>()),
+                _ => IupacBase::ASCII[usize::from(tc.draw(gs::integers::<u8>().max_value(15)))],
+            };
+        }
+        ascii.truncate(tc.draw(gs::integers::<usize>().max_value(ascii.len())));
+        let expected = bases.iter().zip(&ascii).take_while(|&(b, &a)| b.to_ascii() == a).count();
+        for level in crate::simd_levels::levels() {
+            assert_eq!(ascii_prefix_len_at(level, &bases, &ascii), expected, "{level:?}");
+        }
+        assert_eq!(IupacBase::ascii_prefix_len(&bases, &ascii), expected);
     }
 }
