@@ -2,10 +2,12 @@
 //! [`crate::cram::rans`], laid out as htscodecs' `rANS_static.c` writes it.
 
 use crate::cram::varint::write_itf8;
+use fearless_simd::Level;
 use std::cell::RefCell;
 use std::thread::LocalKey;
 
 mod reference;
+mod simd;
 
 // r[impl cram_writer.rans4x8]
 
@@ -80,13 +82,14 @@ impl Symbol {
 #[derive(Debug, Clone, Copy)]
 enum Coder {
     Reference,
-    Fast,
+    /// The SIMD kernels at a level.
+    Fast(Level),
 }
 
 /// `data` compressed, or `None` when it is empty, too large for the
 /// format's 32-bit sizes, or too small for order 1.
 pub(super) fn encode(data: &[u8], order: Order) -> Option<Vec<u8>> {
-    encode_with(data, order, Coder::Fast)
+    encode_with(data, order, Coder::Fast(Level::new()))
 }
 
 /// [`encode`] for benchmarks and fuzzing: order 1 or 0, with the reference
@@ -94,7 +97,7 @@ pub(super) fn encode(data: &[u8], order: Order) -> Option<Vec<u8>> {
 #[doc(hidden)]
 pub fn encode_for_bench(data: &[u8], order_1: bool, reference: bool) -> Option<Vec<u8>> {
     let order = if order_1 { Order::One } else { Order::Zero };
-    encode_with(data, order, if reference { Coder::Reference } else { Coder::Fast })
+    encode_with(data, order, if reference { Coder::Reference } else { Coder::Fast(Level::new()) })
 }
 
 fn encode_with(data: &[u8], order: Order, coder: Coder) -> Option<Vec<u8>> {
@@ -114,9 +117,9 @@ fn encode_with(data: &[u8], order: Order, coder: Coder) -> Option<Vec<u8>> {
             rev.reverse();
             assemble(order, raw_len, &table, states, &rev)
         }
-        Coder::Fast => match order {
-            Order::Zero => fast_order_0(data, raw_len),
-            Order::One => fast_order_1(data, raw_len),
+        Coder::Fast(level) => match order {
+            Order::Zero => fast_order_0(data, raw_len, level),
+            Order::One => fast_order_1(data, raw_len, level),
         },
     }
 }
@@ -148,7 +151,8 @@ fn assemble(
 
 /// The renormalization bytes, written backwards from the end of `buf` so
 /// that `buf[at..]` holds them in decode order. A symbol emits at most two
-/// bytes, so 2 a symbol and 2 spare never run out.
+/// bytes, so 2 a symbol never run out, and 16 spare keep `at ≥ 16` for the
+/// kernels' 16-byte stores below it.
 struct Words<'a> {
     buf: &'a mut [u8],
     at: usize,
@@ -158,7 +162,7 @@ impl<'a> Words<'a> {
     /// Room for `symbols` symbols' bytes in `scratch`, whose old contents
     /// are overwritten before they are read; `None` if that overflows.
     fn new(scratch: &'a mut Vec<u8>, symbols: usize) -> Option<Self> {
-        scratch.resize(symbols.checked_mul(2)?.checked_add(2)?, 0);
+        scratch.resize(symbols.checked_mul(2)?.checked_add(16)?, 0);
         Some(Self { at: scratch.len(), buf: scratch })
     }
 
@@ -285,7 +289,7 @@ fn pack_row(freq: &[u32; 256], row: &mut [Enc]) {
     }
 }
 
-fn fast_order_0(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
+fn fast_order_0(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
     let freq = normalize(&count_order_0(data));
     let mut table = Vec::new();
     write_frequencies(&mut table, &freq);
@@ -293,12 +297,12 @@ fn fast_order_0(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
     pack_row(&freq, &mut enc);
     with_scratch(&WORDS, |scratch| {
         let mut words = Words::new(scratch, data.len())?;
-        let states = code_order_0(data, &enc, &mut words);
+        let states = code_order_0(data, &enc, &mut words, level);
         assemble(Order::Zero, raw_len, &table, states, words.decode_order())
     })
 }
 
-fn fast_order_1(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
+fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
     // htscodecs reads the byte before the remainder from the last quarter.
     if data.len() < 4 {
         return None;
@@ -308,7 +312,7 @@ fn fast_order_1(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
         let enc = &*o1.enc;
         with_scratch(&WORDS, |scratch| {
             let mut words = Words::new(scratch, data.len())?;
-            let states = code_order_1(data, enc, &mut words);
+            let states = code_order_1(data, enc, &mut words, level);
             assemble(Order::One, raw_len, &table, states, words.decode_order())
         })
     })
@@ -419,20 +423,16 @@ fn put(x: u32, e: Enc, words: &mut Words<'_>) -> u32 {
     x + (info & 0xFFF) + q * ((1 << 12) - f)
 }
 
-/// Order 0: byte `i` with state `i % 4`, backwards.
+/// Order 0: byte `i` with state `i % 4`, backwards; the last, partial round
+/// one state at a time, the whole rounds in the kernel.
 #[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table; l < 4")]
-fn code_order_0(data: &[u8], enc: &[Enc; 256], words: &mut Words<'_>) -> [u32; 4] {
+fn code_order_0(data: &[u8], enc: &[Enc; 256], words: &mut Words<'_>, level: Level) -> [u32; 4] {
     let mut x = [LOWER_BOUND; 4];
     let (rounds, tail) = data.as_chunks::<4>();
     for (l, &b) in tail.iter().enumerate().rev() {
         x[l] = put(x[l], enc[usize::from(b)], words);
     }
-    for &[a, b, c, d] in rounds.iter().rev() {
-        x[3] = put(x[3], enc[usize::from(d)], words);
-        x[2] = put(x[2], enc[usize::from(c)], words);
-        x[1] = put(x[1], enc[usize::from(b)], words);
-        x[0] = put(x[0], enc[usize::from(a)], words);
-    }
+    simd::code_order_0(level, rounds, enc, &mut x, words);
     x
 }
 
@@ -443,10 +443,17 @@ fn pair(ctx: u8, b: u8) -> usize {
 
 /// Order 1 (`data` at least 4 bytes): position by position across the four
 /// quarters, then the remainder with state 3, backwards. A quarter's first
-/// byte has context 0; the remainder continues the last quarter.
+/// byte has context 0; the remainder continues the last quarter. The
+/// remainder and the quarters' first bytes one state at a time, the rest in
+/// the kernel.
 #[allow(clippy::indexing_slicing, reason = "u16s index a 65536-entry table; windows of 2")]
 #[allow(clippy::arithmetic_side_effects, reason = "4·quarter ≥ 4")]
-fn code_order_1(data: &[u8], enc: &[Enc; 1 << 16], words: &mut Words<'_>) -> [u32; 4] {
+fn code_order_1(
+    data: &[u8],
+    enc: &[Enc; 1 << 16],
+    words: &mut Words<'_>,
+    level: Level,
+) -> [u32; 4] {
     let mut x = [LOWER_BOUND; 4];
     let quarter = data.len() / 4;
     debug_assert!(quarter >= 1);
@@ -457,18 +464,13 @@ fn code_order_1(data: &[u8], enc: &[Enc; 1 << 16], words: &mut Words<'_>) -> [u3
     let (q1, rest) = rest.split_at(quarter);
     let (q2, rest) = rest.split_at(quarter);
     let q3 = &rest[..quarter];
-    let positions = q0.windows(2).zip(q1.windows(2)).zip(q2.windows(2)).zip(q3.windows(2));
-    for (((a, b), c), d) in positions.rev() {
-        x[3] = put(x[3], enc[pair(d[0], d[1])], words);
-        x[2] = put(x[2], enc[pair(c[0], c[1])], words);
-        x[1] = put(x[1], enc[pair(b[0], b[1])], words);
-        x[0] = put(x[0], enc[pair(a[0], a[1])], words);
-    }
+    simd::code_order_1(level, [q0, q1, q2, q3], enc, &mut x, words);
     for (state, q) in x.iter_mut().zip([q0, q1, q2, q3]).rev() {
         *state = put(*state, enc[pair(0, q[0])], words);
     }
     x
 }
+
 /// Scale `counts` to frequencies summing to [`TOTAL`], each present symbol
 /// at least 1.
 fn normalize(counts: &[u32; 256]) -> [u32; 256] {
@@ -572,19 +574,23 @@ mod tests {
     }
 
     // r[verify cram_writer.rans4x8.fast]
-    /// The fast path writes the reference loops' bytes, and a block's
-    /// leftovers in the thread's scratch change nothing in the next one.
+    // r[verify cram_writer.rans4x8.simd]
+    /// The fast path writes the reference loops' bytes at every SIMD level,
+    /// and a block's leftovers in the thread's scratch change nothing in the
+    /// next one.
     #[hegel::test]
     fn the_fast_path_writes_the_reference_bytes(tc: TestCase) {
         let first = tc.draw(arb_block());
         let second = tc.draw(arb_block());
         for data in [&first, &second, &first] {
             for order in [Order::Zero, Order::One] {
-                let fast = encode_with(data, order, Coder::Fast);
                 let reference = encode_with(data, order, Coder::Reference);
-                assert!(fast == reference, "{order:?} of {} bytes", data.len());
-                if let Some(fast) = fast {
-                    assert!(decode(&fast).unwrap() == *data, "{order:?}");
+                if let Some(coded) = &reference {
+                    assert!(decode(coded).unwrap() == *data, "{order:?}");
+                }
+                for level in crate::simd_levels::levels() {
+                    let fast = encode_with(data, order, Coder::Fast(level));
+                    assert!(fast == reference, "{order:?} {level:?} of {} bytes", data.len());
                 }
             }
         }
