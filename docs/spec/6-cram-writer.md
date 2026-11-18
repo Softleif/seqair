@@ -50,8 +50,8 @@ The file MUST end with the CRAM 3 EOF container, the 38 bytes htslib's `cram_che
 r[cram_writer.sort_order]
 Records MUST arrive ordered by reference id, then position, with every unplaced record (no reference) after all placed ones; unplaced records are in no order among themselves, though they keep the `POS` they have (htslib writes 1 for many). A record that breaks the order MUST be refused with `CramWriteError::Unsorted`. A record with a reference but no position, and a mapped record without a reference, MUST be refused (`InvalidPlacement`).
 
-r[cram_writer.slicing]
-Each container MUST hold one slice. A slice MUST end when the next record is on another reference (or is the first unplaced one), and when it holds 10,000 records or 5,000,000 bases, htslib's defaults. Unplaced records go in slices whose reference id is `-1`.
+r[cram_writer.slicing+2]
+Each container MUST hold one slice. A slice MUST end when the next record is on another reference (or is the first unplaced one), and when it holds 10,000 records or 5,000,000 bases, htslib's defaults, or under the archive profile (`r[cram_writer.profile]`) 100,000 records or 50,000,000 bases, as htslib's archive profile: fewer, larger slices compress better, at the cost of coarser random access and more memory per slice. Unplaced records go in slices whose reference id is `-1`.
 
 r[cram_writer.container_header]
 A data container's header MUST give its slice's reference id, alignment start and span, its record count, the number of records before it in the file (the record counter), its total read length (`bases`), its block count, one landmark (the offset of the slice header block from the container's data start, which is the size of the compression header block), and the CRC32 of the header's bytes before it.
