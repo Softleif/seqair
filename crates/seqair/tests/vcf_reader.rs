@@ -243,6 +243,138 @@ fn truth_vcf_gz_reads_as_bcftools_prints_it() {
     check_against_bcftools("truth.vcf.gz");
 }
 
+// ── noodles as a second implementation ──────────────────────────────────
+
+fn noodles_strs<T: ToString>(v: &[Option<T>]) -> Vec<Tok> {
+    let joined: Vec<String> =
+        v.iter().map(|x| x.as_ref().map_or_else(|| ".".to_owned(), ToString::to_string)).collect();
+    vec![Tok::Str(joined.join(","))]
+}
+
+fn noodles_info(v: Option<&noodles::vcf::variant::record_buf::info::field::Value>) -> Vec<Tok> {
+    use noodles::vcf::variant::record_buf::info::field::{Value, value::Array};
+    match v {
+        None => vec![],
+        Some(Value::Integer(i)) => vec![Tok::Int(Some(*i))],
+        Some(Value::Float(f)) => vec![Tok::Float(Some(*f))],
+        Some(Value::Flag) => vec![Tok::Flag],
+        Some(Value::Character(c)) => vec![Tok::Str(c.to_string())],
+        Some(Value::String(s)) => vec![Tok::Str(s.clone())],
+        Some(Value::Array(Array::Integer(v))) => v.iter().copied().map(Tok::Int).collect(),
+        Some(Value::Array(Array::Float(v))) => v.iter().copied().map(Tok::Float).collect(),
+        Some(Value::Array(Array::Character(v))) => noodles_strs(v),
+        Some(Value::Array(Array::String(v))) => noodles_strs(v),
+    }
+}
+
+fn noodles_sample(
+    v: Option<&noodles::vcf::variant::record_buf::samples::sample::Value>,
+) -> Vec<Tok> {
+    use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
+    use noodles::vcf::variant::record_buf::samples::sample::{Value, value::Array};
+    match v {
+        None => vec![],
+        Some(Value::Integer(i)) => vec![Tok::Int(Some(*i))],
+        Some(Value::Float(f)) => vec![Tok::Float(Some(*f))],
+        Some(Value::Character(c)) => vec![Tok::Str(c.to_string())],
+        Some(Value::String(s)) => vec![Tok::Str(s.clone())],
+        Some(Value::Genotype(g)) => {
+            let mut s = String::new();
+            for (i, a) in g.as_ref().iter().enumerate() {
+                if i > 0 {
+                    s.push(if a.phasing() == Phasing::Phased { '|' } else { '/' });
+                }
+                s.push_str(&a.position().map_or_else(|| ".".to_owned(), |p| p.to_string()));
+            }
+            vec![Tok::Str(s)]
+        }
+        Some(Value::Array(Array::Integer(v))) => v.iter().copied().map(Tok::Int).collect(),
+        Some(Value::Array(Array::Float(v))) => v.iter().copied().map(Tok::Float).collect(),
+        Some(Value::Array(Array::Character(v))) => noodles_strs(v),
+        Some(Value::Array(Array::String(v))) => noodles_strs(v),
+    }
+}
+
+/// A missing GT is `.` to us and no value to noodles.
+fn same_or_missing(ours: &[Tok], theirs: &[Tok]) -> bool {
+    same(ours, theirs) || (ours == [Tok::Str(".".to_owned())] && theirs.is_empty())
+}
+
+// r[verify vcf_reader.oracles]
+/// Every field of every record of a VCF text fixture, read through
+/// `FullRecord`, equals what noodles reads.
+fn check_against_noodles(name: &str) {
+    let path = fixture(name);
+    let file = VcfFile::open(&path).unwrap();
+    let samples: Vec<_> = file.header().sample_indices().collect();
+    let bgzf = noodles::bgzf::io::Reader::new(std::fs::File::open(&path).unwrap());
+    let mut theirs = noodles::vcf::io::Reader::new(std::io::BufReader::new(bgzf));
+    let their_header = theirs.read_header().unwrap();
+    let mut their_records = theirs.record_bufs(&their_header);
+    let mut reader = file.reader::<FullRecord>().open().unwrap();
+    let mut n = 0;
+    while let Some(rec) = reader.next_record().unwrap() {
+        let t = their_records.next().expect("noodles has as many records").unwrap();
+        let at = format!("{name} record {n}");
+        assert_eq!(rec.locus().contig().name(), t.reference_sequence_name(), "{at}");
+        let pos = t.variant_start().map_or(0, |p| u32::try_from(usize::from(p)).unwrap());
+        let start = match rec.locus().start() {
+            VcfPos::At(p) => p.as_u32(),
+            VcfPos::Telomere => 0,
+        };
+        assert_eq!(start, pos, "{at}");
+        let site = rec.site();
+        let ids: Vec<&str> = site.ids().collect();
+        let their_ids: Vec<&str> = t.ids().as_ref().iter().map(String::as_str).collect();
+        assert_eq!(ids, their_ids, "{at}");
+        assert_eq!(site.alleles().reference(), t.reference_bases().as_bytes(), "{at}");
+        let alts: Vec<String> = site.alleles().alts().map(render_alt).collect();
+        assert_eq!(alts, t.alternate_bases().as_ref(), "{at}");
+        match (site.qual(), t.quality_score()) {
+            (None, None) => {}
+            (Some(a), Some(b)) => assert!(close(a, b), "{at}: QUAL {a} vs {b}"),
+            (a, b) => panic!("{at}: QUAL {a:?} vs {b:?}"),
+        }
+        let filters: Vec<String> = match site.filters().status() {
+            FilterStatus::Pass => vec!["PASS".to_owned()],
+            FilterStatus::Missing => vec![],
+            FilterStatus::Failed(f) => f.map(|f| f.name().to_owned()).collect(),
+        };
+        let their_filters: Vec<String> = t.filters().as_ref().iter().cloned().collect();
+        assert_eq!(filters, their_filters, "{at}");
+        let info: Vec<_> = rec.info().iter().unwrap().collect::<Result<_, _>>().unwrap();
+        let their_info = t.info().as_ref();
+        assert_eq!(info.len(), their_info.len(), "{at}: INFO fields");
+        for ((key, _, value), (their_key, their_value)) in info.iter().zip(their_info) {
+            assert_eq!(key, their_key, "{at}");
+            let (ours, theirs) = (tokens_of(value), noodles_info(their_value.as_ref()));
+            assert!(same(&ours, &theirs), "{at}: INFO {key}: {ours:?} vs {theirs:?}");
+        }
+        let keys: Vec<&String> = t.samples().keys().as_ref().iter().collect();
+        for (sample, their_sample) in samples.iter().zip(t.samples().values()) {
+            let ours: Vec<_> =
+                rec.samples().sample(*sample).iter().unwrap().collect::<Result<_, _>>().unwrap();
+            assert_eq!(ours.len(), keys.len(), "{at}: FORMAT fields");
+            for ((key, _, value), (their_key, their_value)) in
+                ours.iter().zip(keys.iter().zip(their_sample.values()))
+            {
+                assert_eq!(key, their_key, "{at}");
+                let (ours, theirs) = (tokens_of(value), noodles_sample(their_value.as_ref()));
+                assert!(same_or_missing(&ours, &theirs), "{at}: {key}: {ours:?} vs {theirs:?}");
+            }
+        }
+        n += 1;
+    }
+    assert!(their_records.next().is_none(), "{name}: noodles has more records");
+    assert!(n > 0);
+}
+
+// rastair.vcf.gz is not compared: noodles refuses its `Number=M` FORMAT field.
+#[test]
+fn truth_vcf_gz_reads_as_noodles_reads_it() {
+    check_against_noodles("truth.vcf.gz");
+}
+
 // ── Fixtures through every way of reading ──────────────────────────────
 
 // r[verify vcf_reader.reader]
