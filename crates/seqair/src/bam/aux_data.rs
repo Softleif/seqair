@@ -346,7 +346,7 @@ fn find_tag_byte_range(data: &[u8], target: [u8; 2]) -> Option<std::ops::Range<u
 
 /// Advance `pos` past one auxiliary tag value of the given type.
 /// Returns the new position, or `None` if data is truncated/malformed.
-fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
+pub(crate) fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
     match typ {
         b'A' | b'c' | b'C' => pos = pos.checked_add(1)?,
         b's' | b'S' => pos = pos.checked_add(2)?,

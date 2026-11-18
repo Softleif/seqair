@@ -44,7 +44,7 @@ pub struct SubstitutionMatrix {
 
 impl SubstitutionMatrix {
     /// Possible read bases for each reference base (excluding the ref itself).
-    const READ_BASES: [[u8; 4]; 5] = [
+    pub(crate) const READ_BASES: [[u8; 4]; 5] = [
         *b"CGTN", // ref A
         *b"AGTN", // ref C
         *b"ACTN", // ref G
