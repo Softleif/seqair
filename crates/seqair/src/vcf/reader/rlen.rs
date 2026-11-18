@@ -197,6 +197,35 @@ fn format_len(format: &[u8]) -> Option<i64> {
 mod tests {
     use super::*;
 
+    // r[verify vcf_values.rlen+2]
+    /// The writer's keys (declared fields only) are the reader's for every
+    /// header that declares the field; only a VCF text file whose header
+    /// leaves END/SVLEN/LEN out reads them where a writer cannot write them.
+    #[test]
+    fn the_writers_keys_are_the_readers_for_declared_fields() {
+        let keys = |k: RlenKeys| (k.end, k.svlen, k.len);
+        let header = |lines: &str| {
+            let text = format!(
+                "##fileformat=VCFv4.3\n{lines}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            );
+            crate::vcf::VcfHeader::parse(&text).unwrap()
+        };
+        let declared = header(concat!(
+            "##INFO=<ID=END,Number=1,Type=Integer,Description=\"e\">\n",
+            "##INFO=<ID=SVLEN,Number=A,Type=String,Description=\"s\">\n",
+            "##FORMAT=<ID=LEN,Number=1,Type=Integer,Description=\"l\">\n",
+        ));
+        for text in [true, false] {
+            let read = RlenKeys::new(&FieldTable::new(&declared, text));
+            assert_eq!(keys(read), keys(RlenKeys::from_header(&declared)));
+            assert_eq!(keys(read), (true, false, true));
+        }
+        let silent = header("");
+        assert_eq!(keys(RlenKeys::from_header(&silent)), (false, false, false));
+        assert_eq!(keys(RlenKeys::new(&FieldTable::new(&silent, false))), (false, false, false));
+        assert_eq!(keys(RlenKeys::new(&FieldTable::new(&silent, true))), (true, true, true));
+    }
+
     #[test]
     fn symbolic_alleles_whose_svlen_spans_the_reference() {
         for yes in [&b"<DEL>"[..], b"<DUP>", b"<INV>", b"<CNV>", b"<DEL:ME>", b"<CNV:TR>"] {
