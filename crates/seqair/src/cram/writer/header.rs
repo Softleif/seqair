@@ -8,6 +8,7 @@ use crate::fasta::IndexedFastaReader;
 use crate::reader::Tid;
 use rustc_hash::FxHashMap;
 use seqair_types::{Pos0, SmolStr};
+use std::sync::{Mutex, PoisonError};
 
 /// A reference's id and uppercased bases.
 pub(super) type Hashed = (Tid, Vec<u8>);
@@ -29,7 +30,9 @@ struct Target {
 
 /// A target the FASTA holds.
 pub(super) struct TargetReference {
-    m5: M5,
+    /// Behind a lock so the header can be shared with the threads that
+    /// encode slices while the writer checks a reference's `M5`.
+    m5: Mutex<M5>,
 }
 
 /// Where the header's `M5` stands against the FASTA's bases.
@@ -146,12 +149,12 @@ impl CramHeader {
     /// The uppercased bases of `tid` into `bases`, checked against the
     /// header's `M5` the first time.
     pub(super) fn fetch(
-        &mut self,
+        &self,
         tid: Tid,
         fasta: &mut IndexedFastaReader,
         bases: &mut Vec<u8>,
     ) -> Result<(), CramWriteError> {
-        let Some(target) = self.targets.get_mut(tid.as_usize()) else { return Ok(()) };
+        let Some(target) = self.targets.get(tid.as_usize()) else { return Ok(()) };
         let mismatch = |name: &SmolStr, header: &SmolStr, fasta: &SmolStr| {
             CramWriteError::ReferenceMd5Mismatch {
                 contig: name.clone(),
@@ -159,20 +162,24 @@ impl CramHeader {
                 fasta: fasta.clone(),
             }
         };
-        if let Some(TargetReference { m5: M5::Mismatch { header, fasta } }) = &target.reference {
+        let Some(reference) = &target.reference else {
+            return fetch_upper(&target.name, 0..target.length, fasta, bases);
+        };
+        // Only the writer's own thread checks an `M5`; the lock is never
+        // contended, and a panic while holding it leaves a valid state.
+        let mut m5 = reference.m5.lock().unwrap_or_else(PoisonError::into_inner);
+        if let M5::Mismatch { header, fasta } = &*m5 {
             return Err(mismatch(&target.name, header, fasta));
         }
         fetch_upper(&target.name, 0..target.length, fasta, bases)?;
-        if let Some(reference) = &mut target.reference
-            && let M5::Unchecked(header) = &reference.m5
-        {
+        if let M5::Unchecked(header) = &*m5 {
             let found = md5_hex(bases);
             if !header.eq_ignore_ascii_case(&found) {
                 let err = mismatch(&target.name, header, &found);
-                reference.m5 = M5::Mismatch { header: header.clone(), fasta: found };
+                *m5 = M5::Mismatch { header: header.clone(), fasta: found };
                 return Err(err);
             }
-            reference.m5 = M5::Verified;
+            *m5 = M5::Verified;
         }
         Ok(())
     }
@@ -220,7 +227,9 @@ fn describe(
         });
     }
     match m5 {
-        Some(m5) => Ok((Some(TargetReference { m5: M5::Unchecked(SmolStr::new(m5)) }), None)),
+        Some(m5) => {
+            Ok((Some(TargetReference { m5: Mutex::new(M5::Unchecked(SmolStr::new(m5))) }), None))
+        }
         None => {
             // r[impl cram_writer.header_m5.reuse]
             let m5 = if kept.is_none() {
@@ -240,7 +249,7 @@ fn describe(
                 }
                 SmolStr::new(format!("{:x}", md5.finalize()))
             };
-            Ok((Some(TargetReference { m5: M5::Verified }), Some(m5)))
+            Ok((Some(TargetReference { m5: Mutex::new(M5::Verified) }), Some(m5)))
         }
     }
 }
