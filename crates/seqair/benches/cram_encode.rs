@@ -86,14 +86,21 @@ fn rans_nx16_encode_bench(c: &mut Criterion) {
         // normal profile (order 0, 1, RLE, STRIPE, PACK, RLE + PACK; 32
         // states from 50 000 bytes on, but for STRIPE).
         let x32 = if data.len() >= 50_000 { 4 } else { 0 };
-        let profile = [0, 1, 0x40, 0x09, 0x80, 0xC1].map(|m| if m & 0x08 == 0 { m | x32 } else { m });
+        let profile =
+            [0, 1, 0x40, 0x09, 0x80, 0xC1].map(|m| if m & 0x08 == 0 { m | x32 } else { m });
         for (label, scalar) in [("scalar", true), ("simd", false)] {
             group.bench_function(BenchmarkId::new(label, "profile"), |b| {
-                b.iter(|| profile.map(|m| rans_nx16_encode(black_box(data), m, scalar).unwrap().len()));
+                b.iter(|| {
+                    profile.map(|m| rans_nx16_encode(black_box(data), m, scalar).unwrap().len())
+                });
             });
         }
         group.bench_function(BenchmarkId::new("htscodecs", "profile"), |b| {
-            b.iter(|| profile.map(|m| htscodecs::rans_compress_4x16(black_box(data), m).unwrap().as_slice().len()));
+            b.iter(|| {
+                profile.map(|m| {
+                    htscodecs::rans_compress_4x16(black_box(data), m).unwrap().as_slice().len()
+                })
+            });
         });
         group.finish();
     }
