@@ -340,6 +340,39 @@ fn crai_lines(path: &Path) -> Vec<String> {
     text.lines().map(String::from).collect()
 }
 
+// r[verify cram_writer.slicing+2]
+/// The archive profile cuts slices of up to 100,000 records: the fixture's
+/// 29,358 records take one slice per reference, where the normal profile
+/// cuts chr19 every 10,000.
+#[test]
+fn archive_slices_are_larger() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = data("test.fasta.gz");
+    let (header, records) = stream_bam(&data("test.bam"));
+    let slices = |version| {
+        let reference = IndexedFastaReader::open(&fasta).unwrap();
+        let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
+            .version(version)
+            .write_index(true)
+            .build()
+            .unwrap();
+        for record in &records {
+            writer.write_raw(record).unwrap();
+        }
+        let (_, index) = writer.finish().unwrap();
+        let path = dir.path().join("index.crai");
+        index.unwrap().write_crai(std::fs::File::create(&path).unwrap()).unwrap();
+        crai_lines(&path).len()
+    };
+    let normal = slices(CramVersion::V3_1(CramProfile::Normal));
+    let archive = slices(CramVersion::V3_1(CramProfile::Archive));
+    let references =
+        records.iter().filter_map(|r| r.tid()).collect::<std::collections::BTreeSet<_>>().len();
+    let unplaced = usize::from(records.iter().any(|r| r.tid().is_none()));
+    assert_eq!(archive, references + unplaced);
+    assert!(normal > archive, "{normal} vs {archive}");
+}
+
 // r[verify cram_writer.crai]
 /// The index the writer builds is the one `samtools index` builds for its
 /// output, and seqair's indexed reader queries the file with it.
@@ -765,7 +798,7 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
 // r[verify cram_writer.record.position]
 // r[verify cram_writer.record.quality]
 // r[verify cram_writer.record.mapq]
-// r[verify cram_writer.slicing]
+// r[verify cram_writer.slicing+2]
 // r[verify cram_writer.container_header]
 // r[verify cram_writer.slice_header]
 // r[verify cram_writer.slice_extent]

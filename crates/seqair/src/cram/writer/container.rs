@@ -280,7 +280,11 @@ pub(super) struct SliceBuilder {
 
 /// htslib's `seqs_per_slice` and `bases_per_slice` defaults.
 pub(super) const MAX_RECORDS: u32 = 10_000;
+/// htslib's archive profile's `seqs_per_slice`.
+pub(super) const ARCHIVE_RECORDS: u32 = 100_000;
 const MAX_BASES: u64 = 5_000_000;
+/// htslib's bases per slice when it sets the records per slice.
+const BASES_PER_RECORD: u64 = 500;
 
 impl SliceBuilder {
     pub(super) fn kind(&self) -> Option<SliceKind> {
@@ -297,7 +301,8 @@ impl SliceBuilder {
         self.kind.is_some_and(|k| {
             k != kind
                 || self.n_records >= max_records
-                || self.n_bases.saturating_add(u64::from(read_len.unsigned_abs())) > MAX_BASES
+                || self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()))
+                    > MAX_BASES.max(u64::from(max_records).saturating_mul(BASES_PER_RECORD))
         })
     }
 
