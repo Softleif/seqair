@@ -45,6 +45,9 @@ Every `@SQ` line of a reference the FASTA holds MUST carry `M5`, the lowercase h
 r[cram_writer.header_m5.reuse]
 The bases of the first reference whose `M5` `build()` computes MUST be kept for the first slice on that reference, rather than read from the FASTA a second time. They are dropped, or their buffer reused, when a slice on another reference needs its bases.
 
+r[cram_writer.header_m5.threads]
+With `compression_threads(n)`, `build()` MUST compute the missing MD5s on `n` threads, each reading the FASTA through a handle of its own (`IndexedFastaReader::fork`): hashing a whole genome's references is most of the time a CRAM of one chromosome takes to write, and htslib does it on one thread. The header is the same whatever the thread count.
+
 r[cram_writer.eof]
 The file MUST end with the CRAM 3 EOF container, the 38 bytes htslib's `cram_check_EOF` matches.
 
