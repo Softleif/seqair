@@ -73,7 +73,7 @@ fn take_c_buffer(p: *mut u8, len: usize) -> Vec<u8> {
 
 /// `arith_compress_to` with `order` holding the flags (and the stripe count
 /// in bits 8..16).
-fn htscodecs_compress(data: &[u8], order: c_int) -> Vec<u8> {
+pub(crate) fn htscodecs_compress(data: &[u8], order: c_int) -> Vec<u8> {
     let mut input = data.to_vec();
     let mut out_size: c_uint = 0;
     // SAFETY: a null `out` makes htscodecs allocate the output and report
@@ -168,7 +168,7 @@ const PACK: c_int = 0x80;
 /// Data in the shapes the coder meets: raw bytes, a small alphabet in runs,
 /// long runs of a couple of symbols, and little-endian u32s.
 #[hegel::composite]
-fn arb_data(tc: &TestCase) -> Vec<u8> {
+pub(crate) fn arb_data(tc: &TestCase) -> Vec<u8> {
     match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
         0 => tc.draw_silent(gs::binary().max_size(3000)),
         1 => {

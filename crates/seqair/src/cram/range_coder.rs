@@ -187,14 +187,6 @@ impl<const N: usize> AdaptiveModel<N> {
         };
         apply(rc, &mut self.total, live, found)
     }
-
-    /// Halve every frequency, rounding up so none reaches zero.
-    #[cfg(test)]
-    fn renormalize(&mut self) {
-        if let Some(live) = self.syms.get_mut(..usize::from(self.len)) {
-            self.total = renormalize(live);
-        }
-    }
 }
 
 /// Decode one symbol of the adaptive model whose live entries are `syms` and
@@ -231,11 +223,18 @@ fn apply(
     syms: &mut [SymFreq],
     found: Found,
 ) -> Option<u16> {
-    let i = found.index;
     rc.decode(found.cum, found.freq)?;
-    let entry = syms.get_mut(i)?;
-    let sym = entry.sym;
+    let sym = syms.get(found.index)?.sym;
+    update(total, syms, found.index)?;
+    Some(sym)
+}
 
+/// Add [`STEP`] to entry `i`, renormalise past [`MAX_FREQ`], and swap the
+/// entry forward if it overtook its predecessor: what coding a symbol does
+/// to its model, in either direction.
+#[inline(always)]
+fn update(total: &mut u32, syms: &mut [SymFreq], i: usize) -> Option<()> {
+    let entry = syms.get_mut(i)?;
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "freq <= total <= MAX_FREQ < u16::MAX - STEP"
@@ -253,7 +252,117 @@ fn apply(
     {
         syms.swap(prev, i);
     }
-    Some(sym)
+    Some(())
+}
+
+/// The encoding side of the range coder: htscodecs' `RC_Encode`,
+/// `RC_ShiftLow` and `RC_FinishEncode` (the spec's `RangeEncode`,
+/// `RangeShiftLow`, `RangeEncodeEnd`), for the CRAM writer.
+// r[impl cram_writer.arith]
+// r[impl cram_writer.fqzcomp]
+#[derive(Debug)]
+pub(crate) struct RangeEncoder {
+    low: u32,
+    range: u32,
+    /// `0xFF` bytes held back until a carry decides whether they wrap to 0.
+    ff_num: usize,
+    /// The top byte of `low`, waiting for a possible carry.
+    cache: u8,
+    carry: bool,
+    out: Vec<u8>,
+}
+
+impl RangeEncoder {
+    /// Start a stream at the end of `out`, which the encoder appends to.
+    pub(crate) fn new(out: Vec<u8>) -> Self {
+        Self { low: 0, range: u32::MAX, ff_num: 0, cache: 0, carry: false, out }
+    }
+
+    /// Narrow the range to `[cum, cum + freq)` of `total` and emit what is
+    /// settled. `None`, coding nothing, for an empty symbol, one outside
+    /// `total`, or a `total` past [`MAX_FREQ`] + [`STEP`].
+    #[inline]
+    pub(crate) fn encode(&mut self, cum: u32, freq: u32, total: u32) -> Option<()> {
+        if freq == 0 || cum.checked_add(freq)? > total || total > MAX_FREQ + u32::from(STEP) {
+            return None;
+        }
+        // range >= 2^24 > total, so the quotient is >= 1 and
+        // (cum + freq) * r <= range: neither product overflows.
+        let r = self.range.checked_div(total)?;
+        let (low, overflow) = self.low.overflowing_add(cum.wrapping_mul(r));
+        self.low = low;
+        self.carry |= overflow;
+        self.range = r.wrapping_mul(freq);
+        while self.range < TOP {
+            self.range <<= 8;
+            self.shift_low();
+        }
+        Some(())
+    }
+
+    fn shift_low(&mut self) {
+        if self.low < 0xFF00_0000 || self.carry {
+            let carry = u8::from(self.carry);
+            self.out.push(self.cache.wrapping_add(carry));
+            // Held-back 0xFF bytes wrap to 0 under a carry.
+            self.out.extend(std::iter::repeat_n(0xFFu8.wrapping_add(carry), self.ff_num));
+            self.ff_num = 0;
+            let [.., top] = self.low.to_le_bytes();
+            self.cache = top;
+            self.carry = false;
+        } else {
+            self.ff_num = self.ff_num.saturating_add(1);
+        }
+        self.low <<= 8;
+    }
+
+    /// Flush the coder and return the output.
+    pub(crate) fn finish(mut self) -> Vec<u8> {
+        for _ in 0..5 {
+            self.shift_low();
+        }
+        self.out
+    }
+}
+
+impl<const N: usize> AdaptiveModel<N> {
+    /// Encode `sym` and update the model as decoding it does. `None` if the
+    /// model has no such symbol.
+    #[inline]
+    pub(crate) fn encode(&mut self, rc: &mut RangeEncoder, sym: u16) -> Option<()> {
+        let live = self.syms.get_mut(..usize::from(self.len))?;
+        encode_symbol(rc, &mut self.total, live, sym)
+    }
+}
+
+/// Encode `sym` with the adaptive model whose live entries are `syms` and
+/// whose frequencies sum to `total`, and update the model: the inverse of
+/// [`decode_symbol`] (htscodecs' `encodeSymbol`). `None` if the model has no
+/// such symbol.
+// r[impl cram_writer.arith]
+// r[impl cram_writer.fqzcomp]
+#[inline]
+pub(crate) fn encode_symbol(
+    rc: &mut RangeEncoder,
+    total: &mut u32,
+    syms: &mut [SymFreq],
+    sym: u16,
+) -> Option<()> {
+    let mut cum = 0u32;
+    let mut found = None;
+    for (index, s) in syms.iter().enumerate() {
+        if s.sym == sym {
+            found = Some((index, u32::from(s.freq)));
+            break;
+        }
+        #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
+        {
+            cum += u32::from(s.freq);
+        }
+    }
+    let (index, freq) = found?;
+    rc.encode(cum, freq, *total)?;
+    update(total, syms, index)
 }
 
 /// The model's scan, one entry at a time: the entry whose cumulative range
@@ -457,99 +566,9 @@ fn renormalize(syms: &mut [SymFreq]) -> u32 {
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::indexing_slicing,
-    reason = "test-only encoder and generators with bounded values"
-)]
-pub(crate) mod test_encoder {
-    //! The encoding side, for round-trip tests only: `CRAMcodecs`
-    //! `RangeEncode` / `RangeShiftLow` / `RangeEncodeEnd`, and the model's
-    //! `encodeSymbol`.
-
-    use super::{AdaptiveModel, MAX_FREQ, STEP, TOP};
-
-    #[derive(Debug, Default)]
-    pub(crate) struct RangeEncoder {
-        low: u32,
-        range: u32,
-        ff_num: u32,
-        cache: u32,
-        carry: u32,
-        pub(crate) out: Vec<u8>,
-    }
-
-    impl RangeEncoder {
-        pub(crate) fn new() -> Self {
-            Self { range: u32::MAX, ..Self::default() }
-        }
-
-        pub(crate) fn encode(&mut self, cum: u32, freq: u32, total: u32) {
-            let old_low = self.low;
-            self.range /= total;
-            self.low = self.low.wrapping_add(cum * self.range);
-            self.range *= freq;
-            if self.low < old_low {
-                self.carry = 1;
-            }
-            while self.range < TOP {
-                self.range <<= 8;
-                self.shift_low();
-            }
-        }
-
-        fn shift_low(&mut self) {
-            if self.low < 0xff00_0000 || self.carry != 0 {
-                let (byte, fill) = if self.carry == 0 {
-                    (self.cache as u8, 0xff)
-                } else {
-                    ((self.cache + 1) as u8, 0)
-                };
-                self.out.push(byte);
-                for _ in 0..self.ff_num {
-                    self.out.push(fill);
-                }
-                self.ff_num = 0;
-                self.cache = self.low >> 24;
-                self.carry = 0;
-            } else {
-                self.ff_num += 1;
-            }
-            self.low <<= 8;
-        }
-
-        pub(crate) fn finish(mut self) -> Vec<u8> {
-            for _ in 0..5 {
-                self.shift_low();
-            }
-            self.out
-        }
-    }
-
-    impl<const N: usize> AdaptiveModel<N> {
-        pub(crate) fn encode(&mut self, rc: &mut RangeEncoder, sym: u16) {
-            let live = &mut self.syms[..usize::from(self.len)];
-            let i = live.iter().position(|s| s.sym == sym).expect("symbol in model");
-            let cum: u32 = live[..i].iter().map(|s| u32::from(s.freq)).sum();
-            rc.encode(cum, u32::from(live[i].freq), self.total);
-            live[i].freq += STEP;
-            self.total += u32::from(STEP);
-            if self.total > MAX_FREQ {
-                self.renormalize();
-            }
-            if i > 0 && self.syms[i].freq > self.syms[i - 1].freq {
-                self.syms.swap(i - 1, i);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::indexing_slicing,
     reason = "test code: bounded by generator ranges"
 )]
 mod tests {
-    use super::test_encoder::RangeEncoder;
     use super::*;
     use fearless_simd::{Level, dispatch};
     use hegel::prelude::*;
@@ -581,10 +600,10 @@ mod tests {
             .max_size(20_000),
         );
 
-        let mut enc = RangeEncoder::new();
+        let mut enc = RangeEncoder::new(Vec::new());
         let mut m = AdaptiveModel::<256>::new(max_sym);
         for &s in &data {
-            m.encode(&mut enc, s);
+            m.encode(&mut enc, s).unwrap();
         }
         let bytes = enc.finish();
 
@@ -604,11 +623,11 @@ mod tests {
     fn context_models_round_trip(tc: TestCase) {
         let data: Vec<u8> = tc.draw(gs::vecs(gs::integers::<u8>().max_value(3)).max_size(5_000));
 
-        let mut enc = RangeEncoder::new();
+        let mut enc = RangeEncoder::new(Vec::new());
         let mut ms = vec![AdaptiveModel::<4>::new(4); 4];
         let mut last = 0usize;
         for &s in &data {
-            ms[last].encode(&mut enc, u16::from(s));
+            ms[last].encode(&mut enc, u16::from(s)).unwrap();
             last = usize::from(s);
         }
         let bytes = enc.finish();
@@ -672,16 +691,32 @@ mod tests {
 
     #[test]
     fn model_renormalises_without_zero_frequencies() {
-        let mut enc = RangeEncoder::new();
+        let mut enc = RangeEncoder::new(Vec::new());
         let mut m = AdaptiveModel::<3>::new(3);
         // Enough of one symbol to cross MAX_FREQ several times.
         for _ in 0..20_000 {
-            m.encode(&mut enc, 2);
+            m.encode(&mut enc, 2).unwrap();
         }
         assert!(m.total <= MAX_FREQ);
         assert!(m.syms.iter().all(|s| s.freq >= 1));
         assert_eq!(m.syms[0].sym, 2, "the hot symbol bubbled to the front");
         assert_eq!(m.total, m.syms.iter().map(|s| u32::from(s.freq)).sum::<u32>());
+    }
+
+    // r[verify cram_writer.arith]
+    // r[verify cram_writer.fqzcomp]
+    /// A symbol the coder cannot narrow to is refused, not looped on.
+    #[test]
+    fn encoder_refuses_impossible_symbols() {
+        let mut rc = RangeEncoder::new(Vec::new());
+        assert_eq!(rc.encode(0, 1, 0), None, "empty total");
+        assert_eq!(rc.encode(0, 0, 4), None, "empty symbol");
+        assert_eq!(rc.encode(3, 2, 4), None, "past the total");
+        assert_eq!(rc.encode(0, 1, MAX_FREQ + u32::from(STEP) + 1), None, "total too large");
+        assert_eq!(rc.encode(u32::MAX, 2, 4), None, "cum + freq overflows");
+        assert_eq!(rc.encode(1, 2, 4), Some(()));
+        let mut m = AdaptiveModel::<4>::new(2);
+        assert_eq!(m.encode(&mut rc, 3), None, "symbol outside the model");
     }
 
     #[test]
@@ -730,11 +765,11 @@ mod tests {
             // Skewed symbols, so models renormalise and reorder.
             let hot = tc.draw(gs::integers::<usize>().min_value(1).max_value(256));
             let picks = tc.draw(gs::binary().min_size(n).max_size(n));
-            let mut enc = RangeEncoder::new();
+            let mut enc = RangeEncoder::new(Vec::new());
             let mut ms: Vec<_> = sizes.iter().map(|&s| AdaptiveModel::<256>::new(s)).collect();
             for (i, &b) in picks.iter().enumerate() {
                 let k = i % sizes.len();
-                ms[k].encode(&mut enc, (usize::from(b) % hot % sizes[k]) as u16);
+                ms[k].encode(&mut enc, (usize::from(b) % hot % sizes[k]) as u16).unwrap();
             }
             enc.finish()
         } else {

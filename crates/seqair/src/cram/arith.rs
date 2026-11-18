@@ -359,7 +359,7 @@ mod tests {
     //! (`RangeEncode`, the RLE run split, `hts_pack`'s bit layout, the
     //! stripe transpose), written independently of the decoder.
 
-    use super::super::range_coder::test_encoder::RangeEncoder;
+    use super::super::range_coder::RangeEncoder;
     use super::*;
     use hegel::prelude::*;
     use std::io::Read;
@@ -380,11 +380,11 @@ mod tests {
 
     fn encode_order(data: &[u8], order1: bool) -> Vec<u8> {
         let m = max_sym(data);
-        let mut rc = RangeEncoder::new();
+        let mut rc = RangeEncoder::new(Vec::new());
         let mut models = vec![LiteralModel::new(usize::from(m)); 256];
         let mut last = 0usize;
         for &b in data {
-            models[if order1 { last } else { 0 }].encode(&mut rc, u16::from(b));
+            models[if order1 { last } else { 0 }].encode(&mut rc, u16::from(b)).unwrap();
             last = usize::from(b);
         }
         let mut out = vec![m as u8];
@@ -397,14 +397,14 @@ mod tests {
     /// with a closing 0 after a final part of 3.
     fn encode_rle(data: &[u8], order1: bool) -> Vec<u8> {
         let m = max_sym(data);
-        let mut rc = RangeEncoder::new();
+        let mut rc = RangeEncoder::new(Vec::new());
         let mut lits = vec![LiteralModel::new(usize::from(m)); 256];
         let mut runs = vec![RunModel::new(4); 258];
         let mut last = 0usize;
         let mut i = 0;
         while i < data.len() {
             let lit = data[i];
-            lits[if order1 { last } else { 0 }].encode(&mut rc, u16::from(lit));
+            lits[if order1 { last } else { 0 }].encode(&mut rc, u16::from(lit)).unwrap();
             last = usize::from(lit);
             i += 1;
             let mut run = 0usize;
@@ -415,11 +415,11 @@ mod tests {
             let mut rctx = usize::from(lit);
             loop {
                 let part = run.min(3);
-                runs[rctx].encode(&mut rc, part as u16);
+                runs[rctx].encode(&mut rc, part as u16).unwrap();
                 run -= part;
                 rctx = if rctx == usize::from(lit) { 256 } else { 257 };
                 if part == 3 && run == 0 {
-                    runs[rctx].encode(&mut rc, 0);
+                    runs[rctx].encode(&mut rc, 0).unwrap();
                 }
                 if run == 0 {
                     break;
