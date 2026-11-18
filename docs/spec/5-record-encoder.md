@@ -139,8 +139,8 @@ Every entry point that accepts a caller-supplied number destined for a BCF numer
 r[record_encoder.info_state_queries]
 `InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
 
-r[record_encoder.info_dedup]
-If the same INFO field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct INFO field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_info_*` semantics. Duplicate **detection** MUST be O(1) per field (a `u64` bitset keyed by `dict_idx`); the linear offset bookkeeping is only consulted when a duplicate is actually present, so the common write-each-field-once path does no scan. The deduplication tracker SHOULD reuse its allocations across records.
+r[record_encoder.info_dedup+2]
+If the same INFO field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct INFO field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_info_*` semantics. Duplicate **detection** MUST be O(1) per field (a `FieldSet` keyed by `dict_idx`, `r[vcf_header.field_set]`); the linear offset bookkeeping is only consulted when a duplicate is actually present, so the common write-each-field-once path does no scan. The deduplication tracker SHOULD reuse its allocations across records.
 
 ## FormatEncoder Trait
 
@@ -156,8 +156,8 @@ The multi-valued array FORMAT keys (`FormatKey<Arr<i32>>`, `FormatKey<Arr<f32>>`
 r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record, and `n_samples()` returning the sample count the header declares — the same count the per-sample slice length is validated against in `r[record_encoder.format_methods]`.
 
-r[record_encoder.format_dedup]
-If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_format_*` semantics — for VCF text this means rewriting the corresponding colon-delimited subfield of every sample. The deduplication tracker SHOULD reuse its allocations across records. Detecting a duplicate SHOULD cost O(1) on the common path where each field is written once — a bitset keyed by `dict_idx`, as `FieldTracker` keeps for INFO — rather than a name comparison against every key already written; the text path's per-record FORMAT key list SHOULD clone the header's names rather than rebuild them from `&str`.
+r[record_encoder.format_dedup+2]
+If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_format_*` semantics — for VCF text this means rewriting the corresponding colon-delimited subfield of every sample. The deduplication tracker SHOULD reuse its allocations across records. Detecting a duplicate SHOULD cost O(1) on the common path where each field is written once — a `FieldSet` keyed by `dict_idx` (`r[vcf_header.field_set]`), as `FieldTracker` keeps for INFO — rather than a name comparison against every key already written; the text path's per-record FORMAT key list SHOULD clone the header's names rather than rebuild them from `&str`.
 
 ## Emit
 

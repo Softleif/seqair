@@ -66,8 +66,11 @@ Duplicate IDs within the same field category (INFO, FORMAT, FILTER, contig) MUST
 r[vcf_header.string_map]
 For BCF output, the header MUST provide a string-to-index dictionary mapping all FILTER, INFO, and FORMAT IDs to integer indices. The dictionary is built incrementally during builder construction; the typestate phase ordering guarantees entries appear in canonical order (PASS at index 0, then remaining FILTERs, then INFO, then FORMAT) without a runtime verification pass. Contig names use a separate index namespace matching insertion order.
 
-r[vcf_header.dict_capacity]
-The FILTER/INFO/FORMAT string dictionary MUST be capped at 64 entries, so every `dict_idx` fits in `0..64` and the per-record duplicate-field tracker can key a single `u64` bitset directly by index. Registering a field that would exceed this cap MUST return a typed error (`TooManyFields`). The cap does not apply to the separate contig namespace.
+r[vcf_header.dict_capacity+2]
+The FILTER/INFO/FORMAT string dictionary MUST hold up to `MAX_DICT_ENTRIES` = 65 536 entries, so every index fits a `u16` `DictId`. Real headers carry far more than the 64 entries an earlier version allowed (gnomAD 4.1 declares 244 ids, the 1000 Genomes high-coverage panel 83). Registering (writer) or parsing (reader) a field past the limit MUST return `TooManyFields { max }`. The limit is the same for both paths (`r[io.writer_limits]`). The cap does not apply to the separate contig namespace.
+
+r[vcf_header.field_set]
+Per-record "already seen" tracking keyed by `DictId` (the writer's INFO and FORMAT duplicate trackers, the reader's warn-once sets) MUST use one crate-internal `FieldSet`: a bitset over `Box<[u64]>` with `insert(id) -> bool` (true when the id was not yet present), `contains`, `clear` (zeroes the words, keeping the allocation) and an iterator over the set ids. An id beyond the current capacity MUST grow the set rather than panic or fail, so a `FieldSet` needs no header to be constructed. No dependency: no crate measured faster for these operations, and inline-storage variants (`SmallVec<u64, N>`, an inline/heap enum) measured 3–5× slower at small sizes because the storage branch on every access keeps the words out of registers.
 
 r[vcf_header.serialization]
 `to_vcf_text()` MUST emit all meta-information lines (`##`) followed by the `#CHROM` header line. Lines MUST be ordered: fileformat first, then other lines (metadata), then FILTER (PASS first), INFO, FORMAT, contig, then the #CHROM line. This ordering ensures the BCF string dictionary (built by scanning header lines in order) assigns PASS to index 0 and matches the dictionary indices used during encoding.
@@ -80,3 +83,33 @@ All string fields (IDs, descriptions, contig names, sample names) MUST use `Smol
 
 r[vcf_header.ordered_maps]
 INFO, FORMAT, FILTER, and contig maps MUST preserve insertion order. This is required for BCF dictionary index assignment and for deterministic VCF output.
+
+## Parsing
+
+A header read from a file is the same `VcfHeader` type the writer builds, so a reader's header can be handed to a writer (`r[vcf_reader.passthrough_header]`).
+
+> _[VCF45] §1.4 "Meta-information lines", §1.5 "Header line syntax"; [BCF2] "Dictionary of strings", "Dictionary of contigs"_
+
+r[vcf_header.parse]
+`VcfHeader::parse(text: &str)` MUST parse VCF header text — the `##` meta-information lines followed by the `#CHROM` line — as found at the start of a VCF file or in a BCF header's `l_text` block (trailing NUL bytes stripped). Structured lines (`##INFO=<…>`, `##FORMAT=<…>`, `##FILTER=<…>`, `##contig=<…>`, and any other `##key=<…>`) MUST be parsed as comma-separated `key=value` pairs where a value may be double-quoted and a quoted value may contain `\"` and `\\` escapes, commas and `=`. The `#CHROM` line MUST be tab-separated; the eight fixed column names MUST match exactly; a `FORMAT` column followed by sample names is optional.
+
+r[vcf_header.parse.version]
+The first line MUST be `##fileformat=VCFvMAJOR.MINOR`. It MUST be parsed into a typed, ordered `VcfVersion` exposed by `VcfHeader::version()`. A missing or malformed line MUST fail with a typed error. Headers built with the builder keep declaring `VcfHeader::FILE_FORMAT`.
+
+r[vcf_header.parse.defs]
+INFO and FORMAT lines MUST yield `InfoDef`/`FormatDef` with a parsed `Number` (integer, `A`, `R`, `G`, `M`, `.`) and `ValueType`. An unknown `Number` or `Type` token MUST fail with a typed error naming the field. Constraints the writer enforces but real files violate (a `Flag` with a `Number` other than 0, a `Number` that disagrees with the spec's reserved definition) MUST be accepted with a `warn!`, since rejecting them would refuse files htslib and bcftools read.
+
+r[vcf_header.parse.dictionary]
+The string dictionary MUST be assigned as htslib assigns it: `PASS` at index 0; every other FILTER, INFO and FORMAT id in order of first appearance across those lines, regardless of category; an id declared by both an INFO and a FORMAT line shares one index. An `IDX=n` attribute (htslib writes it into BCF headers) MUST be honoured and MAY leave gaps. Two ids claiming the same `IDX`, or one id given two different `IDX` values, MUST fail with a typed error. Contigs have their own dictionary: order of appearance, or `IDX` when present.
+
+r[vcf_header.parse.limits]
+Parsing MUST enforce practical limits before allocating (`r[io.fuzz.alloc_limits]`): header text ≤ 256 MiB, dictionary ≤ `MAX_DICT_ENTRIES`, contigs ≤ 1 048 576, samples ≤ 10 000 000. Duplicate sample names MUST fail with a typed error.
+
+r[vcf_header.parse.preserve]
+Lines the model does not interpret MUST be kept verbatim, in order, so `to_vcf_text()` of a parsed header reproduces them. When a parsed header's dictionary order differs from the canonical emission order of `r[vcf_header.serialization]`, or has gaps, serializing it MUST emit `IDX=` attributes so a re-read assigns the same indices.
+
+r[vcf_header.parse.round_trip]
+For every header the builder can produce, `VcfHeader::parse(&h.to_vcf_text())` MUST yield a header equal to `h` in its definitions, dictionary, contigs and samples. Tests MUST also parse headers bcftools wrote (with and without `IDX=`) and compare the dictionary with the one bcftools uses.
+
+r[vcf_header.brand]
+Every `VcfHeader` MUST carry a `HeaderId` distinct from every other header's in the process, drawn from an atomic counter at `build()` or `parse()`. Keys resolved from a header carry its `HeaderId` (`r[vcf_values.header_brand]`). Cloning a header keeps its id.
