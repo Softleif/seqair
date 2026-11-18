@@ -83,6 +83,14 @@ impl<R: Read> BgzfStreamBuilder<R> {
         self
     }
 
+    /// The file offset `inner` starts at, when it was seeked into a BGZF
+    /// file, so [`BgzfStream::virtual_offset`] names offsets in that file.
+    #[must_use]
+    pub(crate) fn start_offset(mut self, offset: u64) -> Self {
+        self.start = offset;
+        self
+    }
+
     /// How to treat input that ends without an EOF marker block.
     #[must_use]
     pub fn eof_marker(mut self, eof_marker: EofMarker) -> Self {

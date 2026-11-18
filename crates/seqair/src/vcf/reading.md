@@ -17,7 +17,7 @@ open, and nothing on disk that means "missing" reaches you as a magic value.
 rastair's truth loading needs FILTER, the alleles and two INFO flags — so it
 reads `(Locus, Site, Info)` and never touches the samples.
 
-```rust,ignore
+```rust
 use seqair::vcf::{FilterStatus, Info, InfoFlag, InfoInt, Locus, Site, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,7 +81,7 @@ assert!(hom_alt > 0);
 On a multi-sample file, `OnlySample` refuses to open rather than silently
 reading the first sample; pick one by name with `Sample`:
 
-```rust,ignore
+```rust
 use seqair::vcf::{FormatGt, Locus, OnlySample, PlanError, Sample, VcfFile, VcfReadError};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,7 +104,7 @@ while let Some((_, sample)) = reader.next_record()? {
 BCF stores FORMAT field by field, so reading one field across all samples is
 the natural shape; reading one sample's fields is just as direct.
 
-```rust,ignore
+```rust
 use seqair::vcf::{FormatGt, Locus, Samples, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -267,7 +267,7 @@ assert!(longest > 1); // the deletions span more than their first base
 
 ## Errors you can act on
 
-```rust,ignore
+```rust
 use seqair::vcf::{InfoInt, KeyError, VcfFile, ValueType};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {

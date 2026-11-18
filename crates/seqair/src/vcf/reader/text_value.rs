@@ -10,7 +10,7 @@ use crate::io::text_scan::find_byte;
 
 /// Malformed VCF text values.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TextValueError {
     #[error("not an integer (an optional sign and decimal digits)")]
     InvalidInteger,

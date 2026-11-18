@@ -183,7 +183,7 @@ pub(crate) mod encoder;
 pub mod error;
 pub(crate) mod field_set;
 pub mod header;
-pub(crate) mod reader;
+pub mod reader;
 pub mod record;
 pub mod record_encoder;
 pub mod unified;
@@ -193,9 +193,17 @@ pub use alleles::Alleles;
 pub use error::{
     AllelesError, KeyError, MetaLineError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError,
 };
+// The builder's `Samples` phase stays at `header::Samples`: `vcf::Samples` is
+// the reader's component.
 pub use header::{
     Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, HeaderId,
-    InfoDef, Infos, Number, SampleIdx, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
+    InfoDef, Infos, Number, SampleIdx, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
+};
+pub use reader::{
+    Allele, AllelesRef, Column, DynValue, FieldError, Fields, FilterStatus, FullRecord,
+    GenotypeRef, GtAllele, Info, InfoRef, Locus, MissingElement, OnlySample, OptValues, PlanError,
+    RawRecord, ReadKind, ReadOptions, Reader, RecordError, Sample, SampleRef, Samples, SamplesRef,
+    Sections, Site, SiteRef, Values, VcfFile, VcfPos, VcfReadError,
 };
 pub use record::Genotype;
 pub use record_encoder::{

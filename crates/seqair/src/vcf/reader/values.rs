@@ -20,32 +20,64 @@ pub struct MissingElement {
     pub index: usize,
 }
 
-/// A number vector, missing elements as `None`.
+/// Where a vector's elements are stored.
 #[derive(Debug, Clone)]
-pub(crate) enum OptValues<'a, T> {
+enum Repr<'a, T> {
     Bcf(BcfVec<'a, T>),
     Text(TextVec<'a, T>),
 }
 
+// r[impl vcf_values.access]
+/// A number vector as the record stores it, whatever its width on disk: each
+/// element `Some(value)`, or `None` where it is missing (`.`). An
+/// `ExactSizeIterator`; `get(i)` reads any element not yet yielded.
+#[derive(Debug, Clone)]
+pub struct OptValues<'a, T>(Repr<'a, T>);
+
+#[expect(private_bounds, reason = "crate-internal methods; the public ones are per type")]
 impl<'a, T: Number> OptValues<'a, T> {
-    /// Element `i` of those not yet yielded; `None` past the end.
+    pub(crate) fn bcf(v: BcfVec<'a, T>) -> Self {
+        Self(Repr::Bcf(v))
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
+    pub(crate) fn text(v: TextVec<'a, T>) -> Self {
+        Self(Repr::Text(v))
+    }
+
     #[expect(
         clippy::option_option,
         reason = "in range, then the element as the iterator yields it"
     )]
-    pub(crate) fn get(&self, i: usize) -> Option<Option<T>> {
-        match self {
-            Self::Bcf(v) => v.get(i),
-            Self::Text(v) => v.get(i),
+    fn get_inner(&self, i: usize) -> Option<Option<T>> {
+        match &self.0 {
+            Repr::Bcf(v) => v.get(i),
+            Repr::Text(v) => v.get(i),
+        }
+    }
+
+    #[expect(clippy::option_option, reason = "the end, then the element")]
+    #[inline]
+    fn next_inner(&mut self) -> Option<Option<T>> {
+        match &mut self.0 {
+            Repr::Bcf(v) => v.next(),
+            Repr::Text(v) => v.next(),
+        }
+    }
+
+    fn len_inner(&self) -> usize {
+        match &self.0 {
+            Repr::Bcf(v) => v.len(),
+            Repr::Text(v) => v.size_hint().0,
         }
     }
 
     /// No elements, or a lone missing one: how both formats spell a field
     /// that is `.` as a whole.
     pub(crate) fn is_missing(&self) -> bool {
-        match self.len() {
+        match self.len_inner() {
             0 => true,
-            1 => matches!(self.get(0), Some(None)),
+            1 => matches!(self.get_inner(0), Some(None)),
             _ => false,
         }
     }
@@ -53,76 +85,98 @@ impl<'a, T: Number> OptValues<'a, T> {
     // r[impl vcf_values.access]
     /// The same elements, checked to have none missing.
     pub(crate) fn all_present(self) -> Result<Values<'a, T>, MissingElement> {
-        match self.clone().position(|v| v.is_none()) {
-            Some(index) => Err(MissingElement { index }),
-            None => Ok(Values(self)),
+        let mut rest = self.clone();
+        let mut index = 0usize;
+        while let Some(v) = rest.next_inner() {
+            if v.is_none() {
+                return Err(MissingElement { index });
+            }
+            index = index.saturating_add(1);
         }
+        Ok(Values(self))
     }
 }
 
-impl<T: Number> Iterator for OptValues<'_, T> {
-    type Item = Option<T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Option<T>> {
-        match self {
-            Self::Bcf(v) => v.next(),
-            Self::Text(v) => v.next(),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Bcf(v) => v.size_hint(),
-            Self::Text(v) => v.size_hint(),
-        }
-    }
-}
-
-impl<T: Number> ExactSizeIterator for OptValues<'_, T> {}
-
-/// A number vector with no missing element (checked by [`OptValues::all_present`]).
+/// A number vector with no missing element. An `ExactSizeIterator`; `get(i)`
+/// reads any element not yet yielded.
 #[derive(Debug, Clone)]
-pub(crate) struct Values<'a, T>(OptValues<'a, T>);
+pub struct Values<'a, T>(OptValues<'a, T>);
 
-impl<T: Number> Values<'_, T> {
-    /// Element `i` of those not yet yielded; `None` past the end.
-    pub(crate) fn get(&self, i: usize) -> Option<T> {
-        self.0.get(i).flatten()
-    }
+// Per element type rather than over the crate's private `Number` bound, so
+// no public impl names a private trait.
+macro_rules! number_views {
+    ($($t:ty),*) => {$(
+        impl OptValues<'_, $t> {
+            /// Element `i` of those not yet yielded: `None` past the end,
+            /// `Some(None)` for a missing element.
+            #[allow(
+                clippy::option_option,
+                reason = "in range, then the element as the iterator yields it"
+            )]
+            pub fn get(&self, i: usize) -> Option<Option<$t>> {
+                self.get_inner(i)
+            }
+        }
+
+        impl Iterator for OptValues<'_, $t> {
+            type Item = Option<$t>;
+
+            #[inline]
+            fn next(&mut self) -> Option<Option<$t>> {
+                self.next_inner()
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                let n = self.len_inner();
+                (n, Some(n))
+            }
+        }
+
+        impl ExactSizeIterator for OptValues<'_, $t> {}
+
+        impl Values<'_, $t> {
+            /// Element `i` of those not yet yielded; `None` past the end.
+            pub fn get(&self, i: usize) -> Option<$t> {
+                self.0.get_inner(i).flatten()
+            }
+        }
+
+        impl Iterator for Values<'_, $t> {
+            type Item = $t;
+
+            #[inline]
+            fn next(&mut self) -> Option<$t> {
+                let v = self.0.next_inner()?;
+                debug_assert!(v.is_some(), "all_present checked every element");
+                v
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.0.size_hint()
+            }
+        }
+
+        impl ExactSizeIterator for Values<'_, $t> {}
+    )*};
 }
 
-impl<T: Number> Iterator for Values<'_, T> {
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<T> {
-        let v = self.0.next()?;
-        debug_assert!(v.is_some(), "all_present checked every element");
-        v
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
-impl<T: Number> ExactSizeIterator for Values<'_, T> {}
+number_views!(i32, f32);
 
 /// One allele of a genotype: its index (`None` for `.`) and whether it is
 /// phased with the allele before it — for the first allele, the leading
-/// phase indicator (`r[vcf_record.gt_first_phase+2]`).
+/// phase indicator (`r[vcf_record.gt_first_phase+2]`), always unphased in a
+/// file older than VCF 4.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GtAllele {
-    pub(crate) allele: Option<u16>,
-    pub(crate) phased: bool,
+pub struct GtAllele {
+    pub allele: Option<u16>,
+    pub phased: bool,
 }
 
-// r[impl vcf_values.gt]
 /// One sample's genotype, allele by allele.
 #[derive(Debug, Clone)]
 pub(crate) enum GtAlleles<'a> {
     Bcf(BcfGt<'a>),
+    #[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
     Text(TextGt<'a>),
 }
 
@@ -163,6 +217,28 @@ impl Iterator for GtAlleles<'_> {
 
 impl ExactSizeIterator for GtAlleles<'_> {}
 
+// r[impl vcf_values.gt]
+/// One sample's genotype as the record stores it. Re-iterable: every
+/// [`alleles`](Self::alleles) call starts again from the first allele.
+#[derive(Debug, Clone)]
+pub struct GenotypeRef<'a>(pub(crate) GtAlleles<'a>);
+
+impl GenotypeRef<'_> {
+    /// The alleles in order, each with its phase.
+    pub fn alleles(&self) -> impl ExactSizeIterator<Item = GtAllele> + Clone + '_ {
+        self.0.clone()
+    }
+
+    /// How many alleles the sample has.
+    pub fn ploidy(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The writer's owned [`Genotype`].
+    pub fn to_genotype(&self) -> Genotype {
+        self.0.clone().into_genotype()
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::arithmetic_side_effects, reason = "test arithmetic on small values")]
@@ -176,7 +252,7 @@ mod tests {
     use hegel::prelude::*;
 
     fn bcf(bytes: &[u8]) -> OptValues<'_, i32> {
-        OptValues::Bcf(TypedValue::parse(bytes).unwrap().0.ints().unwrap())
+        OptValues::bcf(TypedValue::parse(bytes).unwrap().0.ints().unwrap())
     }
 
     // r[verify vcf_values.access]
@@ -201,7 +277,7 @@ mod tests {
     }
 
     fn text<T: Number>(bytes: &[u8]) -> OptValues<'_, T> {
-        OptValues::Text(TextVec::new(bytes).unwrap())
+        OptValues::text(TextVec::new(bytes).unwrap())
     }
 
     // r[verify vcf_values.access]
@@ -231,7 +307,7 @@ mod tests {
         let text_bytes = text_bytes.join(",");
 
         let from_bcf: OptValues<'_, f32> =
-            OptValues::Bcf(TypedValue::parse(&bcf_bytes).unwrap().0.floats().unwrap());
+            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.floats().unwrap());
         let from_text = text::<f32>(text_bytes.as_bytes());
         assert_eq!(from_bcf.is_missing(), from_text.is_missing());
         assert_eq!(
@@ -253,7 +329,7 @@ mod tests {
         let text_bytes: Vec<String> = values.iter().map(i32::to_string).collect();
         let text_bytes = text_bytes.join(",");
         let from_bcf: OptValues<'_, i32> =
-            OptValues::Bcf(TypedValue::parse(&bcf_bytes).unwrap().0.ints().unwrap());
+            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.ints().unwrap());
         let from_text = text::<i32>(text_bytes.as_bytes());
         assert_eq!(from_bcf.all_present().unwrap().collect::<Vec<_>>(), values);
         assert_eq!(from_text.all_present().unwrap().collect::<Vec<_>>(), values);

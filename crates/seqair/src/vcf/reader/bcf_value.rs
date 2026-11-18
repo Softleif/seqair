@@ -20,7 +20,7 @@ use crate::vcf::bcf_encoding::{
 
 /// Malformed BCF typed values.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BcfValueError {
     #[error("BCF typed value truncated: needs {needed} bytes, {available} available")]
     Truncated { needed: usize, available: usize },
@@ -180,6 +180,7 @@ impl<'a> TypedValue<'a> {
         Ok((Self { ty, count, payload }, header.saturating_add(len)))
     }
 
+    #[cfg(test)]
     pub(crate) fn ty(&self) -> BcfType {
         self.ty
     }
@@ -238,6 +239,8 @@ fn payload_len(ty: BcfType, count: usize, samples: usize) -> Result<usize, BcfVa
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FormatColumn<'a> {
     ty: BcfType,
+    /// Length of the type descriptor (with its overflow count).
+    header: usize,
     per_sample: usize,
     n_samples: usize,
     stride: usize,
@@ -252,16 +255,27 @@ impl<'a> FormatColumn<'a> {
         let len = payload_len(ty, per_sample, n_samples)?;
         let payload = take(bytes, header, len)?;
         let stride = per_sample.saturating_mul(ty.width());
-        Ok((Self { ty, per_sample, n_samples, stride, payload }, header.saturating_add(len)))
+        let column = Self { ty, header, per_sample, n_samples, stride, payload };
+        Ok((column, header.saturating_add(len)))
     }
 
-    /// Sample `i`'s values, `None` past the last sample.
-    pub(crate) fn sample(&self, i: usize) -> Option<TypedValue<'a>> {
+    /// The length of the type descriptor at the start of the column's bytes.
+    pub(crate) fn header_len(&self) -> usize {
+        self.header
+    }
+
+    /// The bytes of sample `i`'s elements, `None` past the last sample.
+    pub(crate) fn sample_bytes(&self, i: usize) -> Option<&'a [u8]> {
         if i >= self.n_samples {
             return None;
         }
         let start = i.checked_mul(self.stride)?;
-        let payload = self.payload.get(start..start.checked_add(self.stride)?)?;
+        self.payload.get(start..start.checked_add(self.stride)?)
+    }
+
+    /// Sample `i`'s values, `None` past the last sample.
+    pub(crate) fn sample(&self, i: usize) -> Option<TypedValue<'a>> {
+        let payload = self.sample_bytes(i)?;
         Some(TypedValue { ty: self.ty, count: self.per_sample, payload })
     }
 }
