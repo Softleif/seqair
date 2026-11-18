@@ -245,14 +245,14 @@ pub(super) fn encode(
         name,
         flags: view.flags,
         tid: view.tid,
-        pos: pos0,
+        pos: view.pos,
         end: if unmapped {
             pos0.saturating_add(1)
         } else {
             checked.end.max(pos0.saturating_add(1))
         },
         mate: view.mate,
-        cram_flags: 0x1 | if seq_unknown { 0x8 } else { 0 },
+        seq_unknown,
     });
 
     // `MD`/`NM` are generated on decode only for these.

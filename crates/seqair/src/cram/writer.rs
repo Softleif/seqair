@@ -354,7 +354,7 @@ impl<W: Write> CramWriter<W> {
         if checked.drops_alignment && !self.warned_unmapped_alignment {
             self.warned_unmapped_alignment = true;
             tracing::warn!(
-                qname = %String::from_utf8_lossy(view.qname),
+                qname = std::str::from_utf8(view.qname).unwrap_or("<not UTF-8>"),
                 "unmapped record with a CIGAR or MAPQ; CRAM stores neither, so it reads back \
                  with MAPQ 0 and no CIGAR (warned once per writer)"
             );

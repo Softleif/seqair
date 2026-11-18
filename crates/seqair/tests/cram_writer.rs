@@ -20,6 +20,7 @@ use seqair::cram::stream::CramStreamReader;
 use seqair::cram::writer::{CramVersion, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
 use seqair::sam::format::format_sam_record;
+use seqair_types::BaseQuality;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,6 +59,141 @@ fn seqair_lines(cram: &Path, fasta: &Path) -> Vec<String> {
             String::from_utf8(out).unwrap()
         })
         .collect()
+}
+
+/// A record's core fields, as two readers can be compared on them.
+#[derive(Debug, PartialEq)]
+struct Core {
+    name: Vec<u8>,
+    flags: u16,
+    tid: Option<usize>,
+    pos: Option<usize>,
+    mapq: Option<u8>,
+    cigar: Vec<(char, usize)>,
+    seq: Vec<u8>,
+    qual: Vec<u8>,
+    mate_tid: Option<usize>,
+    mate_pos: Option<usize>,
+    tlen: i32,
+}
+
+/// The records of `cram` as noodles reads them, a reader with nothing of
+/// htslib's in it.
+fn noodles_cores(cram: &Path, fasta: &Path) -> Vec<Core> {
+    use noodles::sam::alignment::record::cigar::op::Kind;
+    let fasta_reader = noodles::fasta::io::indexed_reader::Builder::default()
+        .build_from_path(fasta)
+        .expect("open indexed FASTA");
+    let repository = noodles::fasta::Repository::new(
+        noodles::fasta::repository::adapters::IndexedReader::new(fasta_reader),
+    );
+    let mut reader = noodles::cram::io::reader::Builder::default()
+        .set_reference_sequence_repository(repository)
+        .build_from_path(cram)
+        .expect("noodles opens the CRAM");
+    let header = reader.read_header().expect("noodles reads the header");
+    reader
+        .records(&header)
+        .map(|r| {
+            let r = r.expect("noodles reads every record");
+            let unmapped = r.flags().is_unmapped();
+            Core {
+                name: r.name().map(|n| n.to_vec()).unwrap_or_default(),
+                flags: u16::from(r.flags()),
+                tid: r.reference_sequence_id(),
+                pos: r.alignment_start().map(|p| usize::from(p) - 1),
+                mapq: (!unmapped).then(|| r.mapping_quality().map_or(255, u8::from)),
+                cigar: r
+                    .cigar()
+                    .as_ref()
+                    .iter()
+                    .map(|op| {
+                        let c = match op.kind() {
+                            Kind::Match => 'M',
+                            Kind::Insertion => 'I',
+                            Kind::Deletion => 'D',
+                            Kind::Skip => 'N',
+                            Kind::SoftClip => 'S',
+                            Kind::HardClip => 'H',
+                            Kind::Pad => 'P',
+                            Kind::SequenceMatch => '=',
+                            Kind::SequenceMismatch => 'X',
+                        };
+                        (c, op.len())
+                    })
+                    .collect(),
+                // noodles copies a soft-masked reference's lower case into
+                // SEQ; seqair and htslib upper-case it.
+                seq: r.sequence().as_ref().to_ascii_uppercase(),
+                qual: r.quality_scores().as_ref().to_vec(),
+                // htslib and seqair drop the mate reference of an unpaired
+                // record (`r[cram_writer.fidelity]`); noodles keeps it.
+                mate_tid: r.mate_reference_sequence_id().filter(|_| r.flags().is_segmented()),
+                mate_pos: r.mate_alignment_start().map(|p| usize::from(p) - 1),
+                tlen: r.template_length(),
+            }
+        })
+        .collect()
+}
+
+/// The same fields of seqair's records, and whether one runs past its
+/// reference's end.
+fn seqair_cores(cram: &Path, fasta: &Path) -> (Vec<Core>, bool) {
+    let mut reader = CramStreamReader::new(std::fs::File::open(cram).unwrap()).unwrap();
+    let mut decoder = reader.decoder(fasta).unwrap();
+    let mut records = Vec::new();
+    while let Some(container) = reader.next_container().unwrap() {
+        decoder.decode(&container, &mut records).unwrap();
+    }
+    let header = reader.into_header();
+    let past_end = records.iter().any(|r| {
+        let (Some(tid), Some(end)) = (r.tid(), r.end_pos()) else { return false };
+        !r.flags().is_unmapped() && end.as_u64() >= header.target_len(tid).unwrap_or(u64::MAX)
+    });
+    let cores = records
+        .iter()
+        .map(|r| {
+            let mut seq = Vec::new();
+            r.decode_seq_into(&mut seq);
+            let mate = r.mate_fields();
+            let unmapped = r.flags().is_unmapped();
+            Core {
+                name: r.qname().to_vec(),
+                flags: r.flags().raw(),
+                tid: r.tid().map(|t| t.as_usize()),
+                pos: r.pos().map(|p| p.as_usize()),
+                mapq: (!unmapped).then(|| r.mapq().as_byte()),
+                cigar: r
+                    .cigar()
+                    .iter()
+                    .map(|op| {
+                        (char::from(b"MIDNSHP=X"[usize::from(op.op_code())]), op.len() as usize)
+                    })
+                    .collect(),
+                seq,
+                qual: r.qual().map(|q| BaseQuality::slice_to_bytes(q).to_vec()).unwrap_or_default(),
+                mate_tid: mate.tid.map(|t| t.as_usize()),
+                mate_pos: mate.pos.map(|p| p.as_usize()),
+                tlen: mate.template_len.map_or(0, i32::from),
+            }
+        })
+        .collect();
+    (cores, past_end)
+}
+
+/// noodles reads `cram` as seqair does, record for record; but noodles
+/// (0.102) panics on a read that runs past its reference's end, so a file
+/// with one is not given to it.
+fn assert_noodles_reads_it_as_seqair(cram: &Path, fasta: &Path) {
+    let (ours, past_end) = seqair_cores(cram, fasta);
+    if past_end {
+        return;
+    }
+    let theirs = noodles_cores(cram, fasta);
+    assert_eq!(ours.len(), theirs.len(), "noodles reads as many records");
+    for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert_eq!(a, b, "record {i}, read by noodles");
+    }
 }
 
 fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
@@ -120,6 +256,7 @@ fn fixture_reads_back_as_samtools_cram_does() {
             assert_eq!(ours, theirs, "CRAM {name} record {i}");
         }
         assert!(seqair_lines(&ours, &fasta) == expected, "seqair reads it as samtools does");
+        assert_noodles_reads_it_as_seqair(&ours, &fasta);
 
         samtools(&["quickcheck", ours.to_str().unwrap()]);
         let size = |p: &Path| std::fs::metadata(p).unwrap().len();
@@ -287,12 +424,15 @@ struct Line {
 /// skips and padding, sometimes past its reference's end; or unmapped,
 /// placed or not. SEQ `*`, missing qualities, and tags of every type.
 #[hegel::composite]
-fn read(tc: &TestCase, refs: Vec<Vec<u8>>, name: String) -> Line {
+fn read(tc: &TestCase, refs: Vec<Vec<u8>>, name: String, paired_primary: bool) -> Line {
     let mut rng = Rng(tc.draw(gs::integers::<u64>()) | 1);
     let unmapped = tc.draw(gs::integers::<u8>().max_value(9)) == 0;
     // Any FLAG but the unmapped bit, which `unmapped` sets. htslib's decode
     // adds 0x1 to a mate-reverse (0x20) read, which seqair keeps as it is.
     let mut flag = tc.draw(gs::integers::<u16>().max_value(0xfff)) & !0x4;
+    if paired_primary {
+        flag = (flag | 0x1) & !0x900;
+    }
     if flag & 0x1 == 0 {
         flag &= !0x20;
     }
@@ -584,7 +724,10 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
     // fields agree, so the writer attaches them.
     let pairs = tc.draw(gs::booleans());
     let name = |i: usize| if pairs { format!("p{}", i / 2) } else { format!("r{i}") };
-    let mut lines: Vec<Line> = (0..n).map(|i| tc.draw(read(refs.clone(), name(i)))).collect();
+    // fixmate only fixes pairs of paired primary reads.
+    let primary_pairs = pairs && tc.draw(gs::booleans());
+    let mut lines: Vec<Line> =
+        (0..n).map(|i| tc.draw(read(refs.clone(), name(i), primary_pairs))).collect();
     lines.sort_by_key(|l| l.key);
     let mut text: String = lines.iter().map(|l| l.text.as_str()).collect();
     if pairs && let Some(fixed) = fixmate(&text) {
@@ -674,6 +817,7 @@ fn assert_reads_back_as_samtools_cram_does(
         bam.to_str().unwrap(),
     ]);
     let through_samtools = samtools_lines(&ours, &fasta);
+    assert_noodles_reads_it_as_seqair(&ours, &fasta);
     // Where the reference has a letter that is no IUPAC code, seqair's
     // decode writes it into a generated MD as N, htslib's as it is
     // (`r[cram.stream.iupac+1]`).
@@ -817,4 +961,101 @@ fn a_reference_the_fasta_lacks_is_written_without_it() {
     assert!(through_samtools[0].starts_with(records[0]));
     assert_eq!(through_samtools[1..], records[1..]);
     assert_eq!(seqair_lines(&ours, &fasta), through_samtools);
+    assert_noodles_reads_it_as_seqair(&ours, &fasta);
+}
+
+/// The block sizes `samtools cram-size -v` reports for `series` in `cram`.
+fn series_bytes(cram: &Path, series: &str) -> usize {
+    samtools(&["cram-size", "-v", cram.to_str().unwrap()])
+        .lines()
+        .filter(|l| l.starts_with("BLOCK") && l.split_whitespace().last() == Some(series))
+        .filter_map(|l| l.split_whitespace().nth(2)?.parse::<usize>().ok())
+        .sum()
+}
+
+// r[verify cram_writer.mates]
+/// Pairs the decode rebuilds are attached (an `NF` block appears) and read
+/// back as they were through samtools, seqair and noodles; others detached.
+#[test]
+fn mate_pairs_attach_where_every_decoder_rebuilds_them() {
+    let refs = reference_bases(&mut Rng(7));
+    let base =
+        |at: usize, n: usize| String::from_utf8(refs[0][at..at + n].to_ascii_uppercase()).unwrap();
+    let cases: [(&str, Vec<String>, bool); 7] = [
+        (
+            "proper pair",
+            vec![
+                format!("a\t99\tchr1\t101\t60\t10M\t=\t201\t110\t{}\t*", base(100, 10)),
+                format!("a\t147\tchr1\t201\t60\t10M\t=\t101\t-110\t{}\t*", base(200, 10)),
+            ],
+            true,
+        ),
+        (
+            "placed unmapped mate",
+            vec![
+                format!("b\t73\tchr1\t101\t60\t10M\t=\t101\t0\t{}\t*", base(100, 10)),
+                "b\t133\tchr1\t101\t0\t*\t=\t101\t0\tACGT\t*".to_string(),
+            ],
+            false,
+        ),
+        (
+            "same start and end",
+            vec![
+                format!("c\t99\tchr1\t101\t60\t10M\t=\t101\t10\t{}\t*", base(100, 10)),
+                format!("c\t147\tchr1\t101\t60\t10M\t=\t101\t-10\t{}\t*", base(100, 10)),
+            ],
+            true,
+        ),
+        (
+            "SEQ *",
+            vec![
+                "d\t99\tchr1\t101\t60\t10M\t=\t201\t110\t*\t*".to_string(),
+                "d\t147\tchr1\t201\t60\t10M\t=\t101\t-110\t*\t*".to_string(),
+            ],
+            true,
+        ),
+        (
+            "unplaced pair",
+            vec![
+                "e\t77\t*\t0\t0\t*\t*\t0\t0\tACGT\t*".to_string(),
+                "e\t141\t*\t0\t0\t*\t*\t0\t0\tACGT\t*".to_string(),
+            ],
+            false,
+        ),
+        (
+            "a TLEN the decode computes otherwise",
+            vec![
+                format!("f\t99\tchr1\t101\t60\t10M\t=\t201\t500\t{}\t*", base(100, 10)),
+                format!("f\t147\tchr1\t201\t60\t10M\t=\t101\t-500\t{}\t*", base(200, 10)),
+            ],
+            false,
+        ),
+        (
+            "three records of a name",
+            vec![
+                format!("g\t99\tchr1\t101\t60\t10M\t=\t201\t110\t{}\t*", base(100, 10)),
+                format!("g\t2147\tchr1\t150\t60\t10M\t=\t101\t0\t{}\t*", base(149, 10)),
+                format!("g\t147\tchr1\t201\t60\t10M\t=\t101\t-110\t{}\t*", base(200, 10)),
+            ],
+            false,
+        ),
+    ];
+    for (what, records, attaches) in cases {
+        let text: String = records.iter().map(|r| format!("{r}\n")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = write_fasta(dir.path(), &refs);
+        let sam = dir.path().join("in.sam");
+        std::fs::write(&sam, header_text() + &text).unwrap();
+        let bam = dir.path().join("in.bam");
+        samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
+        let (ours, _) = write_each_way(dir.path(), &bam, &fasta, Options::default());
+        assert_eq!(series_bytes(&ours, "NF") > 0, attaches, "{what}");
+        let read: Vec<String> = samtools_lines(&ours, &fasta)
+            .iter()
+            .map(|l| l.split('\t').take(11).collect::<Vec<_>>().join("\t"))
+            .collect();
+        assert_eq!(read, records, "{what}");
+        assert_eq!(seqair_lines(&ours, &fasta).len(), records.len());
+        assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    }
 }
