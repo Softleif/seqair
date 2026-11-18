@@ -55,8 +55,7 @@ pub enum VcfHeaderError {
 
     #[error(
         "too many header fields: the FILTER/INFO/FORMAT string dictionary is limited to {max} \
-         entries (so the per-record duplicate-field tracker can use a u64 bitset keyed by \
-         dictionary index)"
+         entries"
     )]
     TooManyFields { max: usize },
 }

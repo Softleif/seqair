@@ -2,7 +2,7 @@
 
 use super::error::VcfHeaderError;
 use crate::bam::header::BamHeader;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use seqair_types::SmolStr;
 use std::marker::PhantomData;
 
@@ -97,22 +97,19 @@ pub struct ContigDef {
     pub length: Option<u64>,
 }
 
-// r[impl vcf_header.dict_capacity]
-/// Maximum number of FILTER/INFO/FORMAT entries in the BCF string dictionary.
-///
-/// Capped at 64 so the per-record duplicate-field tracker can address every
-/// field with a single `u64` bitset keyed by `dict_idx`. Real VCFs use far
-/// fewer; exceeding this returns [`VcfHeaderError::TooManyFields`].
-pub const MAX_DICT_ENTRIES: usize = 64;
+// r[impl vcf_header.dict_capacity+2]
+/// Maximum number of FILTER/INFO/FORMAT entries in the BCF string dictionary,
+/// so every dictionary index fits a `u16`. Exceeding it returns
+/// [`VcfHeaderError::TooManyFields`].
+pub const MAX_DICT_ENTRIES: usize = 65_536;
 
 // r[impl vcf_header.string_map]
 /// Ordered mapping of header string IDs to BCF dictionary indices.
 ///
-/// The dictionary is small (typically 10–30 entries), so a `Vec` with linear
-/// scan is faster than hashing and uses less memory.
+/// Hashed, not scanned: a header may declare up to [`MAX_DICT_ENTRIES`] ids.
 #[derive(Debug, Clone)]
 pub struct StringMap {
-    entries: Vec<SmolStr>,
+    entries: IndexSet<SmolStr>,
 }
 
 impl Default for StringMap {
@@ -123,21 +120,16 @@ impl Default for StringMap {
 
 impl StringMap {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self { entries: IndexSet::new() }
     }
 
     fn insert(&mut self, id: SmolStr) -> usize {
-        if let Some(idx) = self.get(&id) {
-            return idx;
-        }
-        let idx = self.entries.len();
-        self.entries.push(id);
-        idx
+        self.entries.insert_full(id).0
     }
 
     /// Look up the BCF dictionary index for an ID.
     pub fn get(&self, id: &str) -> Option<usize> {
-        self.entries.iter().position(|s| s == id)
+        self.entries.get_index_of(id)
     }
 }
 
@@ -454,15 +446,12 @@ impl<P> VcfHeaderBuilder<P> {
 
     /// Insert an ID into the string map, returning the dict index.
     ///
-    /// The dictionary is capped at [`MAX_DICT_ENTRIES`] so that BCF dictionary
-    /// indices stay in `0..64` — the per-record duplicate-field tracker keys a
-    /// `u64` bitset directly by `dict_idx` (see `FieldTracker`).
+    /// The dictionary is capped at [`MAX_DICT_ENTRIES`], so every index fits a `u16`.
     fn insert_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
         let idx = self.string_map.insert(id.clone());
         if idx >= MAX_DICT_ENTRIES {
             return Err(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES });
         }
-        // idx < MAX_DICT_ENTRIES (64), so this conversion cannot fail.
         u32::try_from(idx).map_err(|_| VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
@@ -880,56 +869,36 @@ mod tests {
         assert_eq!(first.as_str(), "PASS");
     }
 
-    // r[verify vcf_header.dict_capacity]
-    #[test]
-    fn dict_capacity_rejects_more_than_64_entries() {
-        // PASS already occupies index 0, leaving room for MAX_DICT_ENTRIES-1 more.
+    /// An INFO builder whose dictionary is full: PASS plus `MAX_DICT_ENTRIES - 1` INFO ids.
+    fn full_dictionary() -> VcfHeaderBuilder<Infos> {
         let mut builder = VcfHeader::builder().infos();
-        for i in 0..(MAX_DICT_ENTRIES - 1) {
-            builder
-                .add_info(
-                    format!("I{i}"),
-                    InfoDef {
-                        number: Number::Count(1),
-                        typ: ValueType::Integer,
-                        description: SmolStr::from("x"),
-                    },
-                )
-                .unwrap();
+        for i in 1..MAX_DICT_ENTRIES {
+            let def = InfoDef {
+                number: Number::Count(1),
+                typ: ValueType::Integer,
+                description: SmolStr::from("x"),
+            };
+            builder.add_info(format!("I{i}"), def).unwrap();
         }
-        // The dictionary is now full (PASS + 63 INFO = 64). One more must fail.
-        let err = builder
-            .add_info(
-                "overflow",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("x"),
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES }));
+        builder
     }
 
-    // r[verify vcf_header.dict_capacity]
+    // r[verify vcf_header.dict_capacity+2]
     #[test]
-    fn dict_capacity_allows_exactly_64_entries() {
-        let mut builder = VcfHeader::builder().infos();
-        for i in 0..(MAX_DICT_ENTRIES - 1) {
-            builder
-                .add_info(
-                    format!("I{i}"),
-                    InfoDef {
-                        number: Number::Count(1),
-                        typ: ValueType::Integer,
-                        description: SmolStr::from("x"),
-                    },
-                )
-                .unwrap();
-        }
-        let header = builder.build().unwrap();
-        // PASS=0 plus 63 INFO fields → highest dict index is 63 (fits a u64 bitset).
-        assert_eq!(header.string_map().get(&format!("I{}", MAX_DICT_ENTRIES - 2)), Some(63));
+    fn dict_capacity_rejects_an_entry_past_the_limit() {
+        let mut builder = full_dictionary();
+        let def =
+            InfoDef { number: Number::Count(1), typ: ValueType::Integer, description: "x".into() };
+        let err = builder.add_info("overflow", def).unwrap_err();
+        assert!(matches!(err, VcfHeaderError::TooManyFields { max: 65_536 }), "{err:?}");
+    }
+
+    // r[verify vcf_header.dict_capacity+2]
+    #[test]
+    fn dict_capacity_allows_exactly_the_limit() {
+        let header = full_dictionary().build().unwrap();
+        let last = header.string_map().get(&format!("I{}", MAX_DICT_ENTRIES - 1));
+        assert_eq!(last, Some(usize::from(u16::MAX)), "the highest index fits a u16");
     }
 
     // r[verify vcf_header.string_map]
