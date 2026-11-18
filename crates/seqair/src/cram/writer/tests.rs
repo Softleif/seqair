@@ -398,3 +398,175 @@ fn a_constant_is_one_value_or_none() {
     assert_eq!(c(container::Series::Qs, &[30, 31]), None);
     assert_eq!(c(container::Series::In, &[]), None);
 }
+
+/// One slice's worth of `tests/data/test.bam`, 10 000 records as htslib cuts
+/// slices: its `QS` block (`0xFF` for a record without qualities, as the
+/// writer stores it) and records, its names NUL-terminated, its aux bytes.
+#[derive(Default)]
+struct Slice {
+    quals: Vec<u8>,
+    records: Vec<fqzcomp::QualRecord>,
+    names: Vec<u8>,
+    aux: Vec<u8>,
+}
+
+fn test_bam_slices() -> Vec<Slice> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
+    let mut reader =
+        crate::bam::stream::BamStreamReader::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut record = crate::bam::RawBamRecord::default();
+    let mut slices = Vec::new();
+    let mut s = Slice::default();
+    while reader.read_record(&mut record).unwrap() {
+        let start = s.quals.len();
+        match record.qual() {
+            Some(q) => s.quals.extend(q.iter().map(|q| q.as_byte())),
+            None => s.quals.resize(start + record.seq_len(), 0xFF),
+        }
+        let flags = record.flags();
+        s.records.push(fqzcomp::QualRecord {
+            len: u32::try_from(s.quals.len() - start).unwrap(),
+            reverse: flags.is_reverse(),
+            read2: flags.is_second_in_template(),
+        });
+        s.names.extend_from_slice(record.qname());
+        s.names.push(0);
+        s.aux.extend_from_slice(record.aux().as_bytes());
+        if s.records.len() == 10_000 {
+            slices.push(std::mem::take(&mut s));
+        }
+    }
+    if !s.records.is_empty() {
+        slices.push(s);
+    }
+    slices
+}
+
+fn htscodecs_records(s: &Slice) -> crate::cram::fqzcomp_reference::htscodecs_fqz::Records {
+    use crate::cram::fqzcomp_reference::htscodecs_fqz::{FREAD2, FREVERSE, Records};
+    let flag = |on: bool, f: u32| if on { f } else { 0 };
+    Records {
+        quals: s.quals.clone(),
+        lens: s.records.iter().map(|r| r.len).collect(),
+        flags: s
+            .records
+            .iter()
+            .map(|r| flag(r.reverse, FREVERSE) | flag(r.read2, FREAD2))
+            .collect(),
+        alphabet: Vec::new(),
+    }
+}
+
+// r[verify cram_writer.fqzcomp]
+// r[verify cram_writer.arith]
+/// Real qualities: every fqzcomp strategy and every arith combination of
+/// the profile round-trips and is byte for byte htscodecs' stream.
+#[test]
+fn test_bam_qualities_match_htscodecs() {
+    use crate::cram::arith::htscodecs_oracle::htscodecs_compress as arith_htscodecs;
+    use crate::cram::fqzcomp_reference::htscodecs_fqz::htscodecs_compress as fqz_htscodecs;
+    let slices = test_bam_slices();
+    assert!(!slices.is_empty());
+    for s in &slices {
+        for (strat, strategy) in (0..).zip(fqzcomp::Strategy::ALL) {
+            let ours = fqzcomp::encode(&s.quals, &s.records, strategy).unwrap();
+            assert!(crate::cram::fqzcomp::decode(&ours).unwrap() == s.quals, "{strategy:?}");
+            let theirs = fqz_htscodecs(&htscodecs_records(s), 3, strat, None).unwrap();
+            assert!(ours == theirs, "{strategy:?}: {} vs htscodecs' {}", ours.len(), theirs.len());
+        }
+        for flags in arith::PROFILE {
+            let ours = arith::encode(&s.quals, flags).unwrap();
+            assert!(crate::cram::arith::decode(&ours, 0).unwrap() == s.quals, "{flags:?}");
+            assert!(ours == arith_htscodecs(&s.quals, flags.byte().into()), "{flags:?}");
+        }
+    }
+}
+
+/// Sizes and speeds of the archive codecs on `test.bam`'s slices, against
+/// rANS Nx16's normal profile and htscodecs. Run with `cargo nextest run
+/// --release --run-ignored only -E 'test(archive_codec_report)' --no-capture`.
+#[test]
+#[ignore = "a report, not a check"]
+#[allow(clippy::cast_precision_loss, clippy::print_stdout, reason = "a report")]
+fn archive_codec_report() {
+    use crate::cram::arith::htscodecs_oracle::htscodecs_compress as arith_htscodecs;
+    use crate::cram::fqzcomp_reference::htscodecs_fqz::htscodecs_compress as fqz_htscodecs;
+    use std::time::{Duration, Instant};
+
+    fn time(mut f: impl FnMut() -> usize) -> (usize, Duration) {
+        let start = Instant::now();
+        let mut size = 0;
+        let mut runs = 0u32;
+        while runs < 3 || start.elapsed() < Duration::from_millis(500) {
+            size = f();
+            runs += 1;
+        }
+        (size, start.elapsed() / runs)
+    }
+
+    let slices = test_bam_slices();
+    let mb = |bytes: usize, t: Duration| bytes as f64 / 1e6 / t.as_secs_f64();
+    type Block = fn(&Slice) -> &[u8];
+    let blocks: [(&str, Block); 3] =
+        [("QS", |s| &s.quals), ("RN", |s| &s.names), ("aux", |s| &s.aux)];
+    for (name, block) in blocks {
+        let raw: usize = slices.iter().map(|s| block(s).len()).sum();
+        println!("{name}: {raw} bytes in {} slices", slices.len());
+        let (nx16, t) = time(|| {
+            slices
+                .iter()
+                .map(|s| {
+                    let d = block(s);
+                    rans_nx16::normal_profile(d.len())
+                        .iter()
+                        .map(|&f| rans_nx16::encode(d, f).unwrap().len())
+                        .min()
+                        .unwrap()
+                })
+                .sum()
+        });
+        println!("  rANS Nx16 normal profile best {nx16:>9}  {:6.1} MB/s (all six)", mb(raw, t));
+        let (best, t) = time(|| {
+            slices
+                .iter()
+                .map(|s| {
+                    arith::PROFILE.iter().map(|&f| arith::encode(block(s), f).unwrap().len()).min()
+                })
+                .map(Option::unwrap)
+                .sum()
+        });
+        println!("  arith profile best            {best:>9}  {:6.1} MB/s (all eight)", mb(raw, t));
+        for flags in arith::PROFILE {
+            let (ours, t) =
+                time(|| slices.iter().map(|s| arith::encode(block(s), flags).unwrap().len()).sum());
+            let (theirs, th) = time(|| {
+                slices.iter().map(|s| arith_htscodecs(block(s), flags.byte().into()).len()).sum()
+            });
+            println!(
+                "  arith {:>3}  {ours:>9}  {:6.1} MB/s | htscodecs {theirs:>9}  {:6.1} MB/s",
+                flags.byte(),
+                mb(raw, t),
+                mb(raw, th)
+            );
+        }
+        if name == "QS" {
+            let records: Vec<_> = slices.iter().map(htscodecs_records).collect();
+            for (strat, strategy) in (0..).zip(fqzcomp::Strategy::ALL) {
+                let (ours, t) = time(|| {
+                    slices
+                        .iter()
+                        .map(|s| fqzcomp::encode(&s.quals, &s.records, strategy).unwrap().len())
+                        .sum()
+                });
+                let (theirs, th) = time(|| {
+                    records.iter().map(|r| fqz_htscodecs(r, 3, strat, None).unwrap().len()).sum()
+                });
+                println!(
+                    "  fqzcomp {strategy:?}  {ours:>9}  {:6.1} MB/s | htscodecs {theirs:>9}  {:6.1} MB/s",
+                    mb(raw, t),
+                    mb(raw, th)
+                );
+            }
+        }
+    }
+}
