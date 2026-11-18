@@ -146,6 +146,7 @@ const EMITTED: [u8; 16] = [0, 2, 2, 4, 2, 4, 4, 6, 2, 4, 4, 6, 4, 6, 6, 8];
 
 /// Four states' steps at once: [`put`] lane by lane, the words of the lanes
 /// that renormalize stored in lane order below the ones before.
+/// `latency_bound`: the caller has no other states to step meanwhile.
 #[inline(always)]
 #[allow(clippy::indexing_slicing, reason = "the mask of 4 lanes is < 16; at ≥ 16 (see `Words`)")]
 #[allow(clippy::cast_possible_truncation, reason = "the mask of 4 lanes is < 16")]
@@ -156,6 +157,7 @@ fn step4<S: Simd>(
     e: &[Enc; 4],
     bits: u32,
     words: &mut Words<'_>,
+    latency_bound: bool,
 ) -> u32x4<S> {
     let a: u32x4<S> = u64x2::from_slice(simd, &e[..2]).bitcast();
     let b: u32x4<S> = u64x2::from_slice(simd, &e[2..]).bitcast();
@@ -167,10 +169,27 @@ fn step4<S: Simd>(
     let low: u8x16<S> = x.bitcast();
     low.swizzle_dyn(u8x16::from_slice(simd, &EMIT4[mask])).store_slice(&mut words.buf[at - 16..at]);
     words.at = at - usize::from(EMITTED[mask]);
-    let x = renorm.select(x >> 16, x);
-    let (lo, hi) = (x + x).widening_mul(m);
-    let q = lo.bitcast::<u32x4<S>>().unzip_high(hi.bitcast::<u32x4<S>>()) >> (info >> 25);
+    // With one vector of states the loop waits on each step: the quotients
+    // of both candidate states are taken alongside the comparison, which
+    // then only picks one (4-state order 1 +5% on an M4). With eight vectors
+    // the loop is throughput-bound and the extra multiply costs more than it
+    // hides (32-state order 0 −7% on an M4), as it does on Zen 2 even with
+    // one vector (4-state order 0 −15%: two `pmuludq` and shuffles a step).
+    let (x, q) = if latency_bound && cfg!(target_arch = "aarch64") {
+        let x16 = x >> 16;
+        (renorm.select(x16, x), renorm.select(quotient(x16, m, info), quotient(x, m, info)))
+    } else {
+        let x = renorm.select(x >> 16, x);
+        (x, quotient(x, m, info))
+    };
     x + (info & 0xFFF) + q * (u32x4::splat(simd, 1 << bits) - f)
+}
+
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "vector lanes wrap")]
+fn quotient<S: Simd>(x: u32x4<S>, m: u32x4<S>, info: u32x4<S>) -> u32x4<S> {
+    let (lo, hi) = (x + x).widening_mul(m);
+    lo.bitcast::<u32x4<S>>().unzip_high(hi.bitcast::<u32x4<S>>()) >> (info >> 25)
 }
 
 /// Order-0 counts in eight sub-tables, so that a run of one symbol is
@@ -237,7 +256,8 @@ pub(super) fn pack(data: &[u8], code: &[u8; 256], per_byte: usize) -> Vec<u8> {
     fn packed<const K: usize>(data: &[u8], code: &[u8; 256]) -> Vec<u8> {
         let bits = 8 / K;
         let (whole, tail) = data.as_chunks::<K>();
-        let byte = |c: &[u8]| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]);
+        let byte =
+            |c: &[u8]| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]);
         let mut out: Vec<u8> = whole.iter().map(|c| byte(c)).collect();
         if !tail.is_empty() {
             out.push(byte(tail));
@@ -308,7 +328,7 @@ fn code_o0<S: Simd, const N: usize, const M: usize>(
                 enc_table[usize::from(bytes[2])],
                 enc_table[usize::from(bytes[3])],
             ];
-            *x = step4(simd, *x, &e, ORDER_0_BITS, &mut local);
+            *x = step4(simd, *x, &e, ORDER_0_BITS, &mut local, M == 1);
         }
     }
     store_states(&xs, states);
@@ -409,7 +429,8 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32,
         prev = usize::from(a);
     }
     for ctx in (0..256).filter(|&c| alphabet[c]) {
-        let rows = [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
+        let rows =
+            [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
         for row in rows {
             for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(row) {
                 *a += std::mem::take(b);
@@ -496,7 +517,7 @@ fn code_o1<S: Simd, const M: usize>(
                     enc_table[usize::from(u16::from_be_bytes([w[2][k], w[2][k + 1]]))],
                     enc_table[usize::from(u16::from_be_bytes([w[3][k], w[3][k + 1]]))],
                 ];
-                *x = step4(simd, *x, &e, bits, &mut local);
+                *x = step4(simd, *x, &e, bits, &mut local, M == 1);
             }
         }
     }
@@ -511,7 +532,7 @@ fn code_o1<S: Simd, const M: usize>(
                 let ctx = if i == 0 { 0 } else { data[p - 1] };
                 *e = enc_table[usize::from(u16::from_be_bytes([ctx, data[p]]))];
             }
-            *x = step4(simd, *x, &e, bits, &mut local);
+            *x = step4(simd, *x, &e, bits, &mut local, M == 1);
         }
     }
     store_states(&xs, states);
