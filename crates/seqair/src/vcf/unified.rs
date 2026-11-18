@@ -6,7 +6,7 @@ use super::bcf_encoding::*;
 use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker};
 use super::error::VcfError;
 use super::field_set::FieldSet;
-use super::header::VcfHeader;
+use super::header::{HeaderId, VcfHeader};
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
@@ -112,6 +112,9 @@ pub struct Writer<W: Write, S = Unstarted> {
     /// Contig names in rid order, captured from the header. Empty for plain
     /// VCF; used to label the coordinate index returned by [`Writer::finish`].
     contig_names: Vec<SmolStr>,
+    /// The written header's id, set by `write_header`: `begin_record` refuses
+    /// a contig resolved from another header.
+    header: Option<HeaderId>,
     /// BGZF settings for `VcfGz` and `Bcf`, applied by `write_header`.
     compression: Compression,
     _state: PhantomData<S>,
@@ -252,6 +255,7 @@ impl<W: Write> Writer<W> {
         Writer {
             inner,
             contig_names: Vec::new(),
+            header: None,
             compression: Compression::default(),
             _state: PhantomData,
         }
@@ -288,7 +292,7 @@ impl<W: Write> Writer<W> {
         if self.compression == Compression::default() {
             return Ok(self);
         }
-        let Writer { inner, contig_names, compression, _state } = self;
+        let Writer { inner, contig_names, header, compression, _state } = self;
         let Compression { level, threads } = compression;
         let inner = match inner {
             WriterInner::Vcf { .. } => inner,
@@ -329,7 +333,7 @@ impl<W: Write> Writer<W> {
                 fmt_tracker,
             },
         };
-        Ok(Writer { inner, contig_names, compression, _state })
+        Ok(Writer { inner, contig_names, header, compression, _state })
     }
 
     // r[impl record_encoder.write_header]
@@ -337,11 +341,16 @@ impl<W: Write> Writer<W> {
     pub fn write_header(self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
         let mut writer = self.apply_compression()?;
         let header_text = header.to_vcf_text();
-        let n_refs = header.contigs().len();
+        // Indexed by rid: a parsed header's contig dictionary may have holes.
+        let n_refs = header.contig_map().len();
         // Only compressed output is indexed; plain VCF needs no contig names.
         let contig_names: Vec<SmolStr> = match writer.inner {
             WriterInner::Vcf { .. } => Vec::new(),
-            _ => header.contigs().keys().cloned().collect(),
+            // A hole names no contig and no record can use its rid; the index
+            // needs a name per rid, so it gets an empty one.
+            _ => (0..n_refs)
+                .map(|rid| header.contig_map().name(rid).map(SmolStr::from).unwrap_or_default())
+                .collect(),
         };
         #[expect(
             clippy::cast_possible_truncation,
@@ -384,6 +393,7 @@ impl<W: Write> Writer<W> {
         Ok(Writer {
             inner: writer.inner,
             contig_names,
+            header: Some(header.id()),
             compression: writer.compression,
             _state: PhantomData,
         })
@@ -400,6 +410,10 @@ impl<W: Write> Writer<W, Ready> {
         alleles: &Alleles,
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
+        // r[impl vcf_values.header_brand]
+        if self.header != Some(contig.header) {
+            return Err(VcfError::ForeignKey { name: contig.name.clone() });
+        }
         // r[impl record_encoder.reserved_rejection]
         // A QUAL whose bits are the float MISSING marker would read back as an
         // absent QUAL — indistinguishable from `None`.

@@ -90,4 +90,4 @@ r[vcf_header.parse.round_trip]
 For every header the builder can produce, `VcfHeader::parse(&h.to_vcf_text())` MUST yield a header equal to `h` in its definitions, dictionary, contigs and samples. Tests MUST also parse headers bcftools wrote (with and without `IDX=`) and compare the dictionary with the one bcftools uses.
 
 r[vcf_header.brand]
-Every `VcfHeader` MUST carry a `HeaderId` distinct from every other header's in the process, drawn from an atomic counter at `build()` or `parse()`. Keys resolved from a header carry its `HeaderId` (`r[vcf_values.header_brand]`). Cloning a header keeps its id.
+Every `VcfHeader` MUST carry a `HeaderId` distinct from every other header's in the process, drawn from an atomic counter when a builder starts (`VcfHeader::builder()`, since `register_*` hands out keys before `build()`) or at `parse()`. The builder is therefore not `Clone`: two headers built from clones would share an id. Keys resolved from a header carry its `HeaderId` (`r[vcf_values.header_brand]`). Cloning a header keeps its id. The writer's `begin_record` MUST refuse a `ContigId` from another header with `VcfError::ForeignKey`.

@@ -3,9 +3,11 @@
 use super::error::VcfHeaderError;
 use super::record_encoder::{FieldKind, Section, check_genotype};
 use crate::bam::header::BamHeader;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use seqair_types::SmolStr;
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // r[impl vcf_header.info_def]
 /// Number of values for an INFO or FORMAT field.
@@ -158,33 +160,85 @@ impl ContigDef {
 /// [`VcfHeaderError::TooManyFields`].
 pub const MAX_DICT_ENTRIES: usize = 65_536;
 
-// r[impl vcf_header.string_map]
-/// Ordered mapping of header string IDs to BCF dictionary indices.
-///
-/// Hashed, not scanned: a header may declare up to [`MAX_DICT_ENTRIES`] ids.
-#[derive(Debug, Clone)]
-pub struct StringMap {
-    entries: IndexSet<SmolStr>,
-}
+// r[impl vcf_header.parse.limits]
+/// Most contigs a header may declare, for the builder and the parser alike.
+pub const MAX_CONTIGS: usize = 1_048_576;
 
-impl Default for StringMap {
-    fn default() -> Self {
-        Self::new()
-    }
+// r[impl vcf_header.parse.limits]
+/// Most samples a header may declare.
+pub const MAX_SAMPLES: usize = 10_000_000;
+
+// r[impl vcf_header.string_map]
+// r[impl vcf_header.parse.dictionary]
+/// A dictionary of header ids to BCF indices: FILTER/INFO/FORMAT ids in the
+/// string dictionary ([`VcfHeader::string_map`]), contig names in the contig
+/// dictionary ([`VcfHeader::contig_map`]).
+///
+/// A parsed header may leave holes (`IDX=` values with gaps, as htslib writes
+/// after removing a field), so an index names at most one id, and some none.
+/// Hashed, not scanned: a header may declare up to [`MAX_DICT_ENTRIES`] ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringMap {
+    ids: HashMap<SmolStr, u32>,
+    slots: Vec<Option<SmolStr>>,
 }
 
 impl StringMap {
-    fn new() -> Self {
-        Self { entries: IndexSet::new() }
-    }
-
-    fn insert(&mut self, id: SmolStr) -> usize {
-        self.entries.insert_full(id).0
-    }
-
     /// Look up the BCF dictionary index for an ID.
     pub fn get(&self, id: &str) -> Option<usize> {
-        self.entries.get_index_of(id)
+        self.ids.get(id).map(|&idx| idx as usize)
+    }
+
+    /// The id at `idx`, or `None` past the end or in a hole.
+    pub fn name(&self, idx: usize) -> Option<&str> {
+        self.slots.get(idx)?.as_deref()
+    }
+
+    /// One past the highest index, holes included: the size of a table with
+    /// one entry per index.
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// The ids in index order, skipping holes.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.slots.iter().enumerate().filter_map(|(idx, id)| Some((idx, id.as_deref()?)))
+    }
+
+    /// The index of `id`, appending it past the highest index (as htslib does,
+    /// never filling a hole) if it is new. `None`, with the map unchanged, when
+    /// the new index would reach `max`.
+    pub(crate) fn push(&mut self, id: &SmolStr, max: usize) -> Option<u32> {
+        if let Some(&idx) = self.ids.get(id) {
+            return Some(idx);
+        }
+        let idx = self.slots.len();
+        if idx >= max {
+            return None;
+        }
+        let idx32 = u32::try_from(idx).ok()?;
+        self.ids.insert(id.clone(), idx32);
+        self.slots.push(Some(id.clone()));
+        Some(idx32)
+    }
+}
+
+// r[impl vcf_header.brand]
+/// Identifies one header within the process. Every header built or parsed
+/// gets a fresh one; a clone keeps it. Keys resolved from a header carry it,
+/// so a key cannot silently read a field of another file that happens to
+/// share its dictionary index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeaderId(u64);
+
+impl HeaderId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -223,6 +277,7 @@ impl std::fmt::Display for VcfVersion {
 /// VCF header with typed field definitions in insertion order.
 #[derive(Debug, Clone)]
 pub struct VcfHeader {
+    id: HeaderId,
     version: VcfVersion,
     infos: IndexMap<SmolStr, InfoDef>,
     formats: IndexMap<SmolStr, FormatDef>,
@@ -231,6 +286,7 @@ pub struct VcfHeader {
     samples: Vec<SmolStr>,
     other_lines: Vec<SmolStr>,
     string_map: StringMap,
+    contig_map: StringMap,
 }
 
 impl VcfHeader {
@@ -275,14 +331,47 @@ impl VcfHeader {
 
     /// Look up the integer index for a contig name (for BCF encoding).
     pub fn contig_id(&self, name: &str) -> Result<usize, VcfHeaderError> {
-        self.contigs
-            .get_index_of(name)
+        self.contig_map
+            .get(name)
             .ok_or_else(|| VcfHeaderError::MissingContig { name: SmolStr::from(name) })
     }
 
-    /// BCF string dictionary.
+    /// BCF string dictionary (FILTER, INFO and FORMAT ids).
     pub fn string_map(&self) -> &StringMap {
         &self.string_map
+    }
+
+    /// BCF contig dictionary: contig name to `rid`.
+    pub fn contig_map(&self) -> &StringMap {
+        &self.contig_map
+    }
+
+    // r[impl vcf_header.brand]
+    /// This header's identity: distinct from every other header's in the
+    /// process, kept by a clone.
+    pub fn id(&self) -> HeaderId {
+        self.id
+    }
+
+    /// A header with nothing but PASS, version `version` and a fresh id.
+    fn empty(version: VcfVersion) -> Self {
+        let mut header = Self {
+            id: HeaderId::next(),
+            version,
+            infos: IndexMap::new(),
+            formats: IndexMap::new(),
+            filters: IndexMap::new(),
+            contigs: IndexMap::new(),
+            samples: Vec::new(),
+            other_lines: Vec::new(),
+            string_map: StringMap::default(),
+            contig_map: StringMap::default(),
+        };
+        // PASS is always the first filter and dict index 0.
+        let pass = SmolStr::new_static("PASS");
+        header.filters.insert(pass.clone(), FilterDef::new("All filters passed"));
+        header.string_map.push(&pass, MAX_DICT_ENTRIES);
+        header
     }
 
     // r[impl vcf_header.serialization]
@@ -403,7 +492,7 @@ fn push_quoted(out: &mut String, value: &str) {
 /// Result of [`VcfHeaderBuilder::from_bam_header`]: a builder pre-populated
 /// with contigs and the resolved [`ContigId`](super::record_encoder::ContigId)
 /// handles needed by the record encoder.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FromBamHeader {
     /// The builder, ready for further field registration.
     pub builder: VcfHeaderBuilder<Contigs>,
@@ -493,42 +582,16 @@ pub struct Samples;
 /// # }
 /// ```
 pub struct VcfHeaderBuilder<Phase = Contigs> {
-    infos: IndexMap<SmolStr, InfoDef>,
-    formats: IndexMap<SmolStr, FormatDef>,
-    filters: IndexMap<SmolStr, FilterDef>,
-    contigs: IndexMap<SmolStr, ContigDef>,
-    samples: Vec<SmolStr>,
-    other_lines: Vec<SmolStr>,
-    string_map: StringMap,
+    header: VcfHeader,
     _phase: PhantomData<Phase>,
 }
 
-// Manual impls to avoid Phase: Debug/Clone bounds from derive macros.
+// Manual impl to avoid a Phase: Debug bound from the derive. No Clone: the
+// header's id is drawn when the builder starts (keys registered on it carry
+// it), and two headers built from clones would share it.
 impl<P> std::fmt::Debug for VcfHeaderBuilder<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VcfHeaderBuilder")
-            .field("infos", &self.infos)
-            .field("formats", &self.formats)
-            .field("filters", &self.filters)
-            .field("contigs", &self.contigs)
-            .field("samples", &self.samples)
-            .field("other_lines", &self.other_lines)
-            .finish()
-    }
-}
-
-impl<P> Clone for VcfHeaderBuilder<P> {
-    fn clone(&self) -> Self {
-        Self {
-            infos: self.infos.clone(),
-            formats: self.formats.clone(),
-            filters: self.filters.clone(),
-            contigs: self.contigs.clone(),
-            samples: self.samples.clone(),
-            other_lines: self.other_lines.clone(),
-            string_map: self.string_map.clone(),
-            _phase: PhantomData,
-        }
+        f.debug_struct("VcfHeaderBuilder").field("header", &self.header).finish()
     }
 }
 
@@ -537,27 +600,16 @@ impl<P> Clone for VcfHeaderBuilder<P> {
 impl<P> VcfHeaderBuilder<P> {
     /// Transition to a different phase (private — callers use named methods).
     fn into_phase<Q>(self) -> VcfHeaderBuilder<Q> {
-        VcfHeaderBuilder {
-            infos: self.infos,
-            formats: self.formats,
-            filters: self.filters,
-            contigs: self.contigs,
-            samples: self.samples,
-            other_lines: self.other_lines,
-            string_map: self.string_map,
-            _phase: PhantomData,
-        }
+        VcfHeaderBuilder { header: self.header, _phase: PhantomData }
     }
 
-    /// Insert an ID into the string map, returning the dict index.
-    ///
-    /// The dictionary is capped at [`MAX_DICT_ENTRIES`], so every index fits a `u16`.
-    fn insert_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
-        let idx = self.string_map.insert(id.clone());
-        if idx >= MAX_DICT_ENTRIES {
-            return Err(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES });
-        }
-        u32::try_from(idx).map_err(|_| VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
+    /// The dictionary index `id` gets, without inserting it. The dictionary is
+    /// capped at [`MAX_DICT_ENTRIES`], so every index fits a `u16`.
+    fn push_dict_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
+        self.header
+            .string_map
+            .push(id, MAX_DICT_ENTRIES)
+            .ok_or(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
     /// Append a `##key=value` metadata line (e.g. `##source=myapp`).
@@ -565,7 +617,7 @@ impl<P> VcfHeaderBuilder<P> {
     /// Available from any phase — metadata does not affect BCF string
     /// dictionary ordering.
     pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
-        self.other_lines.push(line.into());
+        self.header.other_lines.push(line.into());
     }
 
     // r[impl vcf_header.builder]
@@ -575,16 +627,7 @@ impl<P> VcfHeaderBuilder<P> {
     /// Available from any phase — all fields after contigs are optional.
     #[must_use = "build() returns the header; ignoring it discards all configuration"]
     pub fn build(self) -> Result<VcfHeader, VcfHeaderError> {
-        Ok(VcfHeader {
-            version: VcfHeader::WRITE_VERSION,
-            infos: self.infos,
-            formats: self.formats,
-            filters: self.filters,
-            contigs: self.contigs,
-            samples: self.samples,
-            other_lines: self.other_lines,
-            string_map: self.string_map,
-        })
+        Ok(self.header)
     }
 }
 
@@ -592,22 +635,7 @@ impl<P> VcfHeaderBuilder<P> {
 
 impl VcfHeaderBuilder<Contigs> {
     fn new() -> Self {
-        // PASS is always the first filter and dict index 0.
-        let mut filters = IndexMap::new();
-        filters.insert(SmolStr::from("PASS"), FilterDef::new("All filters passed"));
-        let mut string_map = StringMap::new();
-        string_map.insert(SmolStr::from("PASS"));
-
-        Self {
-            infos: IndexMap::new(),
-            formats: IndexMap::new(),
-            filters,
-            contigs: IndexMap::new(),
-            samples: Vec::new(),
-            other_lines: Vec::new(),
-            string_map,
-            _phase: PhantomData,
-        }
+        Self { header: VcfHeader::empty(VcfHeader::WRITE_VERSION), _phase: PhantomData }
     }
 
     // r[impl vcf_header.contig_required]
@@ -616,11 +644,7 @@ impl VcfHeaderBuilder<Contigs> {
         name: impl Into<SmolStr>,
         def: ContigDef,
     ) -> Result<(), VcfHeaderError> {
-        let name = name.into();
-        if self.contigs.contains_key(&name) {
-            return Err(VcfHeaderError::DuplicateContig { name });
-        }
-        self.contigs.insert(name, def);
+        self.register_contig(name, def)?;
         Ok(())
     }
 
@@ -632,12 +656,16 @@ impl VcfHeaderBuilder<Contigs> {
         def: ContigDef,
     ) -> Result<super::record_encoder::ContigId, VcfHeaderError> {
         let name = name.into();
-        if self.contigs.contains_key(&name) {
+        if self.header.contigs.contains_key(&name) {
             return Err(VcfHeaderError::DuplicateContig { name });
         }
-        let tid = u32::try_from(self.contigs.len()).map_err(|_| VcfHeaderError::TooManyContigs)?;
-        self.contigs.insert(name.clone(), def);
-        Ok(super::record_encoder::ContigId { tid, name })
+        let tid = self
+            .header
+            .contig_map
+            .push(&name, MAX_CONTIGS)
+            .ok_or(VcfHeaderError::TooManyContigs { max: MAX_CONTIGS })?;
+        self.header.contigs.insert(name.clone(), def);
+        Ok(super::record_encoder::ContigId { tid, name, header: self.header.id })
     }
 
     // r[impl vcf_header.from_bam_header]
@@ -681,13 +709,15 @@ impl VcfHeaderBuilder<Contigs> {
 
 impl VcfHeaderBuilder<Filters> {
     // r[impl vcf_header.filter_def]
-    /// Insert a FILTER definition, returning its BCF dict index.
+    /// Insert a FILTER definition, returning its BCF dict index. A refused
+    /// definition leaves the builder unchanged.
     fn insert_filter(&mut self, id: SmolStr, def: FilterDef) -> Result<u32, VcfHeaderError> {
-        if self.filters.contains_key(&id) {
+        if self.header.filters.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateFilter { id });
         }
-        self.filters.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)
+        let dict_idx = self.push_dict_entry(&id)?;
+        self.header.filters.insert(id, def);
+        Ok(dict_idx)
     }
 
     pub fn add_filter(
@@ -706,9 +736,8 @@ impl VcfHeaderBuilder<Filters> {
         def: &super::record_encoder::FilterFieldDef,
     ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        let dict_idx =
-            self.insert_filter(id.clone(), FilterDef::new(SmolStr::from(def.description)))?;
-        Ok(super::record_encoder::FilterId { dict_idx, name: id })
+        let dict_idx = self.insert_filter(id.clone(), FilterDef::new(def.description))?;
+        Ok(super::record_encoder::FilterId { dict_idx, name: id, header: Some(self.header.id) })
     }
 
     /// Advance to the [`Infos`] phase.
@@ -731,16 +760,18 @@ impl VcfHeaderBuilder<Filters> {
 
 impl VcfHeaderBuilder<Infos> {
     // r[impl vcf_header.info_def]
-    /// Insert an INFO definition, returning its BCF dict index.
+    /// Insert an INFO definition, returning its BCF dict index. A refused
+    /// definition leaves the builder unchanged.
     fn insert_info(&mut self, id: SmolStr, def: InfoDef) -> Result<u32, VcfHeaderError> {
-        if self.infos.contains_key(&id) {
+        if self.header.infos.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateInfo { id });
         }
         if def.typ == ValueType::Flag && def.number != Number::Count(0) {
             return Err(VcfHeaderError::FlagNumberMismatch { id });
         }
-        self.infos.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)
+        let dict_idx = self.push_dict_entry(&id)?;
+        self.header.infos.insert(id, def);
+        Ok(dict_idx)
     }
 
     pub fn add_info(&mut self, id: impl Into<SmolStr>, def: InfoDef) -> Result<(), VcfHeaderError> {
@@ -758,14 +789,10 @@ impl VcfHeaderBuilder<Infos> {
         // biallelic caller writes one value per ALT.
         check_genotype::<V>(Section::Info, def.name)?;
         let id = SmolStr::from(def.name);
-        let dict_idx = self.insert_info(
-            id.clone(),
-            InfoDef::new(def.number, V::VALUE_TYPE, SmolStr::from(def.description)),
-        )?;
-        Ok(super::record_encoder::InfoKey(
-            super::record_encoder::FieldId { dict_idx, name: id },
-            PhantomData,
-        ))
+        let dict_idx =
+            self.insert_info(id.clone(), InfoDef::new(def.number, V::VALUE_TYPE, def.description))?;
+        let field = super::record_encoder::FieldId { dict_idx, name: id, header: self.header.id };
+        Ok(super::record_encoder::InfoKey(field, PhantomData))
     }
 
     /// Advance to the [`Formats`] phase.
@@ -783,16 +810,18 @@ impl VcfHeaderBuilder<Infos> {
 
 impl VcfHeaderBuilder<Formats> {
     // r[impl vcf_header.format_def]
-    /// Insert a FORMAT definition, returning its BCF dict index.
+    /// Insert a FORMAT definition, returning its BCF dict index. A refused
+    /// definition leaves the builder unchanged.
     fn insert_format(&mut self, id: SmolStr, def: FormatDef) -> Result<u32, VcfHeaderError> {
-        if self.formats.contains_key(&id) {
+        if self.header.formats.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateFormat { id });
         }
         if def.typ == ValueType::Flag {
             return Err(VcfHeaderError::FormatFlagNotAllowed { id });
         }
-        self.formats.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)
+        let dict_idx = self.push_dict_entry(&id)?;
+        self.header.formats.insert(id, def);
+        Ok(dict_idx)
     }
 
     pub fn add_format(
@@ -814,12 +843,10 @@ impl VcfHeaderBuilder<Formats> {
         let id = SmolStr::from(def.name);
         let dict_idx = self.insert_format(
             id.clone(),
-            FormatDef::new(def.number, V::VALUE_TYPE, SmolStr::from(def.description)),
+            FormatDef::new(def.number, V::VALUE_TYPE, def.description),
         )?;
-        Ok(super::record_encoder::FormatKey(
-            super::record_encoder::FieldId { dict_idx, name: id },
-            PhantomData,
-        ))
+        let field = super::record_encoder::FieldId { dict_idx, name: id, header: self.header.id };
+        Ok(super::record_encoder::FormatKey(field, PhantomData))
     }
 
     /// Advance to the [`Samples`] phase.
@@ -834,10 +861,13 @@ impl VcfHeaderBuilder<Samples> {
     // r[impl vcf_header.sample_names]
     pub fn add_sample(&mut self, name: impl Into<SmolStr>) -> Result<(), VcfHeaderError> {
         let name = name.into();
-        if self.samples.contains(&name) {
+        if self.header.samples.contains(&name) {
             return Err(VcfHeaderError::DuplicateSample { name });
         }
-        self.samples.push(name);
+        if self.header.samples.len() >= MAX_SAMPLES {
+            return Err(VcfHeaderError::TooManySamples { max: MAX_SAMPLES });
+        }
+        self.header.samples.push(name);
         Ok(())
     }
 }
@@ -964,6 +994,72 @@ mod tests {
         let header = full_dictionary().build().unwrap();
         let last = header.string_map().get(&format!("I{}", MAX_DICT_ENTRIES - 1));
         assert_eq!(last, Some(usize::from(u16::MAX)), "the highest index fits a u16");
+    }
+
+    // r[verify vcf_header.dict_capacity+2]
+    /// A registration the full dictionary refuses leaves the builder as it was:
+    /// no header entry without a dictionary index.
+    #[test]
+    fn a_refused_registration_leaves_the_builder_unchanged() {
+        let mut builder = full_dictionary();
+        let before = (builder.header.infos.len(), builder.header.string_map.clone());
+        let def = InfoDef::new(Number::Count(1), ValueType::Integer, "x");
+        builder.add_info("overflow", def).unwrap_err();
+        assert_eq!((builder.header.infos.len(), builder.header.string_map.clone()), before);
+        assert!(!builder.header.infos.contains_key("overflow"));
+
+        // An id already in the dictionary still fits: FORMAT shares INFO's index.
+        let mut builder = builder.formats();
+        let def = FormatDef::new(Number::Count(1), ValueType::Integer, "x");
+        builder.add_format("I1", def).unwrap();
+        let def = FormatDef::new(Number::Count(1), ValueType::Integer, "x");
+        builder.add_format("overflow", def).unwrap_err();
+        assert!(!builder.header.formats.contains_key("overflow"));
+    }
+
+    // r[verify vcf_header.brand]
+    #[test]
+    fn every_header_has_its_own_id_and_a_clone_keeps_it() {
+        use crate::vcf::record_encoder::{InfoFieldDef, Scalar};
+        let ids: Vec<HeaderId> =
+            (0..64).map(|_| VcfHeader::builder().build().unwrap().id()).collect();
+        let distinct: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len());
+
+        let mut builder = VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef::new(None)).unwrap();
+        let mut builder = builder.infos();
+        let dp = builder
+            .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ""))
+            .unwrap();
+        let header = builder.build().unwrap();
+        assert_eq!(header.clone().id(), header.id());
+        assert_eq!(contig.header, header.id(), "a registered contig carries the header's id");
+        assert_eq!(dp.0.header, header.id(), "a registered key carries the header's id");
+    }
+
+    // r[verify vcf_header.brand]
+    // r[verify vcf_values.header_brand]
+    #[test]
+    fn the_writer_refuses_a_contig_of_another_header() {
+        use crate::vcf::{Alleles, OutputFormat, VcfError, Writer};
+        use seqair_types::{Base, Pos1};
+        let make = || {
+            let mut builder = VcfHeader::builder();
+            let contig = builder.register_contig("chr1", ContigDef::new(None)).unwrap();
+            (builder.build().unwrap(), contig)
+        };
+        let (header, _) = make();
+        let (_, foreign) = make();
+        for format in [OutputFormat::Vcf, OutputFormat::Bcf] {
+            let mut writer = Writer::new(Vec::new(), format).write_header(&header).unwrap();
+            let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+            let err = writer.begin_record(&foreign, Pos1::new(1).unwrap(), &alleles, None).err();
+            assert!(
+                matches!(err, Some(VcfError::ForeignKey { ref name }) if name == "chr1"),
+                "{err:?}"
+            );
+        }
     }
 
     // r[verify vcf_header.string_map]

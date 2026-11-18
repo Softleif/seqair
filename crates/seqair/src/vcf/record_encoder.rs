@@ -41,7 +41,7 @@
 //! ```
 
 use super::error::{KeyError, VcfError};
-use super::header::{Number, ValueType};
+use super::header::{HeaderId, Number, ValueType};
 use super::record::Genotype;
 use seqair_types::SmolStr;
 use std::marker::PhantomData;
@@ -186,10 +186,12 @@ pub(crate) fn check_genotype<V: FieldKind>(section: Section, name: &str) -> Resu
 
 // r[impl record_encoder.field_id]
 /// Base field identifier carrying both a BCF dictionary index and a string name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldId {
     pub(crate) dict_idx: u32,
     pub(crate) name: SmolStr,
+    /// The header the index was resolved from (`r[vcf_values.header_brand]`).
+    pub(crate) header: HeaderId,
 }
 
 impl FieldId {
@@ -203,10 +205,12 @@ impl FieldId {
 
 // r[impl record_encoder.contig_id]
 /// Resolved contig identifier carrying both integer tid and string name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContigId {
     pub(crate) tid: u32,
     pub(crate) name: SmolStr,
+    /// The header the tid was resolved from (`r[vcf_values.header_brand]`).
+    pub(crate) header: HeaderId,
 }
 
 impl ContigId {
@@ -220,14 +224,18 @@ impl ContigId {
 
 // r[impl record_encoder.filter_id]
 /// Resolved filter identifier carrying both dictionary index and name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FilterId {
     pub(crate) dict_idx: u32,
     pub(crate) name: SmolStr,
+    /// The header the index was resolved from; `None` for [`Self::PASS`],
+    /// which is index 0 in every header (`r[vcf_header.filter_def]`).
+    pub(crate) header: Option<HeaderId>,
 }
 
 impl FilterId {
-    pub const PASS: FilterId = Self { dict_idx: 0, name: SmolStr::new_inline("PASS") };
+    pub const PASS: FilterId =
+        Self { dict_idx: 0, name: SmolStr::new_inline("PASS"), header: None };
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -240,10 +248,10 @@ impl FilterId {
 
 // r[impl record_encoder.key_types]
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InfoKey<V>(pub(crate) FieldId, pub(crate) PhantomData<V>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FormatKey<V>(pub(crate) FieldId, pub(crate) PhantomData<V>);
 
 impl<V> InfoKey<V> {
@@ -818,12 +826,18 @@ mod tests {
     // r[verify record_encoder.typed_keys]
     #[test]
     fn typed_keys_prevent_misuse() {
-        let _int_key: InfoInt =
-            InfoKey(FieldId { dict_idx: 0, name: SmolStr::from("DP") }, PhantomData);
-        let _float_key: InfoFloat =
-            InfoKey(FieldId { dict_idx: 1, name: SmolStr::from("BQ") }, PhantomData);
-        let _flag_key: InfoFlag =
-            InfoKey(FieldId { dict_idx: 2, name: SmolStr::from("CPG") }, PhantomData);
+        let _int_key: InfoInt = InfoKey(
+            FieldId { dict_idx: 0, name: SmolStr::from("DP"), header: HeaderId::next() },
+            PhantomData,
+        );
+        let _float_key: InfoFloat = InfoKey(
+            FieldId { dict_idx: 1, name: SmolStr::from("BQ"), header: HeaderId::next() },
+            PhantomData,
+        );
+        let _flag_key: InfoFlag = InfoKey(
+            FieldId { dict_idx: 2, name: SmolStr::from("CPG"), header: HeaderId::next() },
+            PhantomData,
+        );
     }
 
     struct TestSetup {

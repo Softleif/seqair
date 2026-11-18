@@ -54,8 +54,11 @@ pub enum VcfHeaderError {
     #[error("GT must be the first FORMAT key, but found at index {index}")]
     GtNotFirst { index: usize },
 
-    #[error("too many contigs (exceeds u32::MAX)")]
-    TooManyContigs,
+    #[error("too many contigs: a header may declare at most {max}")]
+    TooManyContigs { max: usize },
+
+    #[error("too many samples: a header may declare at most {max}")]
+    TooManySamples { max: usize },
 
     #[error(
         "too many header fields: the FILTER/INFO/FORMAT string dictionary is limited to {max} \
@@ -179,6 +182,9 @@ pub enum VcfError {
 
     #[error(transparent)]
     Index(#[from] crate::io::IndexError),
+
+    #[error("{name} was resolved from another header than the one being written")]
+    ForeignKey { name: SmolStr },
 
     #[error("write_header() must be called before write_record()")]
     HeaderNotWritten,
