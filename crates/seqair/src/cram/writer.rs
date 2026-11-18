@@ -29,6 +29,7 @@ mod header;
 mod mates;
 mod pool;
 mod rans;
+mod rans_nx16;
 mod record;
 
 use self::container::{Assembled, SliceBuilder, SliceKind};
