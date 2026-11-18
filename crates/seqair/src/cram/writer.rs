@@ -301,7 +301,10 @@ impl<W: Write> CramWriter<W> {
                 .then(|| Pool::new(options.threads, options.level, options.version, &metrics))
                 .transpose()?,
             spare: Vec::new(),
-            records_per_slice: options.records_per_slice,
+            records_per_slice: options.records_per_slice.unwrap_or(match options.version {
+                CramVersion::V3_1(CramProfile::Archive) => container::ARCHIVE_RECORDS,
+                _ => container::MAX_RECORDS,
+            }),
             warned_unmapped_alignment: false,
             scratch: Scratch::default(),
             poisoned: false,
@@ -394,7 +397,7 @@ impl<W: Write> CramWriter<W> {
             Some(tid) => SliceKind::Mapped { tid, reference: self.header.reference(tid).is_some() },
             None => SliceKind::Unplaced,
         };
-        // r[impl cram_writer.slicing]
+        // r[impl cram_writer.slicing+2]
         if self.slice.ends_before(kind, checked.read_len, self.records_per_slice) {
             self.flush_slice().inspect_err(|_| self.poisoned = true)?;
         }
@@ -550,7 +553,8 @@ struct Options {
     write_index: bool,
     level: CompressionLevel,
     threads: usize,
-    records_per_slice: u32,
+    /// `None`: the profile's.
+    records_per_slice: Option<u32>,
     version: CramVersion,
     exhaustive_codec_search: bool,
 }
@@ -636,7 +640,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
                 write_index: false,
                 level: CompressionLevel::default(),
                 threads: 0,
-                records_per_slice: container::MAX_RECORDS,
+                records_per_slice: None,
                 version: CramVersion::default(),
                 exhaustive_codec_search: false,
             },
@@ -684,7 +688,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     #[doc(hidden)]
     #[must_use]
     pub fn records_per_slice(mut self, records: u32) -> Self {
-        self.options.records_per_slice = records.max(1);
+        self.options.records_per_slice = Some(records.max(1));
         self
     }
 
