@@ -20,7 +20,7 @@ pub enum CramIndexError {
 }
 
 /// A single entry in a CRAI index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CraiEntry {
     /// The CRAI reference index, `None` for an unmapped entry. Not a [`Tid`]:
     /// an index is read without the header, so this is only compared
