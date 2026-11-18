@@ -116,8 +116,7 @@ fn fixture_reads_back_as_samtools_cram_does() {
     samtools(&["quickcheck", ours.to_str().unwrap()]);
     let size = |p: &Path| std::fs::metadata(p).unwrap().len();
     eprintln!("ours {} bytes, samtools 3.0 {} bytes", size(&ours), size(&theirs));
-    // Detached mates cost ~9% here; attaching them is the next step.
-    assert!(size(&ours) * 100 <= size(&theirs) * 112, "much larger than samtools'");
+    assert!(size(&ours) * 100 <= size(&theirs) * 102, "larger than samtools'");
 
     // Several containers, so the pool reorders some.
     let reference = IndexedFastaReader::open(&fasta).unwrap();
@@ -278,7 +277,7 @@ struct Line {
 /// skips and padding, sometimes past its reference's end; or unmapped,
 /// placed or not. SEQ `*`, missing qualities, and tags of every type.
 #[hegel::composite]
-fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
+fn read(tc: &TestCase, refs: Vec<Vec<u8>>, name: String) -> Line {
     let mut rng = Rng(tc.draw(gs::integers::<u64>()) | 1);
     let unmapped = tc.draw(gs::integers::<u8>().max_value(9)) == 0;
     // Any FLAG but the unmapped bit, which `unmapped` sets. htslib's decode
@@ -319,7 +318,10 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
             ops.push(('S', 1 + tc.draw(gs::integers::<usize>().max_value(8))));
         }
         if tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
-            ops.push((tc.draw(gs::sampled_from(vec!['I', 'D'])), 1 + tc.draw(gs::integers::<usize>().max_value(3))));
+            ops.push((
+                tc.draw(gs::sampled_from(vec!['I', 'D'])),
+                1 + tc.draw(gs::integers::<usize>().max_value(3)),
+            ));
         }
         for i in 0..1 + tc.draw(gs::integers::<usize>().max_value(3)) {
             if i > 0 {
@@ -332,7 +334,10 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
             ops.push((m, 1 + tc.draw(gs::integers::<usize>().max_value(40))));
         }
         if tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
-            ops.push((tc.draw(gs::sampled_from(vec!['I', 'D'])), 1 + tc.draw(gs::integers::<usize>().max_value(3))));
+            ops.push((
+                tc.draw(gs::sampled_from(vec!['I', 'D'])),
+                1 + tc.draw(gs::integers::<usize>().max_value(3)),
+            ));
         }
         if tc.draw(gs::booleans()) {
             ops.push(('S', 1 + tc.draw(gs::integers::<usize>().max_value(8))));
@@ -381,7 +386,11 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
             1 + tc.draw(gs::integers::<usize>().max_value(1000)),
             tc.draw(gs::integers::<i32>().min_value(-i32::MAX)),
         ),
-        _ => ("chr2", 1 + tc.draw(gs::integers::<usize>().max_value(1000)), tc.draw(gs::integers::<i32>().min_value(-i32::MAX))),
+        _ => (
+            "chr2",
+            1 + tc.draw(gs::integers::<usize>().max_value(1000)),
+            tc.draw(gs::integers::<i32>().min_value(-i32::MAX)),
+        ),
     };
     let rnext = if rname == "*" && rnext == "=" { "*" } else { rnext };
 
@@ -426,7 +435,7 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
         tags.swap(i, (rng.next() % (i as u64 + 1)) as usize);
     }
     let mut text = format!(
-        "r{n}\t{flag}\t{rname}\t{pos1}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
+        "{name}\t{flag}\t{rname}\t{pos1}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
     );
     for tag in tags {
         text.push('\t');
@@ -533,6 +542,7 @@ fn write_each_way(
 // r[verify cram_writer.record.read_group]
 // r[verify cram_writer.record.unmapped]
 // r[verify cram_writer.record.mate]
+// r[verify cram_writer.mates]
 // r[verify cram_writer.record.order]
 // r[verify cram_writer.record.flags]
 // r[verify cram_writer.record.position]
@@ -551,14 +561,47 @@ fn write_each_way(
 fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
     let refs = reference_bases(&mut Rng(tc.draw(gs::integers::<u64>()) | 1));
     let n = tc.draw(gs::integers::<usize>().max_value(60));
-    let mut lines: Vec<Line> = (0..n).map(|i| tc.draw(read(refs.clone(), i))).collect();
+    // Pairs of reads share a name, and samtools fixmate makes their mate
+    // fields agree, so the writer attaches them.
+    let pairs = tc.draw(gs::booleans());
+    let name = |i: usize| if pairs { format!("p{}", i / 2) } else { format!("r{i}") };
+    let mut lines: Vec<Line> = (0..n).map(|i| tc.draw(read(refs.clone(), name(i)))).collect();
     lines.sort_by_key(|l| l.key);
-    let text: String = lines.iter().map(|l| l.text.as_str()).collect();
+    let mut text: String = lines.iter().map(|l| l.text.as_str()).collect();
+    if pairs && let Some(fixed) = fixmate(&text) {
+        text = fixed;
+    }
     // Small slices sometimes, so records cross slice boundaries.
     let records_per_slice = tc.draw(gs::sampled_from(vec![10_000, 10_000, 1, 2, 5]));
     let calmd = tc.draw(gs::booleans());
     let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, calmd, records_per_slice);
     tc.assume(compared);
+}
+
+/// `records` (SAM, no header) with their mate fields made consistent by
+/// `samtools fixmate`, coordinate-sorted again; `None` where samtools
+/// fails (fixmate breaks some reads that run past the reference's end).
+fn fixmate(records: &str) -> Option<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    std::fs::write(path("in.sam"), header_text() + records).unwrap();
+    let ok = |args: &[&str]| Command::new("samtools").args(args).output().unwrap().status.success();
+    let (sam, names, fixed, sorted) =
+        (path("in.sam"), path("names.bam"), path("fixed.bam"), path("sorted.bam"));
+    let steps: [&[&str]; 3] = [
+        &["sort", "-n", "-o", &names, &sam],
+        &["fixmate", &names, &fixed],
+        &["sort", "-o", &sorted, &fixed],
+    ];
+    if !steps.iter().all(|args| ok(args)) {
+        return None;
+    }
+    Some(
+        samtools(&["view", "--no-PG", &path("sorted.bam")])
+            .lines()
+            .map(|l| format!("{l}\n"))
+            .collect(),
+    )
 }
 
 /// `sam` (records, no header) against `refs`, through seqair and through
@@ -613,7 +656,11 @@ fn assert_reads_back_as_samtools_cram_does(
     // decode writes it into a generated MD as N, htslib's as it is
     // (`r[cram.stream.iupac+1]`).
     if refs.iter().flatten().all(|b| IupacBase::ASCII.contains(&b.to_ascii_uppercase())) {
-        assert_eq!(seqair_lines(&ours, &fasta), through_samtools, "seqair and samtools read it alike");
+        assert_eq!(
+            seqair_lines(&ours, &fasta),
+            through_samtools,
+            "seqair and samtools read it alike"
+        );
     }
     let theirs_read = Command::new("samtools")
         .args(["view", "--no-PG", "-T", fasta.to_str().unwrap(), theirs.to_str().unwrap()])

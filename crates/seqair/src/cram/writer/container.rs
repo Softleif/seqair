@@ -2,6 +2,7 @@
 //! frames them: compression header, slice header, blocks.
 
 use super::CramWriteError;
+use super::mates::{self, MateRecord};
 use super::rans;
 use crate::cram::varint::{write_itf8, write_ltf8};
 use crate::io::CompressionLevel;
@@ -23,6 +24,7 @@ pub(super) enum Series {
     Ns,
     Np,
     Ts,
+    Nf,
     Tl,
     Fn,
     Fc,
@@ -42,7 +44,7 @@ pub(super) enum Series {
     BbLen,
 }
 
-const SERIES: [Series; 26] = [
+const SERIES: [Series; 27] = [
     Series::Bf,
     Series::Cf,
     Series::Rl,
@@ -53,6 +55,7 @@ const SERIES: [Series; 26] = [
     Series::Ns,
     Series::Np,
     Series::Ts,
+    Series::Nf,
     Series::Tl,
     Series::Fn,
     Series::Fc,
@@ -91,6 +94,7 @@ impl Series {
             Self::Ns => b"NS",
             Self::Np => b"NP",
             Self::Ts => b"TS",
+            Self::Nf => b"NF",
             Self::Tl => b"TL",
             Self::Fn => b"FN",
             Self::Fc => b"FC",
@@ -200,6 +204,9 @@ pub(super) struct SliceBuilder {
     kind: Option<SliceKind>,
     series: [Vec<u8>; SERIES.len()],
     tags: Vec<TagBlock>,
+    /// Each record's mate fields; the mate series and `CF` are written
+    /// when the slice is complete, once its pairs are known.
+    mates: Vec<MateRecord>,
     tag_lines: Vec<Vec<u8>>,
     line_ids: FxHashMap<Vec<u8>, i32>,
     n_records: u32,
@@ -257,6 +264,15 @@ impl SliceBuilder {
     /// `end`.
     pub(super) fn reach(&mut self, end: i64) {
         self.end = self.end.max(end);
+    }
+
+    /// The byte offset the next value of `series` goes to.
+    pub(super) fn len(&self, series: Series) -> usize {
+        self.series.get(series as usize).map_or(0, Vec::len)
+    }
+
+    pub(super) fn push_mate(&mut self, mate: MateRecord) {
+        self.mates.push(mate);
     }
 
     pub(super) fn int(&mut self, series: Series, value: i32) {
@@ -322,6 +338,7 @@ impl SliceBuilder {
             kind,
             series,
             tags,
+            mates,
             tag_lines,
             line_ids,
             n_records,
@@ -333,6 +350,7 @@ impl SliceBuilder {
         *kind = None;
         series.iter_mut().for_each(Vec::clear);
         tags.clear();
+        mates.clear();
         tag_lines.clear();
         line_ids.clear();
         *n_records = 0;
@@ -357,7 +375,12 @@ impl SliceBuilder {
     /// What assembling the slice needs from the writer: the records before
     /// it, its reference's length, and the MD5 of `reference` (uppercased
     /// bases) over its extent when it is stored against them.
-    pub(super) fn frame(&self, record_counter: u64, length: u64, reference: Option<&[u8]>) -> Frame {
+    pub(super) fn frame(
+        &self,
+        record_counter: u64,
+        length: u64,
+        reference: Option<&[u8]>,
+    ) -> Frame {
         let md5 = match (self.kind, reference) {
             (Some(SliceKind::Mapped { reference: true, .. }), Some(bases)) => {
                 let (start, span) = self.extent(length);
@@ -396,22 +419,34 @@ impl SliceBuilder {
         })?;
         let n_records = i32::try_from(self.n_records).unwrap_or(i32::MAX);
 
-        // The external blocks, series first, then tags.
+        // r[impl cram_writer.mates]
+        let mates = mates::series(
+            &self.mates,
+            self.series.get(Series::Rn as usize).map_or(&[], Vec::as_slice),
+        );
+        // The external blocks with data, series first, then tags.
+        let blocks: Vec<(i32, &[u8])> = SERIES
+            .into_iter()
+            .filter_map(|series| {
+                let data = match series {
+                    Series::Cf => &mates.cf,
+                    Series::Mf => &mates.mf,
+                    Series::Ns => &mates.ns,
+                    Series::Np => &mates.np,
+                    Series::Ts => &mates.ts,
+                    Series::Nf => &mates.nf,
+                    _ => self.series.get(series as usize)?,
+                };
+                Some((series.content_id(), data.as_slice()))
+            })
+            .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
+            .filter(|(_, data)| !data.is_empty())
+            .collect();
         let mut external = Vec::new();
-        for series in SERIES {
-            let data = self.series.get(series as usize).map(Vec::as_slice).unwrap_or_default();
-            if !data.is_empty() {
-                codecs.block(&mut external, 4, series.content_id(), data)?;
-            }
+        for &(id, data) in &blocks {
+            codecs.block(&mut external, 4, id, data)?;
         }
-        for tag in &self.tags {
-            codecs.block(&mut external, 4, tag.key, &tag.data)?;
-        }
-        let n_external = SERIES
-            .iter()
-            .filter(|&&s| self.series.get(s as usize).is_some_and(|d| !d.is_empty()))
-            .count()
-            .saturating_add(self.tags.len());
+        let n_external = blocks.len();
 
         let mut compression_header = Vec::new();
         Codecs::raw_block(
@@ -429,13 +464,8 @@ impl SliceBuilder {
         write_ltf8(&mut slice_header, record_counter);
         write_itf8(&mut slice_header, len_i32("block count", n_external.saturating_add(1))?);
         write_itf8(&mut slice_header, len_i32("block count", n_external)?);
-        for series in SERIES {
-            if self.series.get(series as usize).is_some_and(|d| !d.is_empty()) {
-                write_itf8(&mut slice_header, series.content_id());
-            }
-        }
-        for tag in &self.tags {
-            write_itf8(&mut slice_header, tag.key);
+        for &(id, _) in &blocks {
+            write_itf8(&mut slice_header, id);
         }
         write_itf8(&mut slice_header, -1);
         slice_header.extend_from_slice(&md5);

@@ -171,7 +171,8 @@ fn build(read: &Read, refs: &[Vec<u8>; 2], header: &BamHeader, i: usize) -> Opti
         pos: Pos0::new(u32::from(p)),
         template_len: NonZeroI32::new(t),
     });
-    let mut name = format!("r{i}_").into_bytes();
+    // Neighbours without a drawn name share one, so the writer may attach them.
+    let mut name = if read.name.is_empty() { format!("p{}", i / 2) } else { format!("r{i}_") }.into_bytes();
     name.extend(read.name.iter().take(20).map(|b| b % 94 + b'!').filter(|&b| b != b'@'));
     let record = OwnedBamRecord {
         tid,

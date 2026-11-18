@@ -1,11 +1,11 @@
 //! Containers assembled (compressed) on worker threads while the caller
 //! encodes the next slice, and handed back in the order they were submitted.
 
-use super::container::{Assembled, Codecs, Frame, SliceBuilder};
 use super::CramWriteError;
+use super::container::{Assembled, Codecs, Frame, SliceBuilder};
 use crate::io::CompressionLevel;
 use std::collections::VecDeque;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 struct Job {
