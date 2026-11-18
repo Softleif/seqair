@@ -248,15 +248,43 @@ pub fn read_ltf8_from(cursor: &mut &[u8]) -> Option<u64> {
     Some(val)
 }
 
+// r[impl cram_writer.blocks]
+/// Append `val` as ITF8; a negative value as its two's complement, as CRAM
+/// stores `-1` and other negatives.
+pub(crate) fn write_itf8(out: &mut Vec<u8>, val: i32) {
+    let mut buf = [0u8; 5];
+    let n = encode_itf8(val.cast_unsigned(), &mut buf);
+    out.extend_from_slice(buf.get(..n).unwrap_or(&buf));
+}
+
+/// Append `val` as LTF8: `n - 1` leading one bits and `7n` value bits in
+/// `n` bytes for `n` up to 8, and `0xFF` before all 64 bits otherwise.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects,
+    reason = "n ≤ 8, so the shifts are below 64; the head byte takes the value bits above the tail bytes, fewer than 8 by the choice of n"
+)]
+pub(crate) fn write_ltf8(out: &mut Vec<u8>, val: u64) {
+    let bytes = val.to_be_bytes();
+    let Some(n) = (1u32..=8).find(|&n| val >> (7 * n) == 0) else {
+        out.push(0xFF);
+        out.extend_from_slice(&bytes);
+        return;
+    };
+    let tail = n.saturating_sub(1);
+    let prefix = !(0xFFu8 >> tail);
+    out.push(prefix | (val >> (8 * tail)) as u8);
+    out.extend_from_slice(bytes.get(8usize.saturating_sub(tail as usize)..).unwrap_or_default());
+}
+
 /// Encode an ITF8 value into a buffer.
 ///
 /// Returns the number of bytes written (1-5).
-/// Used only for testing roundtrips.
-#[cfg(test)]
 #[allow(
     clippy::cast_possible_truncation,
     reason = "intentional byte extraction via bitmask shifts in ITF8 encoding"
 )]
+#[allow(clippy::indexing_slicing, reason = "every index is below 5, the buffer's length")]
 pub(super) fn encode_itf8(val: u32, buf: &mut [u8; 5]) -> usize {
     if val < 0x80 {
         buf[0] = val as u8;
@@ -435,6 +463,25 @@ mod tests {
     // ── LTF8 known values ──────────────────────────────────────────────
 
     // r[verify cram.ltf8]
+    // r[verify cram_writer.blocks]
+    #[hegel::test]
+    fn written_ltf8_reads_back(tc: TestCase) {
+        // Shifted, so every byte length is drawn, not only the longest.
+        let shift: u32 = tc.draw(gs::integers::<u32>().min_value(0).max_value(63));
+        let val = tc.draw(gs::integers::<u64>()) >> shift;
+        let mut out = Vec::new();
+        write_ltf8(&mut out, val);
+        assert_eq!(decode_ltf8(&out), Some((val, out.len())));
+    }
+
+    #[hegel::test]
+    fn written_itf8_reads_back(tc: TestCase) {
+        let val: i32 = tc.draw(gs::integers::<i32>());
+        let mut out = Vec::new();
+        write_itf8(&mut out, val);
+        assert_eq!(decode_itf8(&out).map(|(v, n)| (v.cast_signed(), n)), Some((val, out.len())));
+    }
+
     #[test]
     fn ltf8_single_byte() {
         assert_eq!(decode_ltf8(&[0x00]), Some((0, 1)));
