@@ -1,2 +1,5 @@
 # Preserve CRLF line endings in DOS line-ending test file
 tests/htslib/sam/index_dos.sam text eol=crlf
+
+# Fuzz seeds are bytes, line endings included
+fuzz/seeds/** -text

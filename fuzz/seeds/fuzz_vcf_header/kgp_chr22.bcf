@@ -1,0 +1,113 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed",IDX=0>
+##fileDate=29/01/2022 - 14:31:41
+##source=shapeit4.2.2
+##contig=<ID=chr1,length=248956422,IDX=0>
+##contig=<ID=chr2,length=242193529,IDX=1>
+##contig=<ID=chr3,length=198295559,IDX=2>
+##contig=<ID=chr4,length=190214555,IDX=3>
+##contig=<ID=chr5,length=181538259,IDX=4>
+##contig=<ID=chr6,length=170805979,IDX=5>
+##contig=<ID=chr7,length=159345973,IDX=6>
+##contig=<ID=chr8,length=145138636,IDX=7>
+##contig=<ID=chr9,length=138394717,IDX=8>
+##contig=<ID=chr10,length=133797422,IDX=9>
+##contig=<ID=chr11,length=135086622,IDX=10>
+##contig=<ID=chr12,length=133275309,IDX=11>
+##contig=<ID=chr13,length=114364328,IDX=12>
+##contig=<ID=chr14,length=107043718,IDX=13>
+##contig=<ID=chr15,length=101991189,IDX=14>
+##contig=<ID=chr16,length=90338345,IDX=15>
+##contig=<ID=chr17,length=83257441,IDX=16>
+##contig=<ID=chr18,length=80373285,IDX=17>
+##contig=<ID=chr19,length=58617616,IDX=18>
+##contig=<ID=chr20,length=64444167,IDX=19>
+##contig=<ID=chr21,length=46709983,IDX=20>
+##contig=<ID=chr22,length=50818468,IDX=21>
+##contig=<ID=chrX,length=156040895,IDX=22>
+##contig=<ID=chrY,length=57227415,IDX=23>
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency",IDX=1>
+##INFO=<ID=AC,Number=1,Type=Integer,Description="Allele count",IDX=2>
+##INFO=<ID=CM,Number=A,Type=Float,Description="Interpolated cM position",IDX=3>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Phased genotypes",IDX=4>
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes",IDX=5>
+##INFO=<ID=AN_EAS,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in EAS",IDX=6>
+##INFO=<ID=AN_AMR,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in AMR",IDX=7>
+##INFO=<ID=AN_EUR,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in EUR",IDX=8>
+##INFO=<ID=AN_AFR,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in AFR",IDX=9>
+##INFO=<ID=AN_SAS,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in SAS",IDX=10>
+##INFO=<ID=AN_EUR_unrel,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in EUR (2504 unrelated samples)",IDX=11>
+##INFO=<ID=AN_EAS_unrel,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in EAS (2504 unrelated samples)",IDX=12>
+##INFO=<ID=AN_AMR_unrel,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in AMR (2504 unrelated samples)",IDX=13>
+##INFO=<ID=AN_SAS_unrel,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in SAS (2504 unrelated samples)",IDX=14>
+##INFO=<ID=AN_AFR_unrel,Number=1,Type=Integer,Description="Total number of alleles in called genotypes in AFR (2504 unrelated samples)",IDX=15>
+##INFO=<ID=AC_EAS,Number=A,Type=Integer,Description="Allele count in genotypes in EAS",IDX=16>
+##INFO=<ID=AC_AMR,Number=A,Type=Integer,Description="Allele count in genotypes in AMR",IDX=17>
+##INFO=<ID=AC_EUR,Number=A,Type=Integer,Description="Allele count in genotypes in EUR",IDX=18>
+##INFO=<ID=AC_AFR,Number=A,Type=Integer,Description="Allele count in genotypes in AFR",IDX=19>
+##INFO=<ID=AC_SAS,Number=A,Type=Integer,Description="Allele count in genotypes in SAS",IDX=20>
+##INFO=<ID=AC_EUR_unrel,Number=A,Type=Integer,Description="Allele count in genotypes in EUR (2504 unrelated samples)",IDX=21>
+##INFO=<ID=AC_EAS_unrel,Number=A,Type=Integer,Description="Allele count in genotypes in EAS (2504 unrelated samples)",IDX=22>
+##INFO=<ID=AC_AMR_unrel,Number=A,Type=Integer,Description="Allele count in genotypes in AMR (2504 unrelated samples)",IDX=23>
+##INFO=<ID=AC_SAS_unrel,Number=A,Type=Integer,Description="Allele count in genotypes in SAS (2504 unrelated samples)",IDX=24>
+##INFO=<ID=AC_AFR_unrel,Number=A,Type=Integer,Description="Allele count in genotypes in AFR (2504 unrelated samples)",IDX=25>
+##INFO=<ID=AC_Hom_EAS,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in EAS",IDX=26>
+##INFO=<ID=AC_Hom_AMR,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in AMR",IDX=27>
+##INFO=<ID=AC_Hom_EUR,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in EUR",IDX=28>
+##INFO=<ID=AC_Hom_AFR,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in AFR",IDX=29>
+##INFO=<ID=AC_Hom_SAS,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in SAS",IDX=30>
+##INFO=<ID=AC_Hom_EUR_unrel,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in EUR (2504 unrelated samples)",IDX=31>
+##INFO=<ID=AC_Hom_EAS_unrel,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in EAS (2504 unrelated samples)",IDX=32>
+##INFO=<ID=AC_Hom_AMR_unrel,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in AMR (2504 unrelated samples)",IDX=33>
+##INFO=<ID=AC_Hom_SAS_unrel,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in SAS (2504 unrelated samples)",IDX=34>
+##INFO=<ID=AC_Hom_AFR_unrel,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes in AFR (2504 unrelated samples)",IDX=35>
+##INFO=<ID=AC_Hom,Number=A,Type=Integer,Description="Allele counts in homozygous genotypes",IDX=36>
+##INFO=<ID=AC_Het_EAS,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in EAS",IDX=37>
+##INFO=<ID=AC_Het_AMR,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in AMR",IDX=38>
+##INFO=<ID=AC_Het_EUR,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in EUR",IDX=39>
+##INFO=<ID=AC_Het_AFR,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in AFR",IDX=40>
+##INFO=<ID=AC_Het_SAS,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in SAS",IDX=41>
+##INFO=<ID=AC_Het_EUR_unrel,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in EUR (2504 unrelated samples)",IDX=42>
+##INFO=<ID=AC_Het_EAS_unrel,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in EAS (2504 unrelated samples)",IDX=43>
+##INFO=<ID=AC_Het_AMR_unrel,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in AMR (2504 unrelated samples)",IDX=44>
+##INFO=<ID=AC_Het_SAS_unrel,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in SAS (2504 unrelated samples)",IDX=45>
+##INFO=<ID=AC_Het_AFR_unrel,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes in AFR (2504 unrelated samples)",IDX=46>
+##INFO=<ID=AC_Het,Number=A,Type=Integer,Description="Allele counts in heterozygous genotypes",IDX=47>
+##INFO=<ID=AF_EAS,Number=A,Type=Float,Description="Allele frequency in EAS",IDX=48>
+##INFO=<ID=AF_AMR,Number=A,Type=Float,Description="Allele frequency in AMR",IDX=49>
+##INFO=<ID=AF_EUR,Number=A,Type=Float,Description="Allele frequency in EUR",IDX=50>
+##INFO=<ID=AF_AFR,Number=A,Type=Float,Description="Allele frequency in AFR",IDX=51>
+##INFO=<ID=AF_SAS,Number=A,Type=Float,Description="Allele frequency in SAS",IDX=52>
+##INFO=<ID=AF_EUR_unrel,Number=A,Type=Float,Description="Allele frequency in EUR (2504 unrelated samples)",IDX=53>
+##INFO=<ID=AF_EAS_unrel,Number=A,Type=Float,Description="Allele frequency in EAS (2504 unrelated samples)",IDX=54>
+##INFO=<ID=AF_AMR_unrel,Number=A,Type=Float,Description="Allele frequency in AMR (2504 unrelated samples)",IDX=55>
+##INFO=<ID=AF_SAS_unrel,Number=A,Type=Float,Description="Allele frequency in SAS (2504 unrelated samples)",IDX=56>
+##INFO=<ID=AF_AFR_unrel,Number=A,Type=Float,Description="Allele frequency in AFR (2504 unrelated samples)",IDX=57>
+##INFO=<ID=MAF_EUR_unrel,Number=A,Type=Float,Description="Minor Allele frequency in EUR (2504 unrelated samples)",IDX=58>
+##INFO=<ID=MAF_EAS_unrel,Number=A,Type=Float,Description="Minor Allele frequency in EAS (2504 unrelated samples)",IDX=59>
+##INFO=<ID=MAF_AMR_unrel,Number=A,Type=Float,Description="Minor Allele frequency in AMR (2504 unrelated samples)",IDX=60>
+##INFO=<ID=MAF_SAS_unrel,Number=A,Type=Float,Description="Minor Allele frequency in SAS (2504 unrelated samples)",IDX=61>
+##INFO=<ID=MAF_AFR_unrel,Number=A,Type=Float,Description="Minor Allele frequency in AFR (2504 unrelated samples)",IDX=62>
+##INFO=<ID=HWE_EAS,Number=A,Type=Float,Description="HWE test in EAS (PMID:15789306); 1=good, 0=bad",IDX=63>
+##INFO=<ID=HWE_AMR,Number=A,Type=Float,Description="HWE test in AMR (PMID:15789306); 1=good, 0=bad",IDX=64>
+##INFO=<ID=HWE_EUR,Number=A,Type=Float,Description="HWE test in EUR (PMID:15789306); 1=good, 0=bad",IDX=65>
+##INFO=<ID=HWE_AFR,Number=A,Type=Float,Description="HWE test in AFR (PMID:15789306); 1=good, 0=bad",IDX=66>
+##INFO=<ID=HWE_SAS,Number=A,Type=Float,Description="HWE test in SAS (PMID:15789306); 1=good, 0=bad",IDX=67>
+##INFO=<ID=HWE,Number=A,Type=Float,Description="HWE test (PMID:15789306); 1=good, 0=bad",IDX=68>
+##INFO=<ID=ExcHet_EAS,Number=A,Type=Float,Description="Test excess heterozygosity in EAS; 1=good, 0=bad",IDX=69>
+##INFO=<ID=ExcHet_AMR,Number=A,Type=Float,Description="Test excess heterozygosity in AMR; 1=good, 0=bad",IDX=70>
+##INFO=<ID=ExcHet_EUR,Number=A,Type=Float,Description="Test excess heterozygosity in EUR; 1=good, 0=bad",IDX=71>
+##INFO=<ID=ExcHet_AFR,Number=A,Type=Float,Description="Test excess heterozygosity in AFR; 1=good, 0=bad",IDX=72>
+##INFO=<ID=ExcHet_SAS,Number=A,Type=Float,Description="Test excess heterozygosity in SAS; 1=good, 0=bad",IDX=73>
+##INFO=<ID=ExcHet,Number=A,Type=Float,Description="Test excess heterozygosity; 1=good, 0=bad",IDX=74>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="SV Type",IDX=75>
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length of insertion",IDX=76>
+##INFO=<ID=CHR2,Number=1,Type=String,Description="Chromosome for END coordinate",IDX=77>
+##INFO=<ID=END2,Type=Integer,Number=1,Description="Position of breakpoint on CHR2",IDX=78>
+##INFO=<ID=ALGORITHMS,Number=.,Type=String,Description="Source algorithms",IDX=79>
+##INFO=<ID=SOURCE,Number=1,Type=String,Description="Source of inserted sequence.",IDX=80>
+##INFO=<ID=EVIDENCE,Number=.,Type=String,Description="Classes of random forest support.",IDX=81>
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the structural variant",IDX=82>
+##bcftools_viewVersion=1.25+htslib-1.25
+##bcftools_viewCommand=view -r chr22:20000000-20300000 -Ob -o kgp_chr22.bcf https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/1kGP_high_coverage_Illumina.chr22.filtered.SNV_INDEL_SV_phased_panel.vcf.gz; Date=Wed Nov 18 15:53:29 2026
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00096	HG00097	HG00099	HG00100

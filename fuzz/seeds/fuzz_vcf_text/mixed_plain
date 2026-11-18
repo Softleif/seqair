@@ -1,0 +1,5 @@
+chr1	100	rs1;rs2	A	C,<DEL>	29.5	PASS	DP=7;AF=0.5,0.25;DB;S=x,y;SVLEN=.,-300	GT:AD:GL:FT	0/1:3,4:-1,-2,-3:PASS	1|1:0,7:.	./.
+chr1	200	.	G	<*>	.	.	END=450	GT:LEN	0/0:250	0/0:.	./.:300
+chr1	300	.	ACGT	A,<DUP:TANDEM>,*	.	q10;nope	SVLEN=.,40,.;C=x;XX=1	GT:AD	0/2:1,2,3	|1/2	1
+chrUn	0	.	N	.	.	.	.	.	.	.	.
+chr2	5	.	A	G	1e3	.	END=1,2;DP=.	GT:AD:FT	0/1:.:x	.:5,6	0/1:1

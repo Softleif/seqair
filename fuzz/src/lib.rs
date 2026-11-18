@@ -2,6 +2,7 @@
 
 pub mod cram_roundtrip;
 pub mod indexed_reader;
+pub mod vcf_fields;
 
 use seqair::bam::header::BamHeader;
 use std::sync::LazyLock;

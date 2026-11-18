@@ -1,0 +1,108 @@
+##fileformat=VCFv4.3
+##FILTER=<ID=PASS,Description="All filters passed">
+##rastairVersion=2.1.1
+##rastairCommand=call /Volumes/Softleif/bsb/watchmaker/na12878_dnamix_deep/bams/SV168_16_deep.bam -r tmp/na12878/GRCh38_full_analysis_set_plus_decoy_hla.fa --vcf tmp/SV168_16_deep.bcf --gpu --experimental-indels --rescue-soft-clip-cpg
+##rastairConfig={"require_tags":[],"variant_calling":{"unpaired":false,"guess_read_orientation":false,"error_model":"Novaseq6000","keep_overlapping_reads":false,"linear_dedup_threshold":30,"v_min_depth":3,"max_coverage":1000,"quality":{"min_mapq":1,"min_baseq":10},"read_masking":{"n_ot":{"r1":{"from_start":0,"from_end":0},"r2":{"from_start":0,"from_end":0}},"n_ob":{"r1":{"from_start":0,"from_end":0},"r2":{"from_start":0,"from_end":0}}},"read_flags":{"include_flags":3,"exclude_flags":3852}},"indel":{"experimental_indels":true,"min_indel_ao":2,"min_indel_depth":2,"indel_error_rate":0.05,"indel_max_mismatches":5,"indel_end_of_read_cutoff":0},"denovo_cpg":{"cpg_novo_min_depth":2,"cpg_novo_min_baseq":15.0,"cpg_novo_min_mapq":50.0,"cpg_novo_min_vaf":0.2},"methylation":{"thresholds":{"m_vaf_min":0.2,"m_min_depth":3,"m_bq_ratio_min":0.27,"m_read_position_min":0.2,"m_read_position_max":0.8,"m_max_coverage":1000},"rescue_soft_clip_cpg":true},"ml":{"no_ml":false,"ml":0.5,"gpu":true},"record_filters":{"vcf_all":false,"cpgs_only":false}}
+##reference="tmp/na12878/GRCh38_full_analysis_set_plus_decoy_hla.fa"
+##FILTER=<ID=lowDp,Description="Low read depth">
+##FILTER=<ID=dnCpG_lowDp,Description="Low read depth for de-novo CpG candidate">
+##FILTER=<ID=dnCpG_bq,Description="Low base quality for de-novo CpG candidate">
+##FILTER=<ID=dnCpG_mapq,Description="Low mapping quality for de-novo CpG candidate">
+##FILTER=<ID=dnCpG_vaf,Description="Low variant allele frequency for de-novo CpG candidate">
+##FILTER=<ID=dnCpG_adj,Description="Included as adjacent position for de-novo CpG candidate, but other position did not pass filters">
+##FILTER=<ID=m_vaf,Description="Low variant allele frequency for methylation candidate">
+##FILTER=<ID=m_bq_ratio,Description="Low quality ratio for methylation candidate">
+##FILTER=<ID=m_pos,Description="Alt allele evidence from read edges for methylation candidate">
+##FILTER=<ID=m_highDp,Description="Excessive coverage for methylation candidate">
+##FILTER=<ID=pre_ml,Description="Low amount of usable evidence, skipping ML">
+##FILTER=<ID=low_ml_score,Description="Machine Learning module prediction below threshold">
+##INFO=<ID=AD,Number=R,Type=Integer,Description="Total read depth for each allele">
+##INFO=<ID=BQ,Number=1,Type=Float,Description="RMS base quality">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth across samples">
+##INFO=<ID=MQ,Number=1,Type=Float,Description="RMS mapping quality">
+##INFO=<ID=MQ0,Number=1,Type=Integer,Description="Number of MAPQ == 0 reads">
+##INFO=<ID=NS,Number=1,Type=Integer,Description="Number of samples with data">
+##INFO=<ID=AS_SB_OT,Number=R,Type=Integer,Description="OT counts per allele">
+##INFO=<ID=AS_SB_OB,Number=R,Type=Integer,Description="OB counts per allele">
+##INFO=<ID=SC5,Number=1,Type=String,Description="5-base sequence context centered on the variant position">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency for each ALT allele in the same order as listed (estimated from primary data, not called genotypes)">
+##INFO=<ID=ABQ,Number=R,Type=Float,Description="RMS Base quality per allele">
+##INFO=<ID=AMQ,Number=R,Type=Float,Description="RMS Map quality per allele">
+##INFO=<ID=AS_SS_BQ_OT,Number=R,Type=Float,Description="Strand-specific RMS of base quality per allele on the original top strand">
+##INFO=<ID=AS_SS_BQ_OB,Number=R,Type=Float,Description="Strand-specific RMS of base quality per allele on the original bottom strand">
+##INFO=<ID=AS_SS_MQ_OT,Number=R,Type=Float,Description="Strand-specific RMS of mapping quality per allele on the original top strand">
+##INFO=<ID=AS_SS_MQ_OB,Number=R,Type=Float,Description="Strand-specific RMS of mapping quality per allele on the original bottom strand">
+##INFO=<ID=PIR,Number=R,Type=Float,Description="RMS of relative position in read">
+##INFO=<ID=ENT100,Number=1,Type=Float,Description="Shannon entropy of 100bp sequence context around variant position. Value range (0..2)">
+##INFO=<ID=NAB,Number=R,Type=Float,Description="RMS of number of aligned bases">
+##INFO=<ID=NOI,Number=R,Type=Float,Description="RMS of number of indels">
+##INFO=<ID=M5mC_Strands,Number=4,Type=Integer,Description="Number of reads that are evidence for unmodified, modified, no SNP, snp">
+##INFO=<ID=CPG,Number=0,Type=Flag,Description="Is this a CpG site?">
+##INFO=<ID=CPGnovo,Number=0,Type=Flag,Description="De-novo CPG candidate: Could the alt alleles create a new CpG site?">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GL,Number=G,Type=Float,Description="Genotype likelihoods, Phred-scaled">
+##FORMAT=<ID=GC,Number=G,Type=Float,Description="Genotype confidence, Phred-scaled">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+##FORMAT=<ID=M5mC,Number=M,Type=Float,Description="Methylation level at CpG sites">
+##FORMAT=<ID=ML,Number=A,Type=Float,Description="Prediction of methylation/variant likelihood by rastair's machine learning model">
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr10,length=133797422>
+##contig=<ID=chr11,length=135086622>
+##contig=<ID=chr11_KI270721v1_random,length=100316>
+##contig=<ID=chr12,length=133275309>
+##contig=<ID=chr13,length=114364328>
+##contig=<ID=chr14,length=107043718>
+##contig=<ID=chr14_GL000009v2_random,length=201709>
+##contig=<ID=chr14_GL000225v1_random,length=211173>
+##contig=<ID=chr14_KI270722v1_random,length=194050>
+##contig=<ID=chr14_GL000194v1_random,length=191469>
+##contig=<ID=chr14_KI270723v1_random,length=38115>
+##contig=<ID=chr14_KI270724v1_random,length=39555>
+##contig=<ID=chr14_KI270725v1_random,length=172810>
+##contig=<ID=chr14_KI270726v1_random,length=43739>
+##contig=<ID=chr15,length=101991189>
+##contig=<ID=chr15_KI270727v1_random,length=448248>
+##contig=<ID=chr16,length=90338345>
+##contig=<ID=chr16_KI270728v1_random,length=1872759>
+##contig=<ID=chr17,length=83257441>
+##contig=<ID=chr17_GL000205v2_random,length=185591>
+##contig=<ID=chr17_KI270729v1_random,length=280839>
+##contig=<ID=chr17_KI270730v1_random,length=112551>
+##contig=<ID=chr18,length=80373285>
+##contig=<ID=chr19,length=58617616>
+##contig=<ID=chr1_KI270706v1_random,length=175055>
+##contig=<ID=chr1_KI270707v1_random,length=32032>
+##contig=<ID=chr1_KI270708v1_random,length=127682>
+##contig=<ID=chr1_KI270709v1_random,length=66860>
+##contig=<ID=chr1_KI270710v1_random,length=40176>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
+chr1	10009	.	A	.	99	PASS	AD=136;BQ=39.3548;DP=140;MQ=26.613;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:140
+chr1	10009	.	A	AC	0	low_ml_score	DP=60;AD=58,2	GT:DP:ML	0/0:60:0.0411133
+chr1	10019	.	T	.	99	PASS	AD=164;BQ=39.2488;DP=172;MQ=27.0811;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:172
+chr1	10019	.	TN	T	0	low_ml_score	DP=72;AD=69,3	GT:DP:ML	0/0:72:0.0296457
+chr1	10019	.	T	TAA	0	low_ml_score	DP=72;AD=69,3	GT:DP:ML	0/0:72:0.0467451
+chr1	10021	.	A	.	99	PASS	AD=164;BQ=38.986;DP=179;MQ=26.7315;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:179
+chr1	10021	.	A	AC	0	low_ml_score	DP=74;AD=72,2	GT:DP:ML	0/0:74:0.0399835
+chr1	10025	.	T	.	99	PASS	AD=190;BQ=39.2713;DP=195;MQ=26.72;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:195
+chr1	10025	.	T	TAA	0	low_ml_score	DP=83;AD=80,3	GT:DP:ML	0/0:83:0.0474056
+chr1	10027	.	A	.	99	PASS	AD=190;BQ=39.3037;DP=204;MQ=26.4667;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:204
+chr1	10027	.	A	AC	0	low_ml_score	DP=92;AD=90,2	GT:DP:ML	0/0:92:0.0432619
+chr1	10030	.	C	.	99	PASS	AD=217;BQ=39.2293;DP=218;MQ=26.7655;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:218
+chr1	10030	.	C	CCT	0	low_ml_score	DP=96;AD=94,2	GT:DP:ML	0/0:96:0.0401397
+chr1	10030	.	CN	C	0	low_ml_score	DP=96;AD=94,2	GT:DP:ML	0/0:96:0.0274654
+chr1	10030	.	C	CT	0	low_ml_score	DP=96;AD=94,2	GT:DP:ML	0/0:96:0.0448478
+chr1	10031	.	T	.	99	PASS	AD=210;BQ=38.9796;DP=216;MQ=26.9189;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:216
+chr1	10031	.	TN	T	0	low_ml_score	DP=92;AD=88,4	GT:DP:ML	0/0:92:0.0279763
+chr1	10031	.	T	TAA	0	low_ml_score	DP=92;AD=89,3	GT:DP:ML	0/0:92:0.0555357
+chr1	10033	.	A	.	99	PASS	AD=206;BQ=39.4777;DP=222;MQ=26.715;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:222
+chr1	10033	.	A	AC	0	low_ml_score	DP=97;AD=94,3	GT:DP:ML	0/0:97:0.0439392
+chr1	10037	.	T	.	99	PASS	AD=228;BQ=39.0073;DP=235;MQ=26.6605;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:235
+chr1	10037	.	TN	T	0	low_ml_score	DP=98;AD=96,2	GT:DP:ML	0/0:98:0.0276686
+chr1	10037	.	T	TAA	0	low_ml_score	DP=98;AD=95,3	GT:DP:ML	0/0:98:0.0476308
+chr1	10039	.	A	.	99	PASS	AD=222;BQ=39.0867;DP=241;MQ=26.3748;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:241
+chr1	10039	.	A	AC	0	low_ml_score	DP=101;AD=97,4	GT:DP:ML	0/0:101:0.0423312
+chr1	10042	.	C	.	99	PASS	AD=245;BQ=39.2648;DP=246;MQ=26.1561;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:246
+chr1	10042	.	CN	C	0	low_ml_score	DP=105;AD=103,2	GT:DP:ML	0/0:105:0.0267458
+chr1	10042	.	C	CT	0	low_ml_score	DP=105;AD=100,5	GT:DP:ML	0/0:105:0.0528297
+chr1	10043	.	T	.	99	PASS	AD=237;BQ=38.8874;DP=245;MQ=26.3629;M5mC_Strands=0,0,0,0	GT:GL:GC:DP	0/0:99:99:245
+chr1	10043	.	TN	T	0	low_ml_score	DP=103;AD=97,6	GT:DP:ML	0/0:103:0.0348001

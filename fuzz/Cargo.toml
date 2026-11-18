@@ -230,6 +230,18 @@ name = "fuzz_vcf_read"
 path = "fuzz_targets/fuzz_vcf_read.rs"
 doc = false
 
+# VCF header text → VcfHeader::parse → to_vcf_text → parse again
+[[bin]]
+name = "fuzz_vcf_header"
+path = "fuzz_targets/fuzz_vcf_header.rs"
+doc = false
+
+# VCF text records under a fixed header → every component and RawRecord view
+[[bin]]
+name = "fuzz_vcf_text"
+path = "fuzz_targets/fuzz_vcf_text.rs"
+doc = false
+
 # Full-stack: BAM records → RecordStore → PileupEngine → column iteration
 [[bin]]
 name = "fuzz_pileup_full"

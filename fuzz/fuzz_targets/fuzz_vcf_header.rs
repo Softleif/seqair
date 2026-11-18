@@ -1,0 +1,18 @@
+//! VCF header text parsed (`r[vcf_reader.fuzz]`): nothing panics, and a
+//! header that parses writes text that parses again, with the same
+//! dictionaries and samples.
+#![no_main]
+
+// r[verify vcf_reader.fuzz]
+
+use libfuzzer_sys::fuzz_target;
+use seqair::vcf::VcfHeader;
+
+fuzz_target!(|data: &[u8]| {
+    let Ok(text) = std::str::from_utf8(data) else { return };
+    let Ok(header) = VcfHeader::parse(text) else { return };
+    let again = VcfHeader::parse(&header.to_vcf_text()).expect("written header text parses");
+    assert_eq!(again.string_map(), header.string_map());
+    assert_eq!(again.contig_map(), header.contig_map());
+    assert_eq!(again.samples(), header.samples());
+});
