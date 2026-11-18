@@ -141,6 +141,11 @@ impl FieldTracker {
         // `scratch` keeps its capacity for reuse.
     }
 
+    /// Whether `dict_idx` has already been written in this record (O(1)).
+    pub(crate) fn contains(&self, dict_idx: u32) -> bool {
+        self.seen.contains(dict_idx)
+    }
+
     /// Index of `dict_idx` in `entries`. Only called once a duplicate is known.
     fn find(&self, dict_idx: u32) -> Option<usize> {
         self.entries.iter().position(|(id, _)| *id == dict_idx)
@@ -614,10 +619,10 @@ mod tests {
         let mut buf = Vec::new();
         let mut t = FieldTracker::default();
         append_commit(&mut t, &mut buf, 5, b"AAAA", false);
-        assert!(t.seen.contains(5));
-        assert!(!t.seen.contains(6));
+        assert!(t.contains(5));
+        assert!(!t.contains(6));
         t.clear();
-        assert!(!t.seen.contains(5));
+        assert!(!t.contains(5));
         assert!(t.find(5).is_none());
     }
 

@@ -33,7 +33,6 @@ impl FieldSet {
         new
     }
 
-    #[allow(dead_code, reason = "for the VCF/BCF reader's warn-once sets")]
     pub(crate) fn contains(&self, id: u32) -> bool {
         let (word, mask) = locate(id);
         self.words.get(word).is_some_and(|w| w & mask != 0)

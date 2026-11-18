@@ -855,6 +855,29 @@ enum EncoderInner<'a> {
     Vcf(VcfEncoderFields<'a>),
 }
 
+/// BCF's `n_fmt` is a `u8`; htslib's `MAX_N_FMT` holds VCF text to the same.
+const MAX_FORMAT_FIELDS: u8 = u8::MAX;
+
+impl EncoderInner<'_> {
+    // r[impl record_encoder.format_count_limit]
+    /// Reject a new FORMAT field once the record holds [`MAX_FORMAT_FIELDS`],
+    /// before any of its bytes are written. A duplicate always fits.
+    fn check_format_room(&self, id: &FieldId) -> Result<(), VcfError> {
+        let (count, present) = match self {
+            Self::Bcf(enc) => (usize::from(enc.n_fmt), enc.fmt_tracker.contains(id.dict_idx())),
+            Self::Vcf(vcf) => (vcf.fmt_keys.len(), vcf.fmt_seen.contains(id.dict_idx())),
+        };
+        if count < usize::from(MAX_FORMAT_FIELDS) || present {
+            return Ok(());
+        }
+        Err(VcfError::ValueOverflow {
+            field: "n_fmt",
+            value: u64::from(MAX_FORMAT_FIELDS).saturating_add(1),
+            target_type: "u8",
+        })
+    }
+}
+
 // ── Begun → Filtered ───────────────────────────────────────────────────
 
 // r[impl record_encoder.typestate_transitions]
@@ -1298,6 +1321,7 @@ impl<'a> RecordEncoder<'a, Filtered> {
 #[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(gts.len(), self.n_samples(), "one GT per sample");
         // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
         // diploid on chrX) is not yet supported — BCF allows per-sample padding
@@ -1379,6 +1403,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         reject_reserved_ints(id.name(), values.iter().copied())?;
         match &mut self.inner {
@@ -1408,6 +1433,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         reject_reserved_floats(id.name(), values.iter().copied())?;
         match &mut self.inner {
@@ -1440,6 +1466,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
         reject_reserved_ints(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
@@ -1500,6 +1527,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
         reject_reserved_floats(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
@@ -1559,6 +1587,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         id: &FieldId,
         per_sample: &[&[Option<f32>]],
     ) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
         reject_reserved_floats(
             id.name(),
@@ -1623,6 +1652,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
+        self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one string per sample");
         // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
         // string-missing convention), so the column width must leave room for it.

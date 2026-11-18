@@ -13,8 +13,8 @@
 use noodles::vcf::variant::io::Write as _;
 use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, FormatInt, InfoInt, Number, OutputFormat, ValueType, VcfHeader,
-    Writer,
+    Alleles, ContigDef, ContigId, FormatInt, InfoInt, Number, OutputFormat, ValueType, VcfError,
+    VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::io::Cursor;
@@ -225,5 +225,42 @@ fn hundreds_of_fields_read_back_through_noodles() {
     for format in [OutputFormat::Vcf, OutputFormat::Bcf] {
         let bytes = write(&setup, format);
         assert_eq!(parse(&noodles_view(&bytes, format)), expected(), "{format:?}");
+    }
+}
+
+// r[verify record_encoder.format_count_limit]
+/// BCF counts a record's FORMAT fields in a `u8`: the 256th is refused before
+/// it is written, so the record still emits with the 255 it has.
+#[test]
+fn a_256th_format_field_is_refused_and_the_record_still_emits() {
+    let setup = setup_with(0, 256);
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+    for (format, suffix) in [(OutputFormat::Vcf, ".vcf"), (OutputFormat::Bcf, ".bcf")] {
+        let mut out = Vec::new();
+        let mut writer = Writer::new(&mut out, format).write_header(&setup.header).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        for key in &setup.formats[..255] {
+            key.encode(&mut enc, &[1, 2]).unwrap();
+        }
+        setup.formats[0].encode(&mut enc, &[3, 4]).unwrap();
+        let err = setup.formats[255].encode(&mut enc, &[5, 6]).unwrap_err();
+        assert!(matches!(err, VcfError::ValueOverflow { field: "n_fmt", .. }), "{err:?}");
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+
+        let lines = parse(&bcftools_view(&out, suffix));
+        let expected: Vec<(String, Vec<String>)> = (0..255)
+            .map(|k| {
+                let values = if k == 0 { ["3", "4"] } else { ["1", "2"] };
+                (format!("F{k}"), values.map(String::from).to_vec())
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{format:?}");
+        assert!(lines[0].0.is_empty(), "{format:?}: no INFO");
+        assert_eq!(lines[0].1, expected, "{format:?}");
     }
 }
