@@ -147,12 +147,14 @@ const MAX_EMBEDDED: usize = 1 << 24;
 /// The reference to embed for `held`, over `start..end`, as htslib's
 /// `cram_generate_reference` builds it: where a record's `MD` gives a base,
 /// that one (the last record's); elsewhere the most frequent of `ACGT`
-/// among the aligned bases there, `N` where none is. `None` where no record
-/// has an aligned base, or the extent is longer than [`MAX_EMBEDDED`].
+/// among the aligned bases there, `N` where none is. `None` where the
+/// aligned bases number under 1% of the extent (htslib's limit, which also
+/// spares the counts of a nearly empty contig) or the extent is longer than
+/// [`MAX_EMBEDDED`].
 pub(super) fn consensus(held: &[Held], start: usize, end: usize) -> Option<Vec<u8>> {
     let len = end.saturating_sub(start);
     let aligned = held.iter().flat_map(Held::aligned).count();
-    if aligned == 0 || len == 0 || len > MAX_EMBEDDED {
+    if aligned == 0 || len == 0 || len > MAX_EMBEDDED || aligned.saturating_mul(100) < len {
         return None;
     }
     let mut counts = vec![[0u16; 4]; len];

@@ -1177,7 +1177,8 @@ fn a_reference_the_fasta_lacks_is_embedded() {
 
 // r[verify cram_writer.reference_free+2]
 /// Records on a reference the FASTA lacks with no aligned base to build one
-/// from are written without a reference.
+/// from, or too few (under 1% of the extent), are written without a
+/// reference.
 #[test]
 fn a_reference_the_fasta_lacks_without_aligned_bases_is_written_without_it() {
     let refs = reference_bases(&mut Rng(5));
@@ -1190,7 +1191,7 @@ fn a_reference_the_fasta_lacks_without_aligned_bases_is_written_without_it() {
         "e\t4\tchrX\t9\t0\t*\t*\t0\t0\tAC\t##",
     ];
     let sam = dir.path().join("in.sam");
-    std::fs::write(&sam, text + &records.join("\n") + "\n").unwrap();
+    std::fs::write(&sam, text.clone() + &records.join("\n") + "\n").unwrap();
     let bam = dir.path().join("in.bam");
     samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
     let (ours, _) = write_each_way(dir.path(), &bam, &fasta, Options::default());
@@ -1198,6 +1199,15 @@ fn a_reference_the_fasta_lacks_without_aligned_bases_is_written_without_it() {
     assert_eq!(through_samtools, records);
     assert_eq!(seqair_lines(&ours, &fasta), through_samtools);
     assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    assert!(!embeds_a_reference(&ours));
+
+    // Aligned bases under 1% of the extent: 2 × 2 over 450 positions.
+    let sparse = ["f\t0\tchrX\t9\t7\t2M\t*\t0\t0\tAC\t*", "g\t0\tchrX\t457\t7\t2M\t*\t0\t0\tGT\t*"];
+    std::fs::write(&sam, text + &sparse.join("\n") + "\n").unwrap();
+    samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
+    let (ours, _) = write_each_way(dir.path(), &bam, &fasta, Options::default());
+    let through_samtools = samtools_lines(&ours, &fasta);
+    assert_eq!(through_samtools, sparse);
     assert!(!embeds_a_reference(&ours));
 }
 
