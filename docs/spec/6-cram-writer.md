@@ -39,6 +39,9 @@ CRAM has no binary reference list: the header text is the only place the reader 
 r[cram_writer.header_m5]
 Every `@SQ` line of a reference the FASTA holds MUST carry `M5`, the lowercase hex MD5 of the reference's bases uppercased, which is what htslib checks a reference against. The writer MUST add `M5` where the line has none. An `LN` that is not the FASTA's length MUST fail the build (`ReferenceLengthMismatch`). An `M5` that is not the FASTA's MUST refuse the first record on that reference and every later one (`ReferenceMd5Mismatch`) without reading the reference again: the file would claim a reference it was not written against. It is checked when the writer first reads the reference rather than at build, so a header that carries every `M5` (one copied from a CRAM) costs no pass over the FASTA. A reference the FASTA lacks keeps its line as it is, and its records are written without the reference (`r[cram_writer.reference_free]`). Computing the missing MD5s reads those references once, at `build()`.
 
+r[cram_writer.header_m5.reuse]
+The bases of the first reference whose `M5` `build()` computes MUST be kept for the first slice on that reference, rather than read from the FASTA a second time. They are dropped, or their buffer reused, when a slice on another reference needs its bases.
+
 r[cram_writer.eof]
 The file MUST end with the CRAM 3 EOF container, the 38 bytes htslib's `cram_check_EOF` matches.
 
