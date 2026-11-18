@@ -106,6 +106,8 @@ pub(crate) struct FileShared {
     pub(crate) data_start: DataStart,
     index: Option<CsiIndex>,
     pub(crate) contigs: ContigTable,
+    /// VCF text: the header's lines, so a record's line number is known.
+    pub(crate) header_lines: u64,
     /// FILTER ids by dictionary index; `None` where the index names no FILTER.
     pub(crate) filters: Vec<Option<FilterId>>,
     /// Dictionary indices the header declares as INFO / FORMAT fields.
@@ -136,6 +138,14 @@ impl FileShared {
     /// A fresh handle on the file's bytes, at their start.
     pub(crate) fn open_input(&self) -> Result<Input, VcfReadError> {
         self.source.open()
+    }
+
+    /// The file's path, unless it was read from memory.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match &self.source {
+            Source::Path(path) => Some(path),
+            Source::Bytes(_) => None,
+        }
     }
 
     /// Whether records are VCF text (plain or BGZF).
@@ -199,13 +209,14 @@ impl VcfFile {
     }
 
     fn new(source: Source, index: Option<CsiIndex>) -> Result<Self, VcfReadError> {
-        let (format, header, data_start) = read_header(source.open()?)?;
+        let (format, header, data_start, header_lines) = read_header(source.open()?)?;
         let shared = FileShared {
             info_ids: declared(&header, header.infos().keys()),
             format_ids: declared(&header, header.formats().keys()),
             contigs: ContigTable::new(&header),
             filters: filter_table(&header),
             first_phase_is_read: header.version() >= VcfVersion::V4_4,
+            header_lines,
             keys: TextKeys::new(header.string_map().iter()),
             rlen_keys: RlenKeys::new(&header),
             warned_duplicate: AtomicBool::new(false),
@@ -306,8 +317,9 @@ fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> 
     Err(VcfReadError::UnknownFormat)
 }
 
-/// Detect the format, read the header, and find where records start.
-fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart), VcfReadError> {
+/// Detect the format, read the header, and find where records start and
+/// (VCF text) how many lines the header took.
+fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart, u64), VcfReadError> {
     let mut prefix = Vec::with_capacity(64);
     (&mut input).take(64).read_to_end(&mut prefix).map_err(read_failed)?;
     input.seek(SeekFrom::Start(0)).map_err(read_failed)?;
@@ -315,20 +327,21 @@ fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart), Vc
         Container::Gzip => Err(VcfReadError::NotBgzf),
         Container::Plain => {
             let format = format_of(&prefix, false)?;
-            let (header, len) = read_text_header(&mut input)?;
-            Ok((format, header, DataStart::After(len)))
+            let (header, len, lines) = read_text_header(&mut input)?;
+            Ok((format, header, DataStart::After(len), lines))
         }
         Container::Bgzf => {
             let mut stream = BgzfStream::new(input);
             let format = format_of(stream.fill()?, true)?;
-            let (header, len) = if format == VcfFormat::Bcf {
-                read_bcf_header(&mut stream)?
+            let (header, len, lines) = if format == VcfFormat::Bcf {
+                let (header, len) = read_bcf_header(&mut stream)?;
+                (header, len, 0)
             } else {
                 read_text_header(&mut stream)?
             };
             stream.fill()?;
             let start = stream.virtual_offset().map_or(DataStart::After(len), DataStart::At);
-            Ok((format, header, start))
+            Ok((format, header, start, lines))
         }
     }
 }
@@ -355,10 +368,11 @@ fn read_bcf_header(stream: &mut BgzfStream<Input>) -> Result<(VcfHeader, u64), V
 }
 
 /// A VCF text header: the `##` lines through the `#CHROM` line, and the
-/// bytes they took. A line that is not a header line ends it, and
+/// bytes and lines they took. A line that is not a header line ends it, and
 /// [`VcfHeader::parse`] says what is missing.
-fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64), VcfReadError> {
+fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64, u64), VcfReadError> {
     let mut text = Vec::new();
+    let mut lines = 0u64;
     loop {
         let start = text.len();
         // r[impl vcf_reader.limits]
@@ -368,6 +382,7 @@ fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64), VcfRea
             break;
         }
         let n = (&mut *input).take(room).read_until(b'\n', &mut text).map_err(read_failed)?;
+        lines = lines.saturating_add(u64::from(n > 0));
         if text.len() > MAX_HEADER_TEXT {
             let len = text.len();
             return Err(
@@ -381,7 +396,7 @@ fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64), VcfRea
     let len = text.len() as u64;
     let text =
         std::str::from_utf8(&text).map_err(|source| VcfReadError::HeaderNotUtf8 { source })?;
-    Ok((VcfHeader::parse(text)?, len))
+    Ok((VcfHeader::parse(text)?, len, lines))
 }
 
 fn read_failed(source: std::io::Error) -> VcfReadError {
@@ -418,6 +433,16 @@ impl ContigTable {
     /// The contig a BCF record's `CHROM` index names.
     pub(crate) fn by_rid(&self, rid: i32) -> Option<&ContigId> {
         self.by_rid.get(usize::try_from(rid).ok()?)?.as_ref()
+    }
+
+    /// The name of contig `tid`, header-declared or discovered.
+    pub(crate) fn name(&self, tid: u32) -> Option<SmolStr> {
+        let tid = tid as usize;
+        if let Some(id) = self.by_rid.get(tid) {
+            return id.as_ref().map(|id| id.name.clone());
+        }
+        let read = self.discovered.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        read.contigs.get(tid.checked_sub(self.by_rid.len())?).map(|id| id.name.clone())
     }
 
     /// The contig a VCF text record's `CHROM` names, added (with one `warn!`

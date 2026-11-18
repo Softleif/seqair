@@ -140,13 +140,32 @@ pub enum MetaLineError {
     JunkAfterValue,
 }
 
-// r[impl vcf_values.keys]
+/// Which section of a header or record a key names a field of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyKind {
+    Filter,
+    Info,
+    Format,
+}
+
+impl std::fmt::Display for KeyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Filter => "FILTER",
+            Self::Info => "INFO",
+            Self::Format => "FORMAT",
+        })
+    }
+}
+
+// r[impl vcf_values.keys+2]
+// r[impl vcf_reader.errors+2]
 /// Why a key could not be resolved from a header.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
-    #[error("field {name} is not declared in the header")]
-    UnknownField { name: SmolStr },
+    #[error("{kind} field {name} is not declared in the header")]
+    UnknownField { name: SmolStr, kind: KeyKind },
 
     #[error("FILTER {name} is not declared in the header")]
     UnknownFilter { name: SmolStr },

@@ -1,6 +1,6 @@
 //! VCF header model with builder, field definitions, and BCF string map.
 
-use super::error::{KeyError, VcfHeaderError};
+use super::error::{KeyError, KeyKind, VcfHeaderError};
 use super::record_encoder::{
     ContigId, FieldId, FieldKind, FilterId, FormatKey, InfoKey, Section, check_genotype, check_kind,
 };
@@ -285,8 +285,8 @@ impl SampleIdx {
     }
 }
 
-fn unknown_field(name: &str) -> KeyError {
-    KeyError::UnknownField { name: SmolStr::from(name) }
+fn unknown_field(name: &str, kind: KeyKind) -> KeyError {
+    KeyError::UnknownField { name: SmolStr::from(name), kind }
 }
 
 // r[impl vcf_header.brand+2]
@@ -413,30 +413,30 @@ impl VcfHeader {
         &self.contig_map
     }
 
-    // r[impl vcf_values.keys]
+    // r[impl vcf_values.keys+2]
     /// Resolve an INFO key, checking marker `V` against the declaration
     /// ([`FieldKind`]). The marker is usually inferred from the binding:
     /// `let dp: InfoInt = header.info_key("DP")?;`.
     pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
-        let def = self.infos.get(name).ok_or_else(|| unknown_field(name))?;
+        let def = self.infos.get(name).ok_or_else(|| unknown_field(name, KeyKind::Info))?;
         check_kind::<V>(Section::Info, name, def.typ, def.number)?;
-        Ok(InfoKey(self.field_id(name, def.number)?, PhantomData))
+        Ok(InfoKey(self.field_id(name, def.number, KeyKind::Info)?, PhantomData))
     }
 
-    // r[impl vcf_values.keys]
+    // r[impl vcf_values.keys+2]
     /// Resolve a FORMAT key, checking marker `V` against the declaration.
     pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
-        let def = self.formats.get(name).ok_or_else(|| unknown_field(name))?;
+        let def = self.formats.get(name).ok_or_else(|| unknown_field(name, KeyKind::Format))?;
         check_kind::<V>(Section::Format, name, def.typ, def.number)?;
-        Ok(FormatKey(self.field_id(name, def.number)?, PhantomData))
+        Ok(FormatKey(self.field_id(name, def.number, KeyKind::Format)?, PhantomData))
     }
 
-    fn field_id(&self, name: &str, number: Number) -> Result<FieldId, KeyError> {
-        let dict_idx = self.string_map.index(name).ok_or_else(|| unknown_field(name))?;
+    fn field_id(&self, name: &str, number: Number, kind: KeyKind) -> Result<FieldId, KeyError> {
+        let dict_idx = self.string_map.index(name).ok_or_else(|| unknown_field(name, kind))?;
         Ok(FieldId { dict_idx, name: SmolStr::from(name), number, header: self.id })
     }
 
-    // r[impl vcf_values.keys]
+    // r[impl vcf_values.keys+2]
     pub fn filter(&self, name: &str) -> Result<FilterId, KeyError> {
         let unknown = || KeyError::UnknownFilter { name: SmolStr::from(name) };
         if !self.filters.contains_key(name) {
@@ -446,7 +446,7 @@ impl VcfHeader {
         Ok(FilterId { dict_idx, name: SmolStr::from(name), header: Some(self.id) })
     }
 
-    // r[impl vcf_values.keys]
+    // r[impl vcf_values.keys+2]
     pub fn contig(&self, name: &str) -> Result<ContigId, KeyError> {
         let tid = self
             .contig_map

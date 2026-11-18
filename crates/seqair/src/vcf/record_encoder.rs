@@ -182,7 +182,7 @@ pub(crate) fn check_genotype<V: FieldKind>(section: Section, name: &str) -> Resu
     Ok(())
 }
 
-// r[impl vcf_values.keys]
+// r[impl vcf_values.keys+2]
 /// Check that marker `V` can name a field declared as `declared`/`number`.
 pub(crate) fn check_kind<V: FieldKind>(
     section: Section,

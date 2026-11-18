@@ -16,6 +16,16 @@ pub enum VcfPos {
     At(Pos1),
 }
 
+impl std::fmt::Display for VcfPos {
+    /// The VCF POS: 0 for the telomere.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Telomere => f.write_str("0"),
+            Self::At(pos) => write!(f, "{}", pos.as_u32()),
+        }
+    }
+}
+
 impl VcfPos {
     /// The 1-based position `pos` (0 for the telomere).
     pub(crate) fn from_one_based(pos: i64) -> Option<Self> {

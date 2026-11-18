@@ -4,7 +4,7 @@
 
 use seqair::vcf::{
     Arr, ContigDef, Flag, FormatGt, FormatInt, Gt, InfoFieldDef, InfoFlag, InfoFloat, InfoInt,
-    InfoInts, InfoString, KeyError, Number, OptArr, Scalar, Str, ValueType, VcfHeader,
+    InfoInts, InfoString, KeyError, KeyKind, Number, OptArr, Scalar, Str, ValueType, VcfHeader,
 };
 
 const TEXT: &str = concat!(
@@ -27,7 +27,7 @@ fn header() -> VcfHeader {
     VcfHeader::parse(TEXT).unwrap()
 }
 
-// r[verify vcf_values.keys]
+// r[verify vcf_values.keys+2]
 // r[verify vcf_values.field_kind]
 #[test]
 fn keys_resolve_when_the_marker_fits_the_declaration() {
@@ -48,7 +48,7 @@ fn keys_resolve_when_the_marker_fits_the_declaration() {
     assert_eq!((gt.id().dict_idx(), gq.id().dict_idx()), (8, 9));
 }
 
-// r[verify vcf_values.keys]
+// r[verify vcf_values.keys+2]
 #[test]
 fn a_key_that_does_not_fit_names_the_reason() {
     let h = header();
@@ -72,10 +72,10 @@ fn a_key_that_does_not_fit_names_the_reason() {
     );
     assert_eq!(h.format_key::<Gt>("GQ").unwrap_err(), KeyError::NotGenotype { name: "GQ".into() });
     let err = h.info_key::<Scalar<i32>>("NOPE").unwrap_err();
-    assert_eq!(err, KeyError::UnknownField { name: "NOPE".into() });
+    assert_eq!(err, KeyError::UnknownField { name: "NOPE".into(), kind: KeyKind::Info });
     assert_eq!(
         h.format_key::<Scalar<f32>>("BQ").unwrap_err(),
-        KeyError::UnknownField { name: "BQ".into() },
+        KeyError::UnknownField { name: "BQ".into(), kind: KeyKind::Format },
         "an INFO id is not a FORMAT field"
     );
     assert_eq!(h.filter("q20").unwrap_err(), KeyError::UnknownFilter { name: "q20".into() });
@@ -91,7 +91,7 @@ fn a_key_that_does_not_fit_names_the_reason() {
     );
 }
 
-// r[verify vcf_values.keys]
+// r[verify vcf_values.keys+2]
 // r[verify vcf_fields.sample_idx]
 #[test]
 fn filters_contigs_and_samples_resolve() {
@@ -126,7 +126,7 @@ fn keys_from_two_headers_differ() {
     assert_ne!(a.sample("HG002").unwrap(), b.sample("HG002").unwrap());
 }
 
-// r[verify vcf_values.keys]
+// r[verify vcf_values.keys+2]
 /// A key the writer registered is the key the header resolves.
 #[test]
 fn a_registered_key_is_the_resolved_key() {

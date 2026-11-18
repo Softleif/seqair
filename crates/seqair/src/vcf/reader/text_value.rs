@@ -8,27 +8,84 @@ use std::str::Utf8Error;
 use super::values::GtAllele;
 use crate::io::text_scan::find_byte;
 
-/// Malformed VCF text values.
+// r[impl vcf_reader.errors+2]
+/// The bytes of a malformed value, for its error message: at most the first
+/// [`Offending::MAX`], escaped when shown.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Offending {
+    bytes: Box<[u8]>,
+    truncated: bool,
+}
+
+impl Offending {
+    /// Most bytes kept.
+    pub const MAX: usize = 64;
+
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        let kept = bytes.get(..Self::MAX).unwrap_or(bytes);
+        Self { bytes: kept.into(), truncated: kept.len() < bytes.len() }
+    }
+
+    /// The bytes kept.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Whether the value was longer than the bytes kept.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl std::fmt::Display for Offending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\"{}{}\"", self.bytes.escape_ascii(), if self.truncated { "…" } else { "" })
+    }
+}
+
+impl std::fmt::Debug for Offending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+/// Malformed VCF text values, each with the offending bytes.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TextValueError {
-    #[error("not an integer (an optional sign and decimal digits)")]
-    InvalidInteger,
+    #[error("{value} is not an integer (an optional sign and decimal digits)")]
+    InvalidInteger { value: Offending },
 
-    #[error("integer out of the 32-bit range")]
-    IntegerOutOfRange,
+    #[error("{value} is out of the 32-bit integer range")]
+    IntegerOutOfRange { value: Offending },
 
-    #[error("not a floating-point number")]
-    InvalidFloat,
+    #[error("{value} is not a floating-point number")]
+    InvalidFloat { value: Offending },
 
     #[error("string value is not UTF-8")]
     Utf8(#[from] Utf8Error),
 
-    #[error("not a genotype (alleles as digits or `.`, separated by `/` or `|`)")]
-    InvalidGenotype,
+    #[error("{value} is not a genotype (alleles as digits or `.`, separated by `/` or `|`)")]
+    InvalidGenotype { value: Offending },
 
-    #[error("genotype allele index above 65535")]
-    GenotypeAlleleOutOfRange,
+    #[error("{value} has a genotype allele index above 65535")]
+    GenotypeAlleleOutOfRange { value: Offending },
+}
+
+impl TextValueError {
+    pub(crate) fn invalid_integer(value: &[u8]) -> Self {
+        Self::InvalidInteger { value: Offending::new(value) }
+    }
+
+    /// The same error naming `value` instead (a whole genotype, not one allele).
+    fn naming(self, value: &[u8]) -> Self {
+        let value = Offending::new(value);
+        match self {
+            Self::InvalidGenotype { .. } => Self::InvalidGenotype { value },
+            Self::GenotypeAlleleOutOfRange { .. } => Self::GenotypeAlleleOutOfRange { value },
+            e => e,
+        }
+    }
 }
 
 /// A number VCF text holds, `.` being missing.
@@ -55,10 +112,12 @@ pub(crate) fn parse_i32(token: &[u8]) -> Result<Option<i32>, TextValueError> {
         return Ok(None);
     }
     // `i32::from_str` is exactly this grammar: `[+-]?[0-9]+`, no whitespace.
-    let s = std::str::from_utf8(token).map_err(|_| TextValueError::InvalidInteger)?;
+    let s = std::str::from_utf8(token).map_err(|_| TextValueError::invalid_integer(token))?;
     s.parse::<i32>().map(Some).map_err(|e| match e.kind() {
-        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => TextValueError::IntegerOutOfRange,
-        _ => TextValueError::InvalidInteger,
+        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => {
+            TextValueError::IntegerOutOfRange { value: Offending::new(token) }
+        }
+        _ => TextValueError::invalid_integer(token),
     })
 }
 
@@ -70,8 +129,9 @@ pub(crate) fn parse_f32(token: &[u8]) -> Result<Option<f32>, TextValueError> {
     if token == b"." {
         return Ok(None);
     }
-    let s = std::str::from_utf8(token).map_err(|_| TextValueError::InvalidFloat)?;
-    s.parse().map(Some).map_err(|_| TextValueError::InvalidFloat)
+    let invalid = || TextValueError::InvalidFloat { value: Offending::new(token) };
+    let s = std::str::from_utf8(token).map_err(|_| invalid())?;
+    s.parse().map(Some).map_err(|_| invalid())
 }
 
 // r[impl vcf_values.text_strings]
@@ -167,11 +227,14 @@ fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
     if token == b"." {
         return Ok(None);
     }
+    let invalid = || TextValueError::InvalidGenotype { value: Offending::new(token) };
     if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
-        return Err(TextValueError::InvalidGenotype);
+        return Err(invalid());
     }
-    let s = std::str::from_utf8(token).map_err(|_| TextValueError::InvalidGenotype)?;
-    s.parse().map(Some).map_err(|_| TextValueError::GenotypeAlleleOutOfRange)
+    let s = std::str::from_utf8(token).map_err(|_| invalid())?;
+    s.parse()
+        .map(Some)
+        .map_err(|_| TextValueError::GenotypeAlleleOutOfRange { value: Offending::new(token) })
 }
 
 // r[impl vcf_values.gt]
@@ -205,7 +268,7 @@ impl<'a> TextGt<'a> {
         let mut rest = Some(body);
         while let Some(r) = rest {
             let (token, sep) = split_allele(r);
-            let allele = parse_allele(token)?;
+            let allele = parse_allele(token).map_err(|e| e.naming(gt))?;
             if len == 0 {
                 first_missing = allele.is_none();
             }
@@ -283,10 +346,16 @@ mod tests {
         for bad in
             [&b""[..], b"-", b"+", b" 1", b"1 ", b"1.0", b"1e3", b"0x1", b"..", b"\xff", b"1,2"]
         {
-            assert!(matches!(parse_i32(bad), Err(TextValueError::InvalidInteger)), "{bad:?}");
+            assert!(
+                matches!(parse_i32(bad), Err(TextValueError::InvalidInteger { .. })),
+                "{bad:?}"
+            );
         }
         for big in [&b"2147483648"[..], b"-2147483649", b"99999999999999999999"] {
-            assert!(matches!(parse_i32(big), Err(TextValueError::IntegerOutOfRange)), "{big:?}");
+            assert!(
+                matches!(parse_i32(big), Err(TextValueError::IntegerOutOfRange { .. })),
+                "{big:?}"
+            );
         }
     }
 
@@ -310,7 +379,7 @@ mod tests {
         }
         assert_eq!(parse_f32(b".").unwrap(), None);
         for bad in [&b""[..], b"-", b" 1", b"inff", b"0x1p3", b"1,0", b"..", b"\xff"] {
-            assert!(matches!(parse_f32(bad), Err(TextValueError::InvalidFloat)), "{bad:?}");
+            assert!(matches!(parse_f32(bad), Err(TextValueError::InvalidFloat { .. })), "{bad:?}");
         }
     }
 
@@ -344,11 +413,17 @@ mod tests {
 
     #[test]
     fn a_bad_element_anywhere_fails_the_vector() {
-        assert!(matches!(TextVec::<i32>::new(b"1,2,x"), Err(TextValueError::InvalidInteger)));
-        assert!(matches!(TextVec::<i32>::new(b"1,,2"), Err(TextValueError::InvalidInteger)));
-        assert!(matches!(TextVec::<i32>::new(b""), Err(TextValueError::InvalidInteger)));
-        assert!(matches!(TextVec::<i32>::new(b"1,"), Err(TextValueError::InvalidInteger)));
-        assert!(matches!(TextVec::<f32>::new(b"0.5,abc"), Err(TextValueError::InvalidFloat)));
+        assert!(matches!(
+            TextVec::<i32>::new(b"1,2,x"),
+            Err(TextValueError::InvalidInteger { .. })
+        ));
+        assert!(matches!(TextVec::<i32>::new(b"1,,2"), Err(TextValueError::InvalidInteger { .. })));
+        assert!(matches!(TextVec::<i32>::new(b""), Err(TextValueError::InvalidInteger { .. })));
+        assert!(matches!(TextVec::<i32>::new(b"1,"), Err(TextValueError::InvalidInteger { .. })));
+        assert!(matches!(
+            TextVec::<f32>::new(b"0.5,abc"),
+            Err(TextValueError::InvalidFloat { .. })
+        ));
         let v = TextVec::<f32>::new(b".,0.5,Inf").unwrap();
         assert_eq!(v.collect::<Vec<_>>(), [None, Some(0.5), Some(f32::INFINITY)]);
     }
@@ -360,14 +435,26 @@ mod tests {
             ["", "/", "|", "0/", "0//1", "/|0", "a", "-1", "+1", "0/1 ", "0\\1", "0,1", "0:1"]
         {
             assert!(
-                matches!(TextGt::new(bad.as_bytes(), true), Err(TextValueError::InvalidGenotype)),
+                matches!(
+                    TextGt::new(bad.as_bytes(), true),
+                    Err(TextValueError::InvalidGenotype { .. })
+                ),
                 "{bad:?}"
             );
         }
         assert!(matches!(
             TextGt::new(b"0/65536", true),
-            Err(TextValueError::GenotypeAlleleOutOfRange)
+            Err(TextValueError::GenotypeAlleleOutOfRange { .. })
         ));
+        assert_eq!(
+            TextGt::new(b"0/x1", true).unwrap_err().to_string(),
+            "\"0/x1\" is not a genotype (alleles as digits or `.`, separated by `/` or `|`)"
+        );
+        let long = vec![b'\xff'; 100];
+        let e = parse_f32(&long).unwrap_err();
+        let TextValueError::InvalidFloat { value } = &e else { panic!("{e:?}") };
+        assert_eq!((value.as_bytes().len(), value.is_truncated()), (Offending::MAX, true));
+        assert!(e.to_string().starts_with("\"\\xff"), "{e}");
         let gt: Vec<_> = TextGt::new(b"65535|00", true).unwrap().map(|a| a.allele).collect();
         assert_eq!(gt, [Some(65535), Some(0)]);
     }

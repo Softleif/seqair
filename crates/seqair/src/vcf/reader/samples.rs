@@ -80,7 +80,7 @@ impl FormatData {
                     self.begin(raw, 1);
                     self.n_fmt = n_fmt;
                     copy_one_sample(&mut self.bytes, indiv, n_fmt, n_samples, sample.index())
-                        .map_err(|e| raw.at().error(e))?;
+                        .map_err(|e| raw.at().error(raw.file, e))?;
                 }
             },
             FormatSource::Text { keys, samples, n_samples } => {
@@ -183,11 +183,11 @@ impl<'a> FormatView<'a> {
                     index_bcf(&mut index.keys, entries, KeyKind::Format, file)
                 }
             })
-            .map_err(|e| at.error(e.clone()))
+            .map_err(|e| at.error(file, e.clone()))
     }
 
     fn malformed(&self, source: BcfValueError) -> VcfReadError {
-        self.at.error(RecordError::Value { part: RecordPart::Format, source })
+        self.at.error(self.file, RecordError::Value { part: RecordPart::Format, source })
     }
 
     /// The values of the field an index entry names.
@@ -308,7 +308,8 @@ impl<'a> SampleRef<'a> {
     ) -> Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError> {
         let (file, at) = (self.view.file, self.view.at);
         let id = i32::try_from(entry.id.get()).unwrap_or(i32::MAX);
-        let unknown = || at.error(RecordError::UnknownKey { index: id, kind: KeyKind::Format });
+        let unknown =
+            || at.error(file, RecordError::UnknownKey { index: id, kind: KeyKind::Format });
         let name = file.header.string_map().name(entry.id.get() as usize).ok_or_else(unknown)?;
         let (name, def) = file.header.formats().get_key_value(name).ok_or_else(unknown)?;
         let value = self.view.field_at(index, entry)?.sample(self.column).ok_or_else(unknown)?;
@@ -527,9 +528,7 @@ impl Fields for Sample {
 
     fn plan(header: &VcfHeader, opts: &ReadOptions) -> Result<Self::Plan, PlanError> {
         let sample = match opts.sample() {
-            Some(name) => header
-                .sample(name)
-                .map_err(|_| PlanError::UnknownSample { name: SmolStr::from(name) })?,
+            Some(name) => header.sample(name)?,
             None => {
                 let mut samples = header.sample_indices();
                 match (samples.len(), samples.next()) {

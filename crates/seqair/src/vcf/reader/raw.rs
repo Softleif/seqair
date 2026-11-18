@@ -201,7 +201,7 @@ pub struct RawRecord<'a> {
 
 impl<'a> RawRecord<'a> {
     fn error(&self, source: RecordError) -> VcfReadError {
-        self.at.error(source)
+        self.at.error(self.file, source)
     }
 
     fn require(&self, ok: bool, section: RecordSection) -> Result<(), VcfReadError> {
@@ -232,13 +232,15 @@ impl<'a> RawRecord<'a> {
     pub(crate) fn span(&self) -> Result<(VcfPos, VcfPos), VcfReadError> {
         match self.repr {
             Repr::Bcf(r) => span_of(i64::from(r.fixed.pos), i64::from(r.fixed.rlen)),
-            Repr::Text(TextRecord { line, cols }) => parse_pos(cols.col(line, Col::Pos))
-                .ok_or(RecordError::Text {
+            // The reader parsed POS into `at` already.
+            Repr::Text(TextRecord { line, cols }) => self
+                .at
+                .pos
+                .ok_or_else(|| RecordError::Text {
                     part: RecordPart::Pos,
-                    source: TextValueError::InvalidInteger,
+                    source: TextValueError::invalid_integer(cols.col(line, Col::Pos)),
                 })
-                .and_then(|pos1| {
-                    let pos0 = pos1.saturating_sub(1);
+                .and_then(|pos0| {
                     let rlen = RlenColumns {
                         reference: cols.col(line, Col::Ref),
                         alt: cols.col(line, Col::Alt),
@@ -413,7 +415,7 @@ fn nth_column(columns: &[u8], n: usize) -> Option<&[u8]> {
 }
 
 /// A VCF text POS: decimal digits only.
-fn parse_pos(pos: &[u8]) -> Option<i64> {
+pub(crate) fn parse_pos(pos: &[u8]) -> Option<i64> {
     if pos.is_empty() || pos.len() > 18 || !pos.iter().all(u8::is_ascii_digit) {
         return None;
     }

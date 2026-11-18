@@ -561,7 +561,7 @@ fn plans_fail_at_open() {
     assert_eq!(plan_error::<Sample>(&panel, None), PlanError::SampleNotSelected { n: 4 });
     assert_eq!(
         plan_error::<Sample>(&panel, Some("nope")),
-        PlanError::UnknownSample { name: "nope".into() }
+        PlanError::Key(KeyError::UnknownSample { name: "nope".into() })
     );
     assert_eq!(
         plan_error::<Locus>(&panel, Some("NA12878")),
@@ -774,9 +774,10 @@ fn first_error<F: Fields>(records: &[Rec]) -> VcfReadError {
 
 fn record_error(e: VcfReadError) -> (u64, RecordError) {
     match e {
-        VcfReadError::Record { ordinal, offset, source } => {
-            assert!(offset.is_some(), "a BGZF record error names its offset");
-            (ordinal, source)
+        VcfReadError::Record { at, source } => {
+            assert!(at.offset.is_some(), "a BGZF record error names its offset");
+            assert_eq!(at.line, None, "BCF has no lines");
+            (at.number, source)
         }
         e => panic!("expected a record error, got {e:?}"),
     }
@@ -830,14 +831,14 @@ fn a_bcf_alt_dot_is_no_alt() {
 }
 
 // r[verify vcf_reader.limits]
-// r[verify vcf_reader.errors]
+// r[verify vcf_reader.errors+2]
 // r[verify vcf_reader.undeclared]
 #[test]
 fn malformed_records_are_typed_errors_with_their_place() {
     let ok = Rec::default();
     let (ordinal, e) =
         record_error(first_error::<Locus>(&[ok.clone(), Rec { rid: 3, ..ok.clone() }]));
-    assert_eq!((ordinal, e), (1, RecordError::UnknownContig { index: 3 }));
+    assert_eq!((ordinal, e), (2, RecordError::ContigIndexOutOfRange { index: 3 }));
     let (_, e) = record_error(first_error::<Locus>(&[Rec { pos: -2, ..ok.clone() }]));
     assert_eq!(e, RecordError::InvalidPosition { pos: -2 });
     let huge = Rec { lengths: Some((u32::MAX, 16)), ..ok.clone() };
@@ -891,7 +892,7 @@ fn a_failed_index_is_returned_on_every_access() {
         assert_eq!(first, second);
         if let Err(e) = &first {
             assert!(info.iter().is_err());
-            assert!(e.contains("record 1"), "{e}");
+            assert!(e.starts_with("malformed record 2 at chr1:11"), "{e}");
         }
         values.push(first.ok().flatten());
     }
@@ -983,8 +984,8 @@ fn text_error(lines: &[&str]) -> (u64, Option<seqair::io::VirtualOffset>, Record
         match reader.next_record() {
             Ok(Some(_)) => {}
             Ok(None) => panic!("no error"),
-            Err(VcfReadError::Record { ordinal, offset, source }) => {
-                return (ordinal, offset, source);
+            Err(VcfReadError::Record { at, source }) => {
+                return (at.number, at.offset, source);
             }
             Err(e) => panic!("expected a record error, got {e:?}"),
         }
@@ -1194,7 +1195,7 @@ fn one_text_sample_scans_only_up_to_its_column() {
     assert!(rec.column(&gt).is_err());
 }
 
-// r[verify vcf_reader.errors]
+// r[verify vcf_reader.errors+2]
 // r[verify vcf_reader.limits]
 /// Malformed lines are typed errors with the record's ordinal; in a BGZF
 /// file, its virtual offset too. Blank lines are not records.
@@ -1202,7 +1203,7 @@ fn one_text_sample_scans_only_up_to_its_column() {
 fn malformed_text_lines_are_typed_errors_with_their_place() {
     let ok = "chr1\t1\t.\tA\tC\t.\t.\t.";
     let (ordinal, offset, e) = text_error(&[ok, "", ok, "chr1\t1\t.\tA"]);
-    assert_eq!((ordinal, offset, e), (2, None, RecordError::TooFewColumns { found: 4 }));
+    assert_eq!((ordinal, offset, e), (3, None, RecordError::TooFewColumns { found: 4 }));
     let (_, _, e) = text_error(&["chr1\tx\t.\tA\tC\t.\t.\t."]);
     assert!(matches!(e, RecordError::Text { part: seqair::vcf::reader::RecordPart::Pos, .. }));
     let (_, _, e) = text_error(&["chr1\t1\t.\tA\tC\tq\t.\t."]);
@@ -1220,13 +1221,32 @@ fn malformed_text_lines_are_typed_errors_with_their_place() {
         matches!(
             e,
             VcfReadError::Record {
-                ordinal: 1,
+                ref at,
                 source: RecordError::Field { source: FieldError::Text(_), .. },
-                ..
-            }
+            } if at.number == 2
         ),
         "{e:?}"
     );
+    // The place says where in the file and the genome; the message leaves
+    // the cause to the error's source, so a reporter prints it once.
+    let place = "malformed record 2 (line 15) at chr1:1";
+    assert_eq!(e.to_string(), place);
+    let cause = std::error::Error::source(&e).unwrap();
+    assert_eq!(cause.to_string(), "field DP");
+    let value = std::error::Error::source(cause).unwrap().to_string();
+    assert_eq!(value, "\"x\" is not an integer (an optional sign and decimal digits)");
+    assert!(!format!("{:#}", anyhow::Error::from(e)).contains("field DP: field DP"));
+    // A file on disk is named.
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(
+        &mut tmp,
+        format!("{TEXT_HEADER}chr2\t7\t.\tA\tC\tq\t.\t.\n").as_bytes(),
+    )
+    .unwrap();
+    let file = VcfFile::open(tmp.path()).unwrap();
+    let e = file.reader::<Site>().open().unwrap().next_record().unwrap_err();
+    let expected = format!("malformed record 1 (line 14) at chr2:7 in {}", tmp.path().display());
+    assert_eq!(e.to_string(), expected);
     let e = recs[2].get(&dp).unwrap_err();
     assert!(
         matches!(
@@ -1249,7 +1269,9 @@ fn malformed_text_lines_are_typed_errors_with_their_place() {
     assert!(reader.next_record().unwrap().is_some());
     assert!(reader.next_record().unwrap().is_some());
     let e = reader.next_record().unwrap_err();
-    let VcfReadError::Record { ordinal: 2, offset: Some(offset), .. } = e else { panic!("{e:?}") };
+    let VcfReadError::Record { at, .. } = e else { panic!("{e:?}") };
+    assert_eq!((at.number, at.line, at.locus), (3, Some(16), None));
+    let offset = at.offset.unwrap();
     let header_len = TEXT_HEADER.len() + 2 * (ok.len() + 1);
     assert_eq!(usize::from(offset.within_block()), header_len);
 }

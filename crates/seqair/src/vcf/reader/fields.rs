@@ -73,9 +73,6 @@ pub enum PlanError {
     #[error("the file has {n} samples: choose one with .sample(name)")]
     SampleNotSelected { n: usize },
 
-    #[error("sample {name} is not in the header")]
-    UnknownSample { name: SmolStr },
-
     // r[impl vcf_fields.unused_options]
     #[error("the {option} option was set, but nothing read uses it")]
     UnusedOption { option: ReadOption },

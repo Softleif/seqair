@@ -191,7 +191,8 @@ pub(crate) mod writer;
 
 pub use alleles::Alleles;
 pub use error::{
-    AllelesError, KeyError, MetaLineError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError,
+    AllelesError, KeyError, KeyKind, MetaLineError, ReservedMarker, VcfEncodeError, VcfError,
+    VcfHeaderError,
 };
 // The builder's `Samples` phase stays at `header::Samples`: `vcf::Samples` is
 // the reader's component.

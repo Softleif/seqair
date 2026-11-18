@@ -5,7 +5,7 @@ use super::entries::{FormatIndex, LazyIndex};
 use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, SampleSelection, Sections};
 use super::file::{DataStart, FileShared, Input, VcfFile};
-use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord};
+use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord, parse_pos};
 use super::site::{SiteParts, bcf_info_start};
 use crate::bam::bgzf::{BgzfError, BgzfStream, VirtualOffset, Workers};
 use crate::io::text_scan::find_byte;
@@ -103,7 +103,8 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             let stream =
                 BgzfStream::builder(input).workers(self.workers).start_offset(start).build();
             let mut input = Framed::Bgzf(Box::new(stream));
-            skip_bytes(&mut input, skip).map_err(|e| e.into_read_error(RecordAt::default()))?;
+            skip_bytes(&mut input, skip)
+                .map_err(|e| e.into_read_error(RecordAt::default(), shared))?;
             input
         };
         let core = Core {
@@ -117,6 +118,7 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             format_index: LazyIndex::default(),
             text: TextState::default(),
             ordinal: 0,
+            line: shared.is_text().then_some(shared.header_lines),
         };
         Ok(Reader { core, current: None })
     }
@@ -138,9 +140,9 @@ impl From<BgzfError> for Framing {
 }
 
 impl Framing {
-    fn into_read_error(self, at: RecordAt) -> VcfReadError {
+    fn into_read_error(self, at: RecordAt, file: &FileShared) -> VcfReadError {
         match self {
-            Self::Truncated => at.error(RecordError::Truncated),
+            Self::Truncated => at.error(file, RecordError::Truncated),
             Self::Bgzf(e) => e.into(),
         }
     }
@@ -219,8 +221,13 @@ struct TextState {
 }
 
 impl TextState {
-    /// Find `line`'s columns and its contig.
-    fn read(&mut self, line: &[u8], file: &FileShared) -> Result<(), RecordError> {
+    /// Find `line`'s columns, its contig and its position (into `at`).
+    fn read(
+        &mut self,
+        line: &[u8],
+        file: &FileShared,
+        at: &mut RecordAt,
+    ) -> Result<(), RecordError> {
         self.cols.find(line)?;
         let chrom = self.cols.col(line, Col::Chrom);
         if self.contig.is_none() || self.chrom != chrom {
@@ -231,6 +238,8 @@ impl TextState {
             self.chrom.clear();
             self.chrom.extend_from_slice(chrom);
         }
+        at.contig = self.contig.as_ref().map(ContigId::tid);
+        at.pos = parse_pos(self.cols.col(line, Col::Pos)).map(|pos1| pos1.saturating_sub(1));
         Ok(())
     }
 }
@@ -250,6 +259,8 @@ struct Core<P> {
     format_index: LazyIndex<FormatIndex>,
     text: TextState,
     ordinal: u64,
+    /// The line last framed, for VCF text read from its start.
+    line: Option<u64>,
 }
 
 /// Where a line is: in the input's current batch (its length, and the
@@ -278,7 +289,13 @@ impl<P> Core<P> {
             if self.input.fill()?.is_empty() {
                 return Ok(None);
             }
-            let at = RecordAt { ordinal: self.ordinal, offset: self.input.virtual_offset() };
+            self.line = self.line.map(|l| l.saturating_add(1));
+            let at = RecordAt {
+                ordinal: self.ordinal,
+                line: self.line,
+                offset: self.input.virtual_offset(),
+                ..RecordAt::default()
+            };
             let buf = self.input.fill()?;
             let line = match find_byte(buf, b'\n') {
                 Some(len) if len > 0 && buf.get(..len) != Some(b"\r") => {
@@ -318,7 +335,8 @@ impl<P> Core<P> {
             };
             let len = self.scratch.len().saturating_add(take) as u64;
             if len > MAX_LINE_BYTES {
-                return Err(at.error(RecordError::LineTooLong { len, max: MAX_LINE_BYTES }));
+                let e = RecordError::LineTooLong { len, max: MAX_LINE_BYTES };
+                return Err(at.error(&self.file, e));
             }
             self.scratch.extend_from_slice(buf.get(..take).unwrap_or_default());
             self.input.advance(if done { take.saturating_add(1) } else { take });
@@ -332,7 +350,7 @@ impl<P> Core<P> {
         &mut self,
         with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
     ) -> Result<Option<R>, VcfReadError> {
-        let Some((framed, at)) = self.frame_line()? else { return Ok(None) };
+        let Some((framed, mut at)) = self.frame_line()? else { return Ok(None) };
         let Self {
             file, plan, sections, input, scratch, site, info_index, format_index, text, ..
         } = self;
@@ -344,11 +362,12 @@ impl<P> Core<P> {
         };
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let result = (|| {
-            text.read(line, file).map_err(|e| at.error(e))?;
+            text.read(line, file, &mut at).map_err(|e| at.error(file, e))?;
             if sections.site() {
-                site.decode_text(line, &text.cols, file).map_err(|e| at.error(e))?;
+                site.decode_text(line, &text.cols, file).map_err(|e| at.error(file, e))?;
             }
-            let contig = text.contig.as_ref().ok_or_else(|| at.error(RecordError::Truncated))?;
+            let contig =
+                text.contig.as_ref().ok_or_else(|| at.error(file, RecordError::Truncated))?;
             let raw = RawRecord {
                 file,
                 contig,
@@ -374,7 +393,11 @@ impl<P> Core<P> {
         if self.input.fill()?.is_empty() {
             return Ok(None);
         }
-        let at = RecordAt { ordinal: self.ordinal, offset: self.input.virtual_offset() };
+        let at = RecordAt {
+            ordinal: self.ordinal,
+            offset: self.input.virtual_offset(),
+            ..RecordAt::default()
+        };
         self.ordinal = self.ordinal.saturating_add(1);
         let Self { file, plan, sections, input, scratch, site, info_index, format_index, .. } =
             self;
@@ -388,7 +411,7 @@ impl<P> Core<P> {
                 let mut head = [0u8; 8];
                 input
                     .read_exact_into(&mut head)
-                    .map_err(|e| Framing::from(e).into_read_error(at))?;
+                    .map_err(|e| Framing::from(e).into_read_error(at, file))?;
                 (head, true)
             }
         };
@@ -398,10 +421,10 @@ impl<P> Core<P> {
         // r[impl vcf_reader.limits]
         let size = u64::from(l_shared).saturating_add(u64::from(l_indiv));
         if size > MAX_RECORD_BYTES {
-            return Err(at.error(RecordError::TooLarge { size, max: MAX_RECORD_BYTES }));
+            return Err(at.error(file, RecordError::TooLarge { size, max: MAX_RECORD_BYTES }));
         }
         if l_shared < 24 {
-            return Err(at.error(RecordError::SharedTooShort { len: l_shared }));
+            return Err(at.error(file, RecordError::SharedTooShort { len: l_shared }));
         }
         let shared_end = 8usize.saturating_add(l_shared as usize);
         let end = shared_end.saturating_add(l_indiv as usize);
@@ -414,7 +437,7 @@ impl<P> Core<P> {
             return result.map(Some);
         }
         // Otherwise copy it together, skipping samples nobody reads.
-        let framing = |e: Framing| e.into_read_error(at);
+        let framing = |e: Framing| e.into_read_error(at, file);
         scratch.clear();
         let mut copied = 0;
         if head_read {
@@ -453,16 +476,17 @@ impl Parts<'_> {
         shared_end: usize,
         with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
     ) -> Result<R, VcfReadError> {
-        let Self { file, sections, site, info_index, format_index, at } = self;
+        let Self { file, sections, site, info_index, format_index, mut at } = self;
         let shared = record.get(8..shared_end).unwrap_or_default();
         let indiv = record.get(shared_end..).unwrap_or_default();
-        let fixed =
-            Fixed::parse(shared).ok_or_else(|| at.error(RecordError::SharedTooShort { len: 0 }))?;
+        let fixed = Fixed::parse(shared)
+            .ok_or_else(|| at.error(file, RecordError::SharedTooShort { len: 0 }))?;
+        at.pos = Some(i64::from(fixed.pos));
         // r[impl vcf_reader.contigs]
-        let contig = file
-            .contigs
-            .by_rid(fixed.rid)
-            .ok_or_else(|| at.error(RecordError::UnknownContig { index: fixed.rid }))?;
+        let contig = file.contigs.by_rid(fixed.rid).ok_or_else(|| {
+            at.error(file, RecordError::ContigIndexOutOfRange { index: fixed.rid })
+        })?;
+        at.contig = Some(contig.tid());
         let info_start = if sections.site() {
             site.decode_bcf(shared, fixed.n_allele, fixed.qual, file)
         } else if sections.info() {
@@ -470,7 +494,7 @@ impl Parts<'_> {
         } else {
             Ok(shared.len())
         };
-        let info_start = info_start.map_err(|e| at.error(e))?;
+        let info_start = info_start.map_err(|e| at.error(file, e))?;
         let bcf = BcfRecord { bytes: record, shared, indiv, fixed, info_start };
         let site = sections.site().then_some(&*site);
         let raw = RawRecord {

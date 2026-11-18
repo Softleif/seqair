@@ -28,13 +28,13 @@ pub(crate) fn check_brand(key: &FieldId, file: &FileShared) -> Result<(), VcfRea
 /// sample's value of a FORMAT field.
 pub(crate) fn stored<'a>(
     bytes: &'a [u8],
-    text: bool,
+    file: &FileShared,
     part: RecordPart,
     at: RecordAt,
 ) -> Result<Stored<'a>, VcfReadError> {
-    if !text {
+    if !file.is_text() {
         let (value, _) = TypedValue::parse(bytes)
-            .map_err(|source| at.error(RecordError::Value { part, source }))?;
+            .map_err(|source| at.error(file, RecordError::Value { part, source }))?;
         return Ok(Stored(StoredRepr::Bcf(value)));
     }
     Ok(Stored(StoredRepr::Text(match part {
@@ -52,7 +52,7 @@ pub(crate) fn decode<'a, V: ReadKind>(
 ) -> Result<V::Out<'a>, VcfReadError> {
     let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
     V::decode(value, cx)
-        .map_err(|source| at.error(RecordError::Field { name: name.clone(), source }))
+        .map_err(|source| at.error(file, RecordError::Field { name: name.clone(), source }))
 }
 
 /// Decode `value`, the field `name`'s, as `declared` says.
@@ -66,7 +66,7 @@ pub(crate) fn dyn_decode<'a>(
 ) -> Result<DynValue<'a>, VcfReadError> {
     let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
     DynValue::decode(value, declared, genotype, cx)
-        .map_err(|source| at.error(RecordError::Field { name: name.into(), source }))
+        .map_err(|source| at.error(file, RecordError::Field { name: name.into(), source }))
 }
 
 /// Index an INFO column as its file's format lays it out.
@@ -107,12 +107,12 @@ impl<'a> InfoRef<'a> {
 
     fn index(&self) -> Result<&'a FieldIndex, VcfReadError> {
         let Self { bytes, n, file, at, .. } = *self;
-        self.index.get(|index| build(index, bytes, n, file)).map_err(|e| at.error(e.clone()))
+        self.index.get(|index| build(index, bytes, n, file)).map_err(|e| at.error(file, e.clone()))
     }
 
     fn value(&self, span: std::ops::Range<usize>) -> Result<Stored<'a>, VcfReadError> {
         let bytes = self.bytes.get(span).unwrap_or_default();
-        stored(bytes, self.file.is_text(), RecordPart::Info, self.at)
+        stored(bytes, self.file, RecordPart::Info, self.at)
     }
 
     // r[impl vcf_values.access]

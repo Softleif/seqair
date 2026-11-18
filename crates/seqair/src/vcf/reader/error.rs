@@ -1,17 +1,20 @@
-//! What reading a VCF or BCF file can fail with (`r[vcf_reader.errors]`).
+//! What reading a VCF or BCF file can fail with (`r[vcf_reader.errors+2]`).
 
 use super::bcf_value::BcfValueError;
 use super::fields::PlanError;
+use super::file::FileShared;
+use super::locus::VcfPos;
 use super::text_value::TextValueError;
 use super::values::MissingElement;
 use crate::bam::bgzf::{BgzfError, VirtualOffset};
 use crate::bam::csi_index::CsiError;
+pub use crate::vcf::error::KeyKind;
 use crate::vcf::error::VcfHeaderError;
 use seqair_types::SmolStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
-// r[impl vcf_reader.errors]
+// r[impl vcf_reader.errors+2]
 /// Why opening or reading a VCF/BCF file failed.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -47,10 +50,10 @@ pub enum VcfReadError {
     #[error("the input is neither VCF nor BCF")]
     UnknownFormat,
 
-    /// A record is malformed: `ordinal` counts records from 0, `offset` is
-    /// where it starts in a BGZF file.
-    #[error("record {ordinal}{}: {source}", at(*.offset))]
-    Record { ordinal: u64, offset: Option<VirtualOffset>, source: RecordError },
+    // r[impl vcf_reader.errors+2]
+    /// A record is malformed: `at` says where it is, `source` what is wrong.
+    #[error("malformed record {at}")]
+    Record { at: Box<RecordPlace>, source: RecordError },
 
     // r[impl vcf_values.header_brand]
     #[error("{name} was resolved from another header than this record's")]
@@ -60,8 +63,39 @@ pub enum VcfReadError {
     NotRequested { section: RecordSection },
 }
 
-fn at(offset: Option<VirtualOffset>) -> String {
-    offset.map_or_else(String::new, |o| format!(" (at {}:{})", o.block_offset(), o.within_block()))
+/// Where a malformed record is, as far as the reader knows.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordPlace {
+    /// The record's number in the stream, from 1.
+    pub number: u64,
+    /// VCF text read from its start: the record's line, from 1.
+    pub line: Option<u64>,
+    /// BGZF input: where the record starts.
+    pub offset: Option<VirtualOffset>,
+    /// The file's path, unless it was read from memory.
+    pub path: Option<PathBuf>,
+    /// The record's CHROM and POS, once they decoded.
+    pub locus: Option<(SmolStr, VcfPos)>,
+}
+
+impl std::fmt::Display for RecordPlace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.number)?;
+        if let Some(line) = self.line {
+            write!(f, " (line {line})")?;
+        }
+        if let Some((chrom, pos)) = &self.locus {
+            write!(f, " at {chrom}:{pos}")?;
+        }
+        if let Some(path) = &self.path {
+            write!(f, " in {}", path.display())?;
+        }
+        if let Some(o) = self.offset {
+            write!(f, " (virtual offset {}:{})", o.block_offset(), o.within_block())?;
+        }
+        Ok(())
+    }
 }
 
 /// A file format the reader detects.
@@ -137,24 +171,6 @@ impl std::fmt::Display for RecordPart {
     }
 }
 
-/// Which dictionary a record's key should be in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyKind {
-    Filter,
-    Info,
-    Format,
-}
-
-impl std::fmt::Display for KeyKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Filter => "FILTER",
-            Self::Info => "INFO",
-            Self::Format => "FORMAT",
-        })
-    }
-}
-
 /// What is wrong with one record. `Clone`, so a lazily built index that
 /// failed returns the same error on every access (`r[vcf_fields.lazy]`).
 #[non_exhaustive]
@@ -171,7 +187,7 @@ pub enum RecordError {
     Truncated,
 
     #[error("contig index {index} is not in the header's contig dictionary")]
-    UnknownContig { index: i32 },
+    ContigIndexOutOfRange { index: i32 },
 
     #[error("POS {pos} (0-based) is before the telomere or past 2^31-2")]
     InvalidPosition { pos: i64 },
@@ -237,15 +253,33 @@ pub enum FieldError {
     Text(#[from] TextValueError),
 }
 
-/// Where a record is: its ordinal and, in a BGZF file, its virtual offset.
+/// Where a record is, as cheaply as a reader can say it per record: its
+/// ordinal, its line (VCF text from the start), its virtual offset (BGZF),
+/// and its contig and 0-based position once they decoded. The names are
+/// looked up only for an error ([`Self::error`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RecordAt {
     pub(crate) ordinal: u64,
+    pub(crate) line: Option<u64>,
     pub(crate) offset: Option<VirtualOffset>,
+    pub(crate) contig: Option<u32>,
+    /// 0-based; −1 is the telomere.
+    pub(crate) pos: Option<i64>,
 }
 
 impl RecordAt {
-    pub(crate) fn error(self, source: RecordError) -> VcfReadError {
-        VcfReadError::Record { ordinal: self.ordinal, offset: self.offset, source }
+    pub(crate) fn error(self, file: &FileShared, source: RecordError) -> VcfReadError {
+        let locus = self.contig.and_then(|tid| file.contigs.name(tid)).and_then(|chrom| {
+            let pos = VcfPos::from_one_based(self.pos?.saturating_add(1))?;
+            Some((chrom, pos))
+        });
+        let at = RecordPlace {
+            number: self.ordinal.saturating_add(1),
+            line: self.line,
+            offset: self.offset,
+            path: file.path().map(Path::to_path_buf),
+            locus,
+        };
+        VcfReadError::Record { at: Box::new(at), source }
     }
 }
