@@ -15,7 +15,7 @@ Rastair needs CRAM support because many large-scale sequencing projects store da
 r[cram.scope.versions]
 The reader MUST support CRAM v3.0 and v3.1. CRAM v2.0 and v2.1 MAY be supported but are not required — they are rarely encountered in practice. The magic bytes `CRAM` followed by major version 3 MUST be accepted; major version 2 SHOULD produce a warning; other versions MUST be rejected.
 
-The reader is read-only. CRAM writing is out of scope — rastair writes BAM (via htslib) for output.
+The reader is read-only. CRAM writing is the CRAM writer's ([CRAM Writer](./6-cram-writer.md)), which writes only structures this reader parses.
 
 r[cram.scope.reference_required]
 CRAM decoding requires access to the reference genome (FASTA). The reader MUST accept a FASTA reader (the one being built on the other branch) for sequence lookups. Embedded reference slices (where the reference is stored in the CRAM container itself) MUST also be supported as a fallback.
