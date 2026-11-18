@@ -2,7 +2,7 @@
 
 use crate::{
     io::BgzfError,
-    vcf::header::{Number, ValueType},
+    vcf::header::{Number, ValueType, VcfVersion},
     vcf::writer::WriteError,
 };
 use seqair_types::SmolStr;
@@ -68,6 +68,76 @@ pub enum VcfHeaderError {
 
     #[error(transparent)]
     Key(#[from] KeyError),
+
+    // r[impl vcf_header.parse.limits]
+    #[error("header text is {len} bytes, more than the {max} a header may hold")]
+    TextTooLarge { len: usize, max: usize },
+
+    // r[impl vcf_header.parse.version]
+    #[error("the first header line must be ##fileformat=VCFvX.Y")]
+    MissingFileFormat,
+
+    #[error("malformed ##fileformat value {value}: expected VCFvMAJOR.MINOR")]
+    MalformedVersion { value: SmolStr },
+
+    #[error("{version} is not a VCF 4 version")]
+    UnsupportedVersion { version: VcfVersion },
+
+    // r[impl vcf_header.parse]
+    #[error("header line {line}: {reason}")]
+    MalformedLine { line: usize, reason: MetaLineError },
+
+    #[error("header line {line}: ##{key} definition has no ID")]
+    MissingId { line: usize, key: SmolStr },
+
+    // r[impl vcf_header.parse.defs]
+    #[error("field {id}: unknown Number={value}")]
+    UnknownNumber { id: SmolStr, value: SmolStr },
+
+    #[error("field {id}: unknown Type={value}")]
+    UnknownType { id: SmolStr, value: SmolStr },
+
+    #[error("contig {name}: length={value} is not a non-negative integer")]
+    InvalidContigLength { name: SmolStr, value: SmolStr },
+
+    // r[impl vcf_header.parse.dictionary]
+    #[error("{id}: IDX={value} is not a dictionary index")]
+    InvalidIdx { id: SmolStr, value: SmolStr },
+
+    #[error("IDX={idx} is claimed by both {first} and {second}")]
+    ConflictingIdx { idx: u32, first: SmolStr, second: SmolStr },
+
+    #[error("{id} is given IDX={first} and IDX={second}")]
+    InconsistentIdx { id: SmolStr, first: u32, second: u32 },
+
+    #[error("the header has no #CHROM line")]
+    MissingHeaderLine,
+
+    #[error("#CHROM line: column {column} is missing or misnamed")]
+    MalformedHeaderLine { column: usize },
+
+    #[error("#CHROM line: sample column {column} is empty")]
+    EmptySampleName { column: usize },
+
+    #[error("header line {line} follows the #CHROM line")]
+    TrailingData { line: usize },
+}
+
+/// Why a structured `##key=<…>` line could not be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MetaLineError {
+    #[error("an attribute has no key")]
+    MissingKey,
+    #[error("an attribute has no '='")]
+    MissingEquals,
+    #[error("a quoted value has no closing '\"'")]
+    UnterminatedQuote,
+    #[error("a bracketed value has no closing ']'")]
+    UnterminatedBracket,
+    #[error("the line has no closing '>'")]
+    Unterminated,
+    #[error("a value is followed by something other than ',' or '>'")]
+    JunkAfterValue,
 }
 
 // r[impl vcf_values.keys]

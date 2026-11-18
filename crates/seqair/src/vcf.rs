@@ -189,7 +189,10 @@ pub mod unified;
 pub(crate) mod writer;
 
 pub use alleles::Alleles;
-pub use error::{AllelesError, KeyError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
+pub use error::{
+    AllelesError, KeyError, MetaLineError, ReservedMarker, VcfEncodeError, VcfError,
+    VcfHeaderError,
+};
 pub use header::{
     Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef,
     Infos, Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,

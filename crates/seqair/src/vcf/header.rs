@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod parse;
+
 // r[impl vcf_header.info_def]
 /// Number of values for an INFO or FORMAT field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,14 @@ pub enum Number {
     ReferenceAlternateBases,
     /// One per genotype combination (G).
     Genotypes,
+    /// FORMAT only: one per allele in the sample's GT (P). VCF 4.4+.
+    Ploidy,
+    /// FORMAT only: like `A`, over the alternate alleles in `LAA` (LA). VCF 4.5.
+    LocalAlternateBases,
+    /// FORMAT only: like `R`, over the alleles in `LAA` (LR). VCF 4.5.
+    LocalReferenceAlternateBases,
+    /// FORMAT only: like `G`, over the alleles in `LAA` (LG). VCF 4.5.
+    LocalGenotypes,
     /// One per possible base modification (M). **VCF 4.5**: "one value for each
     /// possible base modification for the corresponding `ChEBI` ID" — not the
     /// "4.2+ extension" this comment used to claim. Built headers declare 4.5
@@ -43,6 +53,10 @@ impl Number {
             Self::AlternateBases => SmolStr::from("A"),
             Self::ReferenceAlternateBases => SmolStr::from("R"),
             Self::Genotypes => SmolStr::from("G"),
+            Self::Ploidy => SmolStr::from("P"),
+            Self::LocalAlternateBases => SmolStr::from("LA"),
+            Self::LocalReferenceAlternateBases => SmolStr::from("LR"),
+            Self::LocalGenotypes => SmolStr::from("LG"),
             Self::BaseModification => SmolStr::from("M"),
             Self::Unknown => SmolStr::from("."),
         }
@@ -161,6 +175,10 @@ impl ContigDef {
 pub const MAX_DICT_ENTRIES: usize = 65_536;
 
 // r[impl vcf_header.parse.limits]
+/// Longest header text [`VcfHeader::parse`] accepts, as for a BAM header.
+pub const MAX_HEADER_TEXT: usize = 256 << 20;
+
+// r[impl vcf_header.parse.limits]
 /// Most contigs a header may declare, for the builder and the parser alike.
 pub const MAX_CONTIGS: usize = 1_048_576;
 
@@ -224,6 +242,23 @@ impl StringMap {
         self.ids.insert(id.clone(), idx32);
         self.slots.push(Some(id.clone()));
         Some(idx32)
+    }
+
+    /// Put a new `id` at `idx`, growing the map with holes up to it. On a
+    /// conflict, returns the id already there; the map is unchanged.
+    pub(crate) fn insert_at(&mut self, id: &SmolStr, idx: u32) -> Result<(), SmolStr> {
+        let at = idx as usize;
+        if let Some(Some(taken)) = self.slots.get(at) {
+            return Err(taken.clone());
+        }
+        if at >= self.slots.len() {
+            self.slots.resize(at.saturating_add(1), None);
+        }
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = Some(id.clone());
+        }
+        self.ids.insert(id.clone(), idx);
+        Ok(())
     }
 }
 
@@ -329,6 +364,11 @@ impl VcfHeader {
         &self.samples
     }
 
+    /// The `##key=value` lines the model does not interpret, without `##`, in order.
+    pub fn other_lines(&self) -> &[SmolStr] {
+        &self.other_lines
+    }
+
     /// Look up the integer index for a contig name (for BCF encoding).
     pub fn contig_id(&self, name: &str) -> Result<usize, VcfHeaderError> {
         self.contig_map
@@ -375,8 +415,16 @@ impl VcfHeader {
     }
 
     // r[impl vcf_header.serialization]
+    // r[impl vcf_header.parse.preserve]
     /// Serialize as VCF header text (all ## lines + #CHROM line).
+    ///
+    /// A parsed header whose dictionary a reader of this text would not
+    /// reproduce (its file declared ids in another order than the emission
+    /// order below, or left `IDX` gaps) gets `IDX=` on every definition line,
+    /// as htslib writes BCF headers, so a re-read assigns the same indices.
     pub fn to_vcf_text(&self) -> String {
+        let (field_idx, contig_idx) = self.needs_idx();
+        let field = |id: &str| if field_idx { self.string_map.get(id) } else { None };
         let mut out = String::new();
 
         out.push_str("##fileformat=");
@@ -386,7 +434,8 @@ impl VcfHeader {
         // PASS right after fileformat, before metadata, as htslib does: it is
         // dictionary index 0.
         if let Some(def) = self.filters.get("PASS") {
-            push_def_line(&mut out, "FILTER", "PASS", None, &def.description, &def.attributes);
+            let line = DefLine { key: "FILTER", id: "PASS", kind: None, idx: field("PASS") };
+            line.push(&mut out, &def.description, &def.attributes);
         }
 
         for line in &self.other_lines {
@@ -396,15 +445,18 @@ impl VcfHeader {
         }
 
         for (id, def) in self.filters.iter().filter(|(id, _)| *id != "PASS") {
-            push_def_line(&mut out, "FILTER", id, None, &def.description, &def.attributes);
+            let line = DefLine { key: "FILTER", id, kind: None, idx: field(id) };
+            line.push(&mut out, &def.description, &def.attributes);
         }
         for (id, def) in &self.infos {
             let kind = Some((def.number, def.typ));
-            push_def_line(&mut out, "INFO", id, kind, &def.description, &def.attributes);
+            let line = DefLine { key: "INFO", id, kind, idx: field(id) };
+            line.push(&mut out, &def.description, &def.attributes);
         }
         for (id, def) in &self.formats {
             let kind = Some((def.number, def.typ));
-            push_def_line(&mut out, "FORMAT", id, kind, &def.description, &def.attributes);
+            let line = DefLine { key: "FORMAT", id, kind, idx: field(id) };
+            line.push(&mut out, &def.description, &def.attributes);
         }
 
         for (name, def) in &self.contigs {
@@ -415,6 +467,10 @@ impl VcfHeader {
                 out.push_str(&len.to_string());
             }
             push_attributes(&mut out, &def.attributes);
+            if let Some(idx) = self.contig_map.get(name).filter(|_| contig_idx) {
+                out.push_str(",IDX=");
+                out.push_str(&idx.to_string());
+            }
             out.push_str(">\n");
         }
 
@@ -430,31 +486,55 @@ impl VcfHeader {
 
         out
     }
+
+    /// Whether the string and the contig dictionary differ from what a reader
+    /// assigns to `to_vcf_text`'s lines without `IDX` (in order of appearance).
+    fn needs_idx(&self) -> (bool, bool) {
+        let mut fields = StringMap::default();
+        let ids = std::iter::once("PASS")
+            .chain(self.filters.keys().map(SmolStr::as_str).filter(|id| *id != "PASS"))
+            .chain(self.infos.keys().map(SmolStr::as_str))
+            .chain(self.formats.keys().map(SmolStr::as_str));
+        for id in ids {
+            fields.push(&SmolStr::from(id), usize::MAX);
+        }
+        let mut contigs = StringMap::default();
+        for name in self.contigs.keys() {
+            contigs.push(name, usize::MAX);
+        }
+        (fields != self.string_map, contigs != self.contig_map)
+    }
 }
 
-/// `##KEY=<ID=id[,Number=n,Type=t],Description="d"[,attributes]>`.
-fn push_def_line(
-    out: &mut String,
-    key: &str,
-    id: &str,
+/// `##KEY=<ID=id[,Number=n,Type=t],Description="d"[,attributes][,IDX=i]>`.
+struct DefLine<'a> {
+    key: &'a str,
+    id: &'a str,
     kind: Option<(Number, ValueType)>,
-    description: &str,
-    attributes: &[Attribute],
-) {
-    out.push_str("##");
-    out.push_str(key);
-    out.push_str("=<ID=");
-    out.push_str(id);
-    if let Some((number, typ)) = kind {
-        out.push_str(",Number=");
-        out.push_str(&number.as_str());
-        out.push_str(",Type=");
-        out.push_str(typ.as_str());
+    idx: Option<usize>,
+}
+
+impl DefLine<'_> {
+    fn push(&self, out: &mut String, description: &str, attributes: &[Attribute]) {
+        out.push_str("##");
+        out.push_str(self.key);
+        out.push_str("=<ID=");
+        out.push_str(self.id);
+        if let Some((number, typ)) = self.kind {
+            out.push_str(",Number=");
+            out.push_str(&number.as_str());
+            out.push_str(",Type=");
+            out.push_str(typ.as_str());
+        }
+        out.push_str(",Description=");
+        push_quoted(out, description);
+        push_attributes(out, attributes);
+        if let Some(idx) = self.idx {
+            out.push_str(",IDX=");
+            out.push_str(&idx.to_string());
+        }
+        out.push_str(">\n");
     }
-    out.push_str(",Description=");
-    push_quoted(out, description);
-    push_attributes(out, attributes);
-    out.push_str(">\n");
 }
 
 fn push_attributes(out: &mut String, attributes: &[Attribute]) {
