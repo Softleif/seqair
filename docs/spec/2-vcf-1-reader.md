@@ -72,6 +72,9 @@ The records of all partitions of a file, concatenated in partition order, MUST e
 r[vcf_reader.undeclared]
 An INFO or FORMAT key that a VCF text record uses but the header does not declare MUST be ignored — it gets no index entry and no typed key can reach it — and the reader MUST log a single `warn!` per file naming the first such key and saying that further undeclared keys are ignored too. BCF records refer to fields by dictionary index, so an index the dictionary lacks is a malformed record and MUST fail with a typed error.
 
+r[vcf_reader.undeclared.filter]
+A VCF text FILTER name the header does not declare MUST still fail the record (`FilterStatus::Failed`), so a record never passes for a filter the header forgot; no `FilterId` can name it, so `Failed` does not list it, and it counts towards the same single `warn!` per file. htslib instead adds the name to its header; seqair's header is shared and immutable. Dropping the name would turn a record whose only filter is undeclared into `Missing`, which `bcf_has_filter` and many callers count as passing.
+
 ## Limits and errors
 
 r[vcf_reader.limits]

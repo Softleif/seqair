@@ -212,6 +212,7 @@ fn check_ploidy(n: usize) -> Result<(), FieldError> {
     Ok(())
 }
 
+// r[impl vcf_values.dynamic.missing]
 /// `v`, or no elements if it is missing as a whole: VCF text spells an
 /// empty vector `.`, so the formats agree only on this.
 fn whole<T: super::values::Number>(v: OptValues<'_, T>) -> OptValues<'_, T> {

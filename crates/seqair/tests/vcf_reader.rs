@@ -1038,6 +1038,7 @@ fn text_records_read_their_columns() {
 // r[verify vcf_values.access]
 // r[verify vcf_values.duplicates]
 // r[verify vcf_reader.undeclared]
+// r[verify vcf_reader.undeclared.filter]
 /// A sample may drop trailing FORMAT fields (they read as missing); a
 /// repeated key reads its first value; an undeclared INFO or FORMAT key is
 /// ignored; a flag given a value is set; an integer key without a value is

@@ -142,6 +142,7 @@ impl SiteParts {
 
 impl SiteParts {
     // r[impl vcf_fields.site]
+    // r[impl vcf_reader.undeclared.filter]
     /// Decode the site columns of a VCF text line: IDs and alleles UTF-8,
     /// QUAL a float or `.`, FILTER names looked up in the header. A FILTER
     /// name the header does not declare still fails the record (htslib

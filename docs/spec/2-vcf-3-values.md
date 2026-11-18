@@ -52,6 +52,9 @@ When a record holds the same INFO or FORMAT key twice, the first occurrence MUST
 r[vcf_values.dynamic]
 `Info::iter()` and the sample views MUST offer untyped iteration over the declared fields present, yielding the field's header definition and a `DynValue` (`Int(Values<i32>)`, `Float(Values<f32>)`, `Flag`, `Str(&str)`, with missing elements as `Option`), for generic tools such as `convert` and `view`.
 
+r[vcf_values.dynamic.missing]
+A number vector missing as a whole — `.` in VCF text, an empty vector or a lone missing value in BCF — MUST read as a `DynValue` with no elements. VCF text cannot spell an empty vector, so this is the only reading on which the formats agree (`r[vcf_values.equivalence]`).
+
 ## Reference span
 
 r[vcf_values.rlen]
