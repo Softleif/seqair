@@ -3,6 +3,9 @@
 //! `rans_compress_to_4x16` (`rANS_static4x16pr.c`) writes it.
 
 use super::rans::Order;
+use fearless_simd::Level;
+
+mod simd;
 
 // r[impl cram_writer.rans_nx16]
 
@@ -75,15 +78,37 @@ pub(super) fn normal_profile(len: usize) -> [Nx16Flags; 6] {
     .map(|f| Nx16Flags { n32: n32 && !f.stripe, ..f })
 }
 
+/// How [`encode`] counts and codes: the scalar loops, the reference, or the
+/// SIMD kernels at a level (`r[cram_writer.rans_nx16.simd]`). Both write
+/// the same bytes.
+#[derive(Debug, Clone, Copy)]
+enum Coder {
+    Scalar,
+    Simd(Level),
+}
+
 /// `data` as a rANS Nx16 stream, or `None` when it is too large for the
 /// format's sizes (htscodecs refuses more than `i32::MAX` bytes).
 pub(super) fn encode(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
+    encode_with(data, flags, Coder::Simd(Level::new()))
+}
+
+fn encode_with(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>> {
     check_len(data)?;
     if flags.stripe && data.len() > STRIPE_MIN {
-        encode_stripe(data, flags)
+        encode_stripe(data, flags, coder)
     } else {
-        encode_stream(data, flags, true)
+        encode_stream(data, flags, true, coder)
     }
+}
+
+/// [`encode`] for benchmarks: `method` is a flag byte as
+/// [`Nx16Flags::from_byte`] reads it, and `scalar` codes with the scalar
+/// loops the SIMD kernels are checked against.
+#[doc(hidden)]
+pub fn encode_for_bench(data: &[u8], method: u8, scalar: bool) -> Option<Vec<u8>> {
+    let coder = if scalar { Coder::Scalar } else { Coder::Simd(Level::new()) };
+    encode_with(data, Nx16Flags::from_byte(method), coder)
 }
 
 /// `data` stored as it is: a CAT stream, as a name tokeniser's tiny
@@ -103,7 +128,7 @@ fn check_len(data: &[u8]) -> Option<()> {
 
 /// One stream without STRIPE: PACK, then RLE, then the entropy coder, the
 /// body stored as CAT when coding does not shrink it.
-fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool) -> Option<Vec<u8>> {
+fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Option<Vec<u8>> {
     let n = if flags.n32 { 32 } else { 4 };
     let mut byte = if flags.n32 { FLAG_N32 } else { 0 };
     let mut out = vec![0];
@@ -126,7 +151,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool) -> Option<Vec<u8>> 
     if let Some((meta, literals)) = &rle {
         byte |= FLAG_RLE;
         let meta_len = meta.len().checked_mul(2)?;
-        match encode_order_0(meta, n) {
+        match encode_order_0(meta, n, coder) {
             Some(coded) if coded.len() < meta.len() => {
                 put_uint7(&mut out, meta_len)?;
                 put_uint7(&mut out, literals.len())?;
@@ -143,7 +168,11 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool) -> Option<Vec<u8>> 
     }
 
     let order_1 = matches!(flags.order, Order::One) && body.len() >= ORDER_1_MIN;
-    let coded = if order_1 { encode_order_1(body, n) } else { encode_order_0(body, n) };
+    let coded = match (order_1, coder) {
+        (true, Coder::Scalar) => encode_order_1(body, n),
+        (true, Coder::Simd(level)) => simd::encode_order_1(body, n, level),
+        (false, _) => encode_order_0(body, n, coder),
+    };
     match coded {
         Some(coded) if coded.len() < body.len() => {
             if order_1 {
@@ -165,7 +194,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool) -> Option<Vec<u8>> 
 /// STRIPE: the bytes dealt round-robin into four substreams, each written
 /// without its size by whichever of the asked-for order, RLE, PACK and
 /// order 0 is smallest, as htscodecs tries them.
-fn encode_stripe(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
+fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>> {
     let order_bit = if matches!(flags.order, Order::One) { FLAG_ORDER } else { 0 };
     let n32_bit = if flags.n32 { FLAG_N32 } else { 0 };
     let mut out = vec![FLAG_STRIPE | order_bit | n32_bit];
@@ -184,7 +213,7 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
         let part: Vec<u8> = data.iter().skip(j).step_by(STRIPES).copied().collect();
         let mut best: Option<Vec<u8>> = None;
         for f in candidates.iter().flatten() {
-            let coded = encode_stream(&part, *f, false)?;
+            let coded = encode_stream(&part, *f, false, coder)?;
             if best.as_ref().is_none_or(|b| coded.len() < b.len()) {
                 best = Some(coded);
             }
@@ -304,14 +333,20 @@ struct Symbol {
 /// words. `None` when `data` is empty (htscodecs writes no table then).
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table; i % n < n")]
 #[allow(clippy::arithmetic_side_effects, reason = "i % n with n ∈ {4, 32}")]
-fn encode_order_0(data: &[u8], n: usize) -> Option<Vec<u8>> {
+fn encode_order_0(data: &[u8], n: usize, coder: Coder) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
     }
-    let mut counts = [0u32; 256];
-    for &b in data {
-        counts[usize::from(b)] = counts[usize::from(b)].saturating_add(1);
-    }
+    let counts = match coder {
+        Coder::Scalar => {
+            let mut counts = [0u32; 256];
+            for &b in data {
+                counts[usize::from(b)] = counts[usize::from(b)].saturating_add(1);
+            }
+            counts
+        }
+        Coder::Simd(_) => simd::histogram(data),
+    };
     let total = u32::try_from(data.len().next_power_of_two()).ok()?.min(1 << ORDER_0_BITS);
     let freqs = normalize(&counts, total);
     let mut out = Vec::new();
@@ -320,6 +355,10 @@ fn encode_order_0(data: &[u8], n: usize) -> Option<Vec<u8>> {
         put_uint7(&mut out, f)?;
     }
     let table = symbols(&freqs, ORDER_0_BITS - total.trailing_zeros());
+    if let Coder::Simd(level) = coder {
+        simd::code_order_0(level, data, &table, n, &mut out);
+        return Some(out);
+    }
 
     let mut states = vec![LOWER_BOUND; n];
     let mut words = Vec::with_capacity(data.len() / 2);
@@ -372,24 +411,8 @@ fn order_1_tables(data: &[u8], n: usize) -> Order1Tables {
     {
         row[0] = 1;
     }
-    let targets: Vec<u32> = counts
-        .iter()
-        .map(|row| {
-            let total: u32 = row.iter().fold(0, |a, &c| a.saturating_add(c));
-            let symbols = row.iter().filter(|&&c| c > 0).count();
-            let mut target = total.checked_next_power_of_two().unwrap_or(1 << 31);
-            if symbols < 64 && target > 128 {
-                target /= 2;
-            }
-            if target > 1024 {
-                target /= 2;
-            }
-            target.min(1 << ORDER_0_BITS)
-        })
-        .collect();
-    // htscodecs also takes 10 bits when its entropy estimate says 12 gain
-    // under 1%; here only when no row needs more.
-    let shift = if targets.iter().zip(alphabet).any(|(&t, a)| a && t > 1024) { 12 } else { 10 };
+    let targets: Vec<u32> = counts.iter().map(row_target).collect();
+    let shift = order_1_shift(targets.iter().zip(alphabet).filter(|(_, a)| *a).map(|(&t, _)| t));
     let rows = counts
         .iter()
         .zip(&targets)
@@ -398,12 +421,33 @@ fn order_1_tables(data: &[u8], n: usize) -> Order1Tables {
     Order1Tables { shift, alphabet, rows }
 }
 
+/// The power of two an order-1 row is normalized to, as `encode_freq1`
+/// sizes it.
+fn row_target(row: &[u32; 256]) -> u32 {
+    let total: u32 = row.iter().fold(0, |a, &c| a.saturating_add(c));
+    let symbols = row.iter().filter(|&&c| c > 0).count();
+    let mut target = total.checked_next_power_of_two().unwrap_or(1 << 31);
+    if symbols < 64 && target > 128 {
+        target /= 2;
+    }
+    if target > 1024 {
+        target /= 2;
+    }
+    target.min(1 << ORDER_0_BITS)
+}
+
+/// The order-1 shift for the alphabet's row targets. htscodecs also takes
+/// 10 bits when its entropy estimate says 12 gain under 1%; here only when
+/// no row needs more.
+fn order_1_shift(mut targets: impl Iterator<Item = u32>) -> u32 {
+    if targets.any(|t| t > 1024) { 12 } else { 10 }
+}
+
 /// Order 1, without the flags byte: the tables (order-0 coded when larger
 /// than 1000 bytes and that saves more than 6), the `n` states, the words.
 /// `data` holds at least [`ORDER_1_MIN`] bytes.
 #[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; j < n")]
 #[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i < n·chunk ≤ len")]
-#[allow(clippy::cast_possible_truncation, reason = "shift ≤ 12 fits the high nibble")]
 fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
     let Order1Tables { shift, alphabet, rows } = order_1_tables(data, n);
     let mut table = Vec::new();
@@ -418,22 +462,7 @@ fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
         *s = symbols(row, shift - total.trailing_zeros());
     }
 
-    let header = (shift as u8) << 4;
-    let mut out = Vec::new();
-    let coded = if table.len() > 1000 { encode_order_0(&table, 4) } else { None };
-    match coded {
-        Some(coded) if coded.len().saturating_add(6) < table.len().saturating_add(1) => {
-            out.push(header | 1);
-            put_uint7(&mut out, table.len())?;
-            put_uint7(&mut out, coded.len())?;
-            out.extend_from_slice(&coded);
-        }
-        _ => {
-            out.push(header);
-            out.extend_from_slice(&table);
-        }
-    }
-
+    let mut out = order_1_header(shift, &table, Coder::Scalar)?;
     let chunk = data.len() / n;
     let mut states = vec![LOWER_BOUND; n];
     let mut words = Vec::with_capacity(data.len() / 2);
@@ -452,6 +481,28 @@ fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
         }
     }
     finish(&mut out, &states, &words);
+    Some(out)
+}
+
+/// The order-1 stream up to its states: the shift and the tables, order-0
+/// coded when larger than 1000 bytes and that saves more than 6.
+#[allow(clippy::cast_possible_truncation, reason = "shift ≤ 12 fits the high nibble")]
+fn order_1_header(shift: u32, table: &[u8], coder: Coder) -> Option<Vec<u8>> {
+    let header = (shift as u8) << 4;
+    let mut out = Vec::new();
+    let coded = if table.len() > 1000 { encode_order_0(table, 4, coder) } else { None };
+    match coded {
+        Some(coded) if coded.len().saturating_add(6) < table.len().saturating_add(1) => {
+            out.push(header | 1);
+            put_uint7(&mut out, table.len())?;
+            put_uint7(&mut out, coded.len())?;
+            out.extend_from_slice(&coded);
+        }
+        _ => {
+            out.push(header);
+            out.extend_from_slice(table);
+        }
+    }
     Some(out)
 }
 
@@ -640,6 +691,65 @@ mod tests {
         let data = draw_data(&tc);
         for flags in every_flags() {
             round_trip(&data, flags);
+        }
+    }
+
+    /// `data` under every combination at every SIMD level, the scalar
+    /// `Fallback` included, against the scalar encoder.
+    fn assert_every_level_is_scalar(data: &[u8]) {
+        for flags in every_flags() {
+            let want = encode_with(data, flags, Coder::Scalar);
+            for level in crate::simd_levels::levels() {
+                let got = encode_with(data, flags, Coder::Simd(level));
+                assert!(got == want, "{flags:?} at {level:?} of {} bytes", data.len());
+            }
+        }
+    }
+
+    // r[verify cram_writer.rans_nx16.simd]
+    // r[verify io.simd_portable]
+    #[hegel::test(test_cases = crate::pinned::cases(60))]
+    fn every_level_writes_the_scalar_encoders_bytes(tc: TestCase) {
+        assert_every_level_is_scalar(&draw_data(&tc));
+    }
+
+    // r[verify cram_writer.rans_nx16.simd]
+    /// Blocks past the 32-state threshold and into the order-1 table's
+    /// compression, from every alphabet size, at every level.
+    #[test]
+    fn every_level_writes_the_scalar_encoders_bytes_for_large_blocks() {
+        let q8 = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/hts-specs/cram/codecs/ransNx16/q8.0"
+        );
+        let qualities = decode(&std::fs::read(q8).unwrap(), 0).unwrap();
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let random: Vec<u8> = (0..70_001)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        for data in [qualities, random, vec![7; 50_003]] {
+            assert_every_level_is_scalar(&data);
+        }
+    }
+
+    // r[verify cram_writer.rans_nx16.simd]
+    /// The kernels' reciprocal is the division, for every frequency and the
+    /// states at the ends of the range as well as drawn ones.
+    #[hegel::test]
+    fn the_reciprocal_divides_exactly(tc: TestCase) {
+        let f = tc.draw(gs::integers::<u32>().min_value(1).max_value(4096));
+        let start = tc.draw(gs::integers::<u32>().max_value(4096 - f));
+        let x = tc.draw(gs::integers::<u32>().max_value((1 << 31) - 1));
+        let e = simd::enc(Symbol { start, freq: f });
+        let (m, s) = (e & 0xFFFF_FFFF, (e >> 32) as u32 >> 25);
+        for x in [x, 0, 1, f - 1, f, (1 << 31) - 1, ((1u32 << 31) - 1) / f * f] {
+            let q = ((u64::from(x) * 2 * m) >> 32) >> s;
+            assert_eq!(q, u64::from(x / f), "x = {x}, f = {f}");
         }
     }
 
