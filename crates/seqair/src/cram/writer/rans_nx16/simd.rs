@@ -71,11 +71,11 @@ thread_local! {
     static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::new());
 }
 
-/// Order-1 counts, in two tables so that a run of one pair is two chains of
-/// increments rather than one, and the coding table, each indexed by the
+/// Order-1 counts, in four tables so that a run of one pair is four chains
+/// of increments rather than one, and the coding table, each indexed by the
 /// context and the symbol as a big-endian u16.
 struct Order1Scratch {
-    counts: [Vec<u32>; 2],
+    counts: [Vec<u32>; 4],
     /// The rows of `counts` the last block may have left non-zero.
     dirty: [bool; 256],
     /// Rows outside the current alphabet hold an earlier block's entries,
@@ -86,7 +86,7 @@ struct Order1Scratch {
 impl Order1Scratch {
     fn new() -> Self {
         Self {
-            counts: [vec![0; 1 << 16], vec![0; 1 << 16]],
+            counts: std::array::from_fn(|_| vec![0; 1 << 16]),
             dirty: [false; 256],
             enc: vec![0; 1 << 16],
         }
@@ -101,13 +101,13 @@ impl Order1Scratch {
 fn put(x: u32, e: Enc, bits: u32, words: &mut Words<'_>) -> u32 {
     let info = (e >> 32) as u32;
     let f = (info >> 12) & 0x1FFF;
-    let mut x = x;
-    if x >> (31 - bits) >= f {
-        words.at -= 2;
-        let at = words.at;
-        words.buf[at..at + 2].copy_from_slice(&(x as u16).to_le_bytes());
-        x >>= 16;
-    }
+    // Branch-free: the word is stored either way, below the words so far,
+    // and kept only if the state renormalizes.
+    let renorm = x >> (31 - bits) >= f;
+    let at = words.at;
+    words.buf[at - 2..at].copy_from_slice(&(x as u16).to_le_bytes());
+    words.at = at - 2 * usize::from(renorm);
+    let x = if renorm { x >> 16 } else { x };
     let q = ((u64::from(x + x) * (e & 0xFFFF_FFFF)) >> 32) as u32 >> (info >> 25);
     x + (info & 0xFFF) + q * ((1 << bits) - f)
 }
@@ -173,25 +173,26 @@ fn step4<S: Simd>(
     x + (info & 0xFFF) + q * (u32x4::splat(simd, 1 << bits) - f)
 }
 
-/// Order-0 counts in four sub-tables, so that a run of one symbol is four
-/// chains of increments rather than one.
-#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables")]
+/// Order-0 counts in eight sub-tables, so that a run of one symbol is
+/// eight chains of increments rather than one.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 8")]
 #[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
 pub(super) fn histogram(data: &[u8]) -> [u32; 256] {
-    let mut c = [[0u32; 256]; 4];
-    let (quads, rest) = data.as_chunks::<4>();
-    for q in quads {
-        c[0][usize::from(q[0])] += 1;
-        c[1][usize::from(q[1])] += 1;
-        c[2][usize::from(q[2])] += 1;
-        c[3][usize::from(q[3])] += 1;
+    let mut c = [[0u32; 256]; 8];
+    let (octets, rest) = data.as_chunks::<8>();
+    for o in octets {
+        for (k, &b) in o.iter().enumerate() {
+            c[k][usize::from(b)] += 1;
+        }
     }
     for &b in rest {
         c[0][usize::from(b)] += 1;
     }
-    let [mut sum, c1, c2, c3] = c;
-    for (((s, a), b), d) in sum.iter_mut().zip(c1).zip(c2).zip(c3) {
-        *s += a + b + d;
+    let mut sum = [0u32; 256];
+    for t in &c {
+        for (s, &n) in sum.iter_mut().zip(t) {
+            *s += n;
+        }
     }
     sum
 }
@@ -217,9 +218,10 @@ pub(super) fn code_order_0(
         for (l, &b) in data[whole..].iter().enumerate().rev() {
             states[l] = put(states[l], enc_table[usize::from(b)], ORDER_0_BITS, &mut words);
         }
-        if let Some(s) = states.first_chunk_mut::<32>().filter(|_| n == 32) {
+        let groups = states.as_chunks_mut::<4>().0;
+        if let Some(s) = groups.first_chunk_mut::<8>().filter(|_| n == 32) {
             dispatch!(level, simd => code_o0(simd, body.as_chunks::<32>().0, &enc_table, s, &mut words));
-        } else if let Some(s) = states.first_chunk_mut::<4>() {
+        } else if let Some(s) = groups.first_chunk_mut::<1>() {
             dispatch!(level, simd => code_o0(simd, body.as_chunks::<4>().0, &enc_table, s, &mut words));
         }
         finish(out, &states[..n], words.decode_order());
@@ -231,24 +233,47 @@ pub(super) fn code_order_0(
 /// encoder pushes words in).
 #[simd]
 #[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table")]
-fn code_o0<S: Simd, const N: usize>(
+fn code_o0<S: Simd, const N: usize, const M: usize>(
     simd: S,
     rounds: &[[u8; N]],
     enc_table: &[Enc; 256],
-    states: &mut [u32; N],
+    states: &mut [[u32; 4]; M],
     words: &mut Words<'_>,
 ) {
+    debug_assert_eq!(Some(N), M.checked_mul(4));
+    // Local copies, so that the write position and the states stay in
+    // registers: through memory, a store-to-load forward joins every
+    // state's chain (a quarter of the 4-state loop's time on Zen 2).
+    let mut local = Words { buf: &mut *words.buf, at: words.at };
+    let mut xs = load_states(simd, states);
     for round in rounds.iter().rev() {
-        let groups = states.as_chunks_mut::<4>().0.iter_mut().zip(round.as_chunks::<4>().0);
-        for (xs, bytes) in groups.rev() {
+        for (x, bytes) in xs.iter_mut().zip(round.as_chunks::<4>().0).rev() {
             let e = [
                 enc_table[usize::from(bytes[0])],
                 enc_table[usize::from(bytes[1])],
                 enc_table[usize::from(bytes[2])],
                 enc_table[usize::from(bytes[3])],
             ];
-            step4(simd, u32x4::from_slice(simd, xs), &e, ORDER_0_BITS, words).store_slice(xs);
+            *x = step4(simd, *x, &e, ORDER_0_BITS, &mut local);
         }
+    }
+    store_states(&xs, states);
+    words.at = local.at;
+}
+
+#[inline(always)]
+fn load_states<S: Simd, const M: usize>(simd: S, states: &[[u32; 4]; M]) -> [u32x4<S>; M] {
+    let mut xs = [u32x4::splat(simd, 0); M];
+    for (x, s) in xs.iter_mut().zip(states) {
+        *x = u32x4::from_slice(simd, s);
+    }
+    xs
+}
+
+#[inline(always)]
+fn store_states<S: Simd, const M: usize>(xs: &[u32x4<S>; M], states: &mut [[u32; 4]; M]) {
+    for (x, s) in xs.iter().zip(states) {
+        x.store_slice(s);
     }
 }
 
@@ -273,9 +298,10 @@ pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<
             }
             if chunk > 0 {
                 let body = &data[..chunk * n];
-                if let Some(s) = states.first_chunk_mut::<32>().filter(|_| n == 32) {
+                let groups = states.as_chunks_mut::<4>().0;
+                if let Some(s) = groups.first_chunk_mut::<8>().filter(|_| n == 32) {
                     dispatch!(level, simd => code_o1(simd, body, chunk, enc_table, shift, s, &mut words));
-                } else if let Some(s) = states.first_chunk_mut::<4>() {
+                } else if let Some(s) = groups.first_chunk_mut::<1>() {
                     dispatch!(level, simd => code_o1(simd, body, chunk, enc_table, shift, s, &mut words));
                 }
             }
@@ -296,12 +322,13 @@ pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<
               shift ≥ log2 of a row total"
 )]
 fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32, Vec<u8>)> {
-    let [c0, c1] = &mut o1.counts;
     for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
-        c0[ctx << 8..][..256].fill(0);
-        c1[ctx << 8..][..256].fill(0);
+        for c in &mut o1.counts {
+            c[ctx << 8..][..256].fill(0);
+        }
         *dirty = false;
     }
+    let [c0, c1, c2, c3] = &mut o1.counts;
     let mut alphabet = [false; 256];
     alphabet[0] = true;
     for &b in data {
@@ -310,23 +337,29 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32,
     o1.dirty = alphabet;
 
     // Every byte with the one before it (the first with context 0), the
-    // pairs alternating between the two tables.
+    // pairs taking the four tables in turn.
     let (&first, rest) = data.split_first()?;
     c0[usize::from(first)] += 1;
     let mut prev = usize::from(first);
-    let (pairs, last) = rest.as_chunks::<2>();
-    for &[a, b] in pairs {
-        let (a, b) = (usize::from(a), usize::from(b));
+    let (quads, tail) = rest.as_chunks::<4>();
+    for &[a, b, c, d] in quads {
+        let (a, b, c, d) = (usize::from(a), usize::from(b), usize::from(c), usize::from(d));
         c0[prev << 8 | a] += 1;
         c1[a << 8 | b] += 1;
-        prev = b;
+        c2[b << 8 | c] += 1;
+        c3[c << 8 | d] += 1;
+        prev = d;
     }
-    if let Some(&a) = last.first() {
+    for &a in tail {
         c0[prev << 8 | usize::from(a)] += 1;
+        prev = usize::from(a);
     }
     for ctx in (0..256).filter(|&c| alphabet[c]) {
-        for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(&mut c1[ctx << 8..][..256]) {
-            *a += std::mem::take(b);
+        let rows = [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
+        for row in rows {
+            for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(row) {
+                *a += std::mem::take(b);
+            }
         }
     }
     // Each stretch start but the first moved to context 0, which `context`
@@ -367,27 +400,56 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32,
     Some((shift, table))
 }
 
-/// Order 1 over `N` stretches of `chunk` bytes, position by position from
-/// the last, the states in groups of four lanes, the highest first. A
+/// Positions an order-1 block covers: each lane's bytes for them, and the
+/// one before, are copied out once, so the steps index a fixed-size array.
+const BLOCK: usize = 16;
+
+/// Order 1 over `4·M` stretches of `chunk` bytes, position by position
+/// from the last, the states in groups of four lanes, the highest first. A
 /// stretch's first byte has context 0.
 #[simd]
 #[allow(
     clippy::indexing_slicing,
-    reason = "j·chunk + i < N·chunk = data.len(); u16s index the table"
+    reason = "j·chunk + i < 4·M·chunk = data.len(); i ≥ BLOCK in i - BLOCK; u16s index the table"
 )]
 #[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i < data.len(); i ≥ 1 in i - 1")]
-fn code_o1<S: Simd, const N: usize>(
+fn code_o1<S: Simd, const M: usize>(
     simd: S,
     data: &[u8],
     chunk: usize,
     enc_table: &[Enc; 1 << 16],
     bits: u32,
-    states: &mut [u32; N],
+    states: &mut [[u32; 4]; M],
     words: &mut Words<'_>,
 ) {
-    for i in (0..chunk).rev() {
-        let mut j = N;
-        for xs in states.as_chunks_mut::<4>().0.iter_mut().rev() {
+    let mut local = Words { buf: &mut *words.buf, at: words.at };
+    let mut xs = load_states(simd, states);
+    // Whole blocks of positions i - BLOCK .. i, all with a byte before them
+    // in their stretch: each lane's BLOCK + 1 bytes from i - BLOCK - 1.
+    let mut i = chunk;
+    while i > BLOCK {
+        i -= BLOCK;
+        let mut window = [[[0u8; BLOCK + 1]; 4]; M];
+        for (j, w) in window.as_flattened_mut().iter_mut().enumerate() {
+            let from = j * chunk + i - 1;
+            w.copy_from_slice(&data[from..=from + BLOCK]);
+        }
+        for k in (0..BLOCK).rev() {
+            for (x, w) in xs.iter_mut().zip(&window).rev() {
+                let e = [
+                    enc_table[usize::from(u16::from_be_bytes([w[0][k], w[0][k + 1]]))],
+                    enc_table[usize::from(u16::from_be_bytes([w[1][k], w[1][k + 1]]))],
+                    enc_table[usize::from(u16::from_be_bytes([w[2][k], w[2][k + 1]]))],
+                    enc_table[usize::from(u16::from_be_bytes([w[3][k], w[3][k + 1]]))],
+                ];
+                *x = step4(simd, *x, &e, bits, &mut local);
+            }
+        }
+    }
+    // The first positions, the stretch starts among them.
+    for i in (0..i).rev() {
+        let mut j = 4 * M;
+        for x in xs.iter_mut().rev() {
             j -= 4;
             let mut e = [0 as Enc; 4];
             for (l, e) in e.iter_mut().enumerate() {
@@ -395,9 +457,11 @@ fn code_o1<S: Simd, const N: usize>(
                 let ctx = if i == 0 { 0 } else { data[p - 1] };
                 *e = enc_table[usize::from(u16::from_be_bytes([ctx, data[p]]))];
             }
-            step4(simd, u32x4::from_slice(simd, xs), &e, bits, words).store_slice(xs);
+            *x = step4(simd, *x, &e, bits, &mut local);
         }
     }
+    store_states(&xs, states);
+    words.at = local.at;
 }
 
 /// The states, then the words, already in decode order.
