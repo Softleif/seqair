@@ -371,14 +371,20 @@ impl VcfHeader {
         self.version
     }
 
+    /// The INFO definitions by ID, in header line order (not
+    /// dictionary order: see [`Self::string_map`]).
     pub fn infos(&self) -> &IndexMap<SmolStr, InfoDef> {
         &self.infos
     }
 
+    /// The FORMAT definitions by ID, in header line order (not
+    /// dictionary order: see [`Self::string_map`]).
     pub fn formats(&self) -> &IndexMap<SmolStr, FormatDef> {
         &self.formats
     }
 
+    /// The FILTER definitions by ID, in header line order (not
+    /// dictionary order: see [`Self::string_map`]).
     pub fn filters(&self) -> &IndexMap<SmolStr, FilterDef> {
         &self.filters
     }
