@@ -269,7 +269,7 @@ impl<W: Write> CramWriter<W> {
         mut fasta: IndexedFastaReader,
         options: Options,
     ) -> Result<Self, CramWriteError> {
-        let header = CramHeader::new(header, &mut fasta)?;
+        let (header, hashed) = CramHeader::new(header, &mut fasta)?;
         let mut out = Counting { inner, written: 0 };
         let metrics = Arc::new(Metrics::new(options.exhaustive_codec_search));
         let mut codecs =
@@ -288,7 +288,7 @@ impl<W: Write> CramWriter<W> {
             out,
             header,
             fasta,
-            reference: None,
+            reference: hashed,
             slice: SliceBuilder::default(),
             last: None,
             record_counter: 0,
@@ -433,6 +433,11 @@ impl<W: Write> CramWriter<W> {
             return Ok(());
         }
         let mut bases = self.reference.take().map(|(_, b)| b).unwrap_or_default();
+        // Not a chr1-sized buffer for a small contig for the rest of the file.
+        let len = usize::try_from(self.header.target_len(tid)).unwrap_or(usize::MAX);
+        if bases.capacity() / 2 > len {
+            bases = Vec::new();
+        }
         let result = self.header.fetch(tid, &mut self.fasta, &mut bases);
         result?;
         self.reference = Some((tid, bases));

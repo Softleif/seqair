@@ -213,6 +213,37 @@ fn the_header_names_the_reference_it_was_written_against() {
     assert!(matches!(err, CramWriteError::ReferenceMd5Mismatch { .. }), "{err:?}");
 }
 
+// r[verify cram_writer.header_m5.reuse]
+/// The bases `build()` hashed serve the first slice: a FASTA changed on disk
+/// after `build()` (same layout, other bases) does not reach the file, which
+/// decodes, MD5s checked, against the original.
+#[test]
+fn the_first_slice_uses_the_bases_build_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = writer(dir.path(), &header(""));
+    let path = dir.path().join("ref.fa");
+    let original = std::fs::read(&path).unwrap();
+    let mut changed = original.clone();
+    for b in changed.iter_mut().skip(4).filter(|b| b.is_ascii_alphabetic()) {
+        *b = b'C';
+    }
+    // In place, so the writer's open handle sees it.
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap().write_all(&changed).unwrap();
+    let records = [mapped(0, b"a", b"ACGTACGTTT"), mapped(24, b"b", b"ACGTACGA")];
+    for r in &records {
+        w.write(r).unwrap();
+    }
+    let (cram, _) = w.finish().unwrap();
+    std::fs::write(&path, original).unwrap();
+    let back = read_back(dir.path(), &cram);
+    assert_eq!(back.len(), records.len());
+    for (r, b) in records.iter().zip(&back) {
+        let mut seq = Vec::new();
+        b.iupac_bases_into(&mut seq);
+        assert_eq!(seq, r.seq);
+    }
+}
+
 // r[verify cram_writer.md_nm]
 /// A correct `MD`/`NM` is dropped and regenerated; a wrong one is kept.
 #[test]
@@ -251,4 +282,35 @@ fn an_unmapped_record_loses_its_cigar_and_mapq() {
     assert!(records[0].cigar().is_empty());
     assert_eq!(records[0].pos(), Pos0::new(5));
     assert_eq!(records[0].seq_len(), 4);
+}
+
+// r[verify cram_writer.header_m5]
+/// Every reference's `M5` is the MD5 of its uppercased bases, the first
+/// one's hashed whole and the others' a chunk at a time.
+#[test]
+fn every_reference_gets_its_md5() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two.fa");
+    let second = b"ttGACCAGTnacgTAGGGCATTACGAAAC";
+    let mut text = format!(">c0\n{}\n>c1\n", std::str::from_utf8(BASES).unwrap()).into_bytes();
+    text.extend_from_slice(second);
+    text.push(b'\n');
+    std::fs::write(&path, &text).unwrap();
+    let (n0, n1) = (BASES.len(), second.len());
+    let fai =
+        format!("c0\t{n0}\t4\t{n0}\t{}\nc1\t{n1}\t{}\t{n1}\t{}\n", n0 + 1, 4 + n0 + 1 + 4, n1 + 1);
+    std::fs::write(dir.path().join("two.fa.fai"), fai).unwrap();
+    let header =
+        BamHeader::from_sam_text(&format!("@SQ\tSN:c0\tLN:{n0}\n@SQ\tSN:c1\tLN:{n1}\n")).unwrap();
+    let reference = IndexedFastaReader::open(&path).unwrap();
+    let (cram, _) = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
+        .build()
+        .unwrap()
+        .finish()
+        .unwrap();
+    let text = CramStreamReader::new(&cram[..]).unwrap().into_header().header_text().to_owned();
+    for bases in [BASES, &second[..]] {
+        let m5 = format!("{:x}", md5::compute(bases.to_ascii_uppercase()));
+        assert!(text.contains(&format!("M5:{m5}")), "{text}");
+    }
 }
