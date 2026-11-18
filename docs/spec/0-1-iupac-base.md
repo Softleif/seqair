@@ -36,6 +36,9 @@ The kernels MUST fill `IupacBase` storage through the one reinterpretation `as_c
 r[types.iupac_base.simd]
 Each bulk conversion MUST be one native-width SIMD kernel (`r[io.simd_portable]`): `to_ascii_into` and `complement_in_place` one byte shuffle (`swizzle_dyn_within_blocks`) against a 16-entry table per vector, `reverse_complement_in_place` the same shuffle on vectors taken from both ends and reversed, and `from_ascii_into` three shuffles on the byte's low nibble, one per high nibble that holds a code (`0x3_` the digits and `=`, `0x4_`/`0x6_` and `0x5_`/`0x7_` the letters in either case), the one to keep chosen by the high nibble and every other byte `N`. These tables MUST be derived from `CODE_OF_ASCII`, `ASCII` and `complement()`, so the scalar functions stay the reference. At every SIMD level, the scalar `Fallback` included, every kernel MUST equal the element-wise scalar function for every input, which tests MUST check over all 256 bytes and random lengths and offsets.
 
+r[types.iupac_base.ascii_prefix]
+`ascii_prefix_len(&[IupacBase], &[u8]) -> usize` MUST return how many leading positions, up to the shorter of the two lengths, hold a base whose `to_ascii()` is the byte there (an exact compare: a lower-case byte never matches), which is how the CRAM writer finds a read's next mismatch against the reference. It MUST be one SIMD kernel (`r[io.simd_portable]`): per vector, the `to_ascii_into` shuffle, a byte compare, and the first unequal lane taken from the compare's bitmask; the tail shorter than a vector, scalar. At every SIMD level it MUST equal the scalar loop, which tests MUST check with mismatches drawn at every offset.
+
 ## Conversions
 
 r[types.iupac_base.complement]
