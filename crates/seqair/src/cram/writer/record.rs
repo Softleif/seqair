@@ -78,6 +78,38 @@ pub(super) struct Checked {
 struct Tag<'a> {
     head: [u8; 3],
     value: &'a [u8],
+    /// A `Z` or `H` value holds a TAB (before its NUL).
+    tab: bool,
+}
+
+/// A `Z`/`H` value's length up to its NUL (`None` without one) and whether
+/// a TAB comes before it, eight bytes at a time: one pass where finding the
+/// NUL and then checking for a TAB took two.
+#[allow(clippy::arithmetic_side_effects, reason = "SWAR on u64 lanes; i + 8 ≤ len")]
+#[allow(clippy::cast_possible_truncation, reason = "trailing_zeros / 8 < 8")]
+fn string_value(rest: &[u8]) -> (Option<usize>, bool) {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // The lowest set bit marks the first zero byte exactly; higher ones
+    // may be false positives, only above a true zero.
+    let zeros = |w: u64| w.wrapping_sub(LOW) & !w & HIGH;
+    let mut tab = false;
+    let (words, tail) = rest.as_chunks::<8>();
+    for (k, word) in words.iter().enumerate() {
+        let w = u64::from_le_bytes(*word);
+        let (nul, tabs) = (zeros(w), zeros(w ^ (LOW * u64::from(b'\t'))));
+        if nul != 0 {
+            // A TAB marker below the NUL's is a true TAB.
+            let below = nul.isolate_lowest_one() - 1;
+            return (Some(k * 8 + (nul.trailing_zeros() / 8) as usize), tab || tabs & below != 0);
+        }
+        tab |= tabs != 0;
+    }
+    let start = words.len() * 8;
+    match tail.iter().position(|&b| b == 0) {
+        Some(i) => (Some(start + i), tab || tail.get(..i).is_some_and(|t| t.contains(&b'\t'))),
+        None => (None, tab || tail.contains(&b'\t')),
+    }
 }
 
 /// The tags of `aux`, which [`check`] has validated.
@@ -86,12 +118,19 @@ fn tags(aux: &[u8]) -> impl Iterator<Item = Result<Tag<'_>, CramWriteError>> {
     std::iter::from_fn(move || {
         let head: [u8; 3] = aux.get(pos..pos.checked_add(3)?)?.try_into().ok()?;
         let start = pos.saturating_add(3);
-        let Some(end) = advance_past_value(aux, start, head[2]).filter(|&e| e <= aux.len()) else {
+        let (end, tab) = match head[2] {
+            b'Z' | b'H' => match string_value(aux.get(start..).unwrap_or_default()) {
+                (Some(len), tab) => (Some(start.saturating_add(len).saturating_add(1)), tab),
+                (None, _) => (None, false),
+            },
+            ty => (advance_past_value(aux, start, ty), false),
+        };
+        let Some(end) = end.filter(|&e| e <= aux.len()) else {
             pos = aux.len();
             return Some(Err(CramWriteError::InvalidAux));
         };
         pos = end;
-        Some(Ok(Tag { head, value: aux.get(start..end).unwrap_or_default() }))
+        Some(Ok(Tag { head, value: aux.get(start..end).unwrap_or_default(), tab }))
     })
 }
 
@@ -179,7 +218,7 @@ pub(super) fn check(
 
     let (mut has_md, mut has_nm) = (false, false);
     for tag in tags(view.aux) {
-        let Tag { head: [a, b, ty], value } = tag?;
+        let Tag { head: [a, b, ty], tab, .. } = tag?;
         let name = AuxTag([a, b]);
         // The tag dictionary is NUL-separated; SAM allows no other names.
         if !a.is_ascii_alphabetic() || !b.is_ascii_alphanumeric() {
@@ -187,7 +226,7 @@ pub(super) fn check(
         }
         match ty {
             b'A' | b'c' | b'C' | b's' | b'S' | b'i' | b'I' | b'f' | b'B' => {}
-            b'Z' | b'H' if value.contains(&b'\t') => {
+            b'Z' | b'H' if tab => {
                 return Err(CramWriteError::TabInStringTag { tag: name });
             }
             b'Z' | b'H' => {}
@@ -626,4 +665,37 @@ fn substitution(ref_base: u8, read: IupacBase) -> Option<(u8, u8)> {
     let bases = SubstitutionMatrix::READ_BASES.get(usize::from(row))?;
     let alt = bases.iter().position(|&b| b == read.to_ascii())?;
     Some((row, u8::try_from(alt).ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, reason = "test code")]
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    // r[verify cram_writer.tags]
+    /// The SWAR scan finds the first NUL and a TAB before it as a byte loop
+    /// does, wherever they fall in or across the eight-byte words.
+    #[hegel::test]
+    fn string_values_end_at_the_first_nul(tc: TestCase) {
+        let len = tc.draw(gs::integers::<usize>().max_value(40));
+        // Mostly letters; NULs, TABs and high bytes where drawn.
+        let bytes: Vec<u8> = (0..len)
+            .map(|_| match tc.draw(gs::integers::<u8>().max_value(9)) {
+                0 => 0,
+                1 => b'\t',
+                2 => tc.draw(gs::integers::<u8>()),
+                _ => b'A' + tc.draw(gs::integers::<u8>().max_value(25)),
+            })
+            .collect();
+        let nul = bytes.iter().position(|&b| b == 0);
+        let tab = bytes[..nul.unwrap_or(bytes.len())].contains(&b'\t');
+        let (got_nul, got_tab) = string_value(&bytes);
+        assert_eq!(got_nul, nul, "{bytes:?}");
+        // Without a NUL the value is refused whatever the TAB says.
+        if nul.is_some() {
+            assert_eq!(got_tab, tab, "{bytes:?}");
+        }
+    }
 }
