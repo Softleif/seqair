@@ -1799,6 +1799,11 @@ impl MdNm {
     pub(crate) fn matches(&mut self, reference: Option<&[u8]>, n: usize) {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
         match reference {
+            // Most runs hold no `N`: one `memchr` instead of a branch a base.
+            Some(bases) if !bases.contains(&b'N') => {
+                let len = i64::try_from(bases.len()).unwrap_or(i64::MAX);
+                self.dist = self.dist.saturating_add(len);
+            }
             Some(bases) => {
                 let mut run = 0i64;
                 for &b in bases {
