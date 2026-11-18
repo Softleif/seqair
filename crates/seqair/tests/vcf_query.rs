@@ -1,7 +1,7 @@
 //! Region queries and partitions (`docs/spec/2-vcf-1-reader.md`, "Regions",
 //! "Region queries", "Partitions") against a sequential read filtered in
 //! the test and against `bcftools view -r`/`-t`, on files seqair's writer
-//! makes (VCF.gz with seqair's CSI, bcftools' CSI or TBI; BCF with CSI) and
+//! makes (VCF.gz with seqair's or bcftools' CSI or TBI; BCF with CSI) and
 //! on the fixtures.
 #![allow(
     clippy::unwrap_used,
@@ -20,9 +20,9 @@ mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::reader::ReadOption;
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, Info, InfoFieldDef, InfoInt, InfoString, Locus, Match, Number,
-    OutputFormat, Partition, PlanError, Region, Scalar, Site, Str, VcfFile, VcfHeader, VcfPos,
-    VcfReadError, Writer,
+    Alleles, ContigDef, ContigId, IndexKind, Info, InfoFieldDef, InfoInt, InfoString, Locus, Match,
+    Number, OutputFormat, Partition, PlanError, Region, Scalar, Site, Str, VcfFile, VcfHeader,
+    VcfPos, VcfReadError, Writer,
 };
 use seqair_types::{Pos0, Pos1, SmolStr};
 use std::num::NonZeroUsize;
@@ -61,6 +61,8 @@ const CONTIG_LEN: u32 = 1_000_000;
 enum Indexer {
     /// The writer's co-produced CSI.
     Seqair,
+    /// The writer's co-produced TBI (`.vcf.gz` only).
+    SeqairTbi,
     BcftoolsCsi,
     BcftoolsTbi,
 }
@@ -117,7 +119,8 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
     let header = b.build().unwrap();
 
     let mut out = Vec::new();
-    let mut w = Writer::new(&mut out, format).write_header(&header).unwrap();
+    let kind = if indexer == Indexer::SeqairTbi { IndexKind::Tbi } else { IndexKind::Csi };
+    let mut w = Writer::new(&mut out, format).index_kind(kind).write_header(&header).unwrap();
     for (i, r) in recs.iter().enumerate() {
         let reference: String = "ACGTAC"[..r.ref_len].to_owned();
         let alt = if r.end.is_some() { "<DEL>" } else { "T" };
@@ -140,8 +143,9 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
     std::fs::write(&path, &out).unwrap();
     let p = path.to_str().unwrap();
     match indexer {
-        Indexer::Seqair => {
-            index.unwrap().write_to_path(format!("{p}.csi")).unwrap();
+        Indexer::Seqair | Indexer::SeqairTbi => {
+            let index = index.unwrap();
+            index.write_to_path(format!("{p}.{}", index.suffix())).unwrap();
         }
         Indexer::BcftoolsCsi => {
             bcftools(bin, &["index", "-c", p]);
@@ -250,12 +254,11 @@ fn generated_file(tc: &TestCase) -> (Vec<Rec>, OutputFormat, Indexer) {
     let format = tc.draw(gs::sampled_from(vec![OutputFormat::VcfGz, OutputFormat::Bcf]));
     let indexers = match format {
         OutputFormat::Bcf => vec![Indexer::Seqair, Indexer::BcftoolsCsi],
-        _ => vec![Indexer::Seqair, Indexer::BcftoolsCsi, Indexer::BcftoolsTbi],
+        _ => vec![Indexer::Seqair, Indexer::SeqairTbi, Indexer::BcftoolsCsi, Indexer::BcftoolsTbi],
     };
     let indexer = tc.draw(gs::sampled_from(indexers));
-    // The writer's own index spans REF only (an INFO END is not yet in its
-    // rlen), so only bcftools-indexed files carry END.
-    let recs = tc.draw(records(indexer != Indexer::Seqair));
+    // Every index, the writer's own included, spans INFO END.
+    let recs = tc.draw(records(true));
     (recs, format, indexer)
 }
 
