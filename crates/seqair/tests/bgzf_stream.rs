@@ -627,3 +627,35 @@ fn with_threads<R: std::io::Read>(
         None => builder,
     }
 }
+
+// r[verify bgzf.stream.virtual_offset]
+/// At any point of a stream, `virtual_offset()` is where the seekable reader,
+/// seeked there, reads the rest of the stream from: an independent decoding
+/// of the same offsets, whatever the block layout and thread count.
+#[hegel::test(test_cases = pinned::cases(100))]
+fn virtual_offsets_seek_the_reader_to_the_same_byte(tc: TestCase) {
+    let layout = tc.draw(layout(12, 3000));
+    let (bytes, _) = layout.encode();
+    let expected = layout.data();
+    let threads = tc.draw(gs::integers::<usize>().max_value(3));
+    let mut stream = with_threads(BgzfStream::builder(Cursor::new(&bytes[..])), threads)
+        .eof_marker(EofMarker::Optional)
+        .build();
+    let mut read = 0usize;
+    loop {
+        let available = stream.fill().unwrap().len();
+        if available == 0 {
+            break;
+        }
+        let voff = stream.virtual_offset().expect("an offset inside a batch");
+        let mut reader = BgzfReader::from_reader(Cursor::new(bytes.clone()));
+        reader.seek_virtual(voff).unwrap();
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert!(rest == expected[read..], "at byte {read}, {voff:?}");
+        let step = tc.draw(gs::integers::<usize>().min_value(1).max_value(5000)).min(available);
+        stream.advance(step);
+        read += step;
+    }
+    assert_eq!(read, expected.len());
+}

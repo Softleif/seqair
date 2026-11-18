@@ -74,6 +74,9 @@ A stream whose input ends at a block boundary without an empty block immediately
 r[bgzf.stream.api]
 `BgzfStream` MUST offer typed reads that return `BgzfError` — `read_exact_into` (`UnexpectedEof` if the stream ends first), `read_up_to` (0 only at the end), and `fill`/`advance` over the current batch of blocks — and MUST also implement `io::Read` and `io::BufRead`, wrapping a `BgzfError` in an `io::Error` of kind `InvalidData` (the `BgzfError` is the error's source, recoverable by downcast).
 
+r[bgzf.stream.virtual_offset]
+`BgzfStream::virtual_offset()` MUST return the virtual offset (`r[bgzf.virtual_offset]`) of the next byte `fill` returns, so a streaming reader can name where a record starts (in errors, or to seek there later with `BgzfReader`). It counts compressed bytes from where the input started, offset by the start a caller that seeked into a file gives the builder. At the end of a batch it names the frame after the batch's last block.
+
 r[bgzf.stream.poison]
 After any error, every later read MUST fail with `BgzfError::Poisoned`. Returning `Ok(0)` after an error would let a caller that retries (as `io::Read` callers may) mistake a failed stream for a finished one.
 

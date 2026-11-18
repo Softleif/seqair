@@ -1,7 +1,7 @@
 //! Front-to-back BGZF decoding from any [`Read`], with optional read-ahead
 //! inflation on worker threads. See `r[bgzf.stream]`.
 
-use super::{BgzfError, DataBlock, Frame, inflate_into, read_frame, resize_uninit};
+use super::{BgzfError, DataBlock, Frame, VirtualOffset, inflate_into, read_frame, resize_uninit};
 use rayon_core::ThreadPool;
 use std::{
     cell::RefCell,
@@ -41,6 +41,7 @@ pub struct BgzfStreamBuilder<R> {
     inner: R,
     workers: Workers,
     eof_marker: EofMarker,
+    start: u64,
 }
 
 /// Where a stream's batches are inflated.
@@ -96,7 +97,9 @@ impl<R: Read> BgzfStreamBuilder<R> {
             None => (None, 1),
             Some((pool, n)) => (Some(pool), n.saturating_mul(BATCHES_PER_THREAD)),
         };
-        BgzfStream::with(self.inner, self.eof_marker, pool, depth)
+        let mut stream = BgzfStream::with(self.inner, self.eof_marker, pool, depth);
+        stream.consumed = self.start;
+        stream
     }
 }
 
@@ -135,6 +138,35 @@ struct Inflated {
 enum Pending {
     Ready(Batch),
     Waiting(mpsc::Receiver<Inflated>),
+}
+
+/// A batch on its way to the reader, with where its blocks start.
+struct Queued {
+    batch: Pending,
+    starts: Vec<BlockStart>,
+}
+
+/// Where a block starts: its offset in the compressed input, and the offset of
+/// its first byte in its batch's output. A batch's list ends with an entry for
+/// the input offset after its last block, at the batch's length.
+#[derive(Debug, Clone, Copy)]
+struct BlockStart {
+    input: u64,
+    output: usize,
+}
+
+/// `inner`, counting the bytes read from it into `count`.
+struct Counting<'a, R> {
+    inner: &'a mut R,
+    count: &'a mut u64,
+}
+
+impl<R: Read> Read for Counting<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        *self.count = self.count.saturating_add(n as u64);
+        Ok(n)
+    }
 }
 
 impl Workers {
@@ -291,8 +323,12 @@ pub struct BgzfStream<R> {
     /// Decompressed bytes of the batch being read, and the position in it.
     current: Vec<u8>,
     pos: usize,
+    /// Where the blocks of `current` start (`BlockStart`'s list).
+    starts: Vec<BlockStart>,
+    /// Bytes of compressed input read so far, plus the builder's start offset.
+    consumed: u64,
     /// Batches read from the input but not yet returned, in stream order.
-    pending: VecDeque<Pending>,
+    pending: VecDeque<Queued>,
     /// Most batches `pending` may hold.
     depth: usize,
     input: Input,
@@ -342,6 +378,8 @@ impl<R: Read> BgzfStream<R> {
             inner,
             current: Vec::new(),
             pos: 0,
+            starts: Vec::new(),
+            consumed: 0,
             pending: VecDeque::new(),
             depth,
             input: Input::Open { last_was_empty: false },
@@ -358,7 +396,12 @@ impl<R: Read> BgzfStream<R> {
 
     /// Configure threads (or a shared pool) and EOF-marker handling.
     pub fn builder(inner: R) -> BgzfStreamBuilder<R> {
-        BgzfStreamBuilder { inner, workers: Workers::Inline, eof_marker: EofMarker::Required }
+        BgzfStreamBuilder {
+            inner,
+            workers: Workers::Inline,
+            eof_marker: EofMarker::Required,
+            start: 0,
+        }
     }
 
     // r[impl bgzf.stream.api]
@@ -412,6 +455,17 @@ impl<R: Read> BgzfStream<R> {
         Ok(())
     }
 
+    // r[impl bgzf.stream.virtual_offset]
+    /// The virtual offset of the next byte [`Self::fill`] returns, once it has
+    /// returned bytes of the current batch: `None` before the first fill, after
+    /// an error, and where the offset within a block would not fit 16 bits.
+    pub fn virtual_offset(&self) -> Option<VirtualOffset> {
+        let i = self.starts.partition_point(|s| s.output <= self.pos).checked_sub(1)?;
+        let start = self.starts.get(i)?;
+        let within = u16::try_from(self.pos.checked_sub(start.output)?).ok()?;
+        Some(VirtualOffset::new(start.input, within))
+    }
+
     /// Whether the stream has ended cleanly: everything was read and the
     /// input's end was accepted. Does not read.
     pub fn is_finished(&self) -> bool {
@@ -433,6 +487,7 @@ impl<R: Read> BgzfStream<R> {
             self.deferred = None;
             self.pending.clear();
             self.current.clear();
+            self.starts.clear();
             self.pos = 0;
         }
         result
@@ -444,7 +499,9 @@ impl<R: Read> BgzfStream<R> {
                 return Err(e);
             }
             self.top_up();
-            let Some(next) = self.pending.pop_front() else { return Ok(false) };
+            let Some(Queued { batch: next, starts }) = self.pending.pop_front() else {
+                return Ok(false);
+            };
             let Batch { bytes, error } = match next {
                 Pending::Ready(batch) => batch,
                 Pending::Waiting(reply) => {
@@ -458,6 +515,7 @@ impl<R: Read> BgzfStream<R> {
             let done = std::mem::replace(&mut self.current, bytes);
             self.recycle(done);
             self.pos = 0;
+            self.starts = starts;
             if !self.current.is_empty() {
                 return Ok(true);
             }
@@ -495,10 +553,16 @@ impl<R: Read> BgzfStream<R> {
             let size = if self.batches == 0 { 1 } else { BLOCKS_PER_BATCH };
             self.batches = self.batches.saturating_add(1);
             let mut blocks = Vec::with_capacity(size);
+            let mut starts = Vec::with_capacity(size.saturating_add(1));
+            let mut output = 0usize;
             let mut tail = None;
             while blocks.len() < size {
-                match read_frame(&mut self.inner, &mut compressed, &mut self.decompressor) {
+                let input = self.consumed;
+                let mut counting = Counting { inner: &mut self.inner, count: &mut self.consumed };
+                match read_frame(&mut counting, &mut compressed, &mut self.decompressor) {
                     Ok(Frame::Data(block)) => {
+                        starts.push(BlockStart { input, output });
+                        output = output.saturating_add(block.isize());
                         blocks.push(block);
                         last_was_empty = false;
                     }
@@ -521,11 +585,13 @@ impl<R: Read> BgzfStream<R> {
                 self.input = Input::Open { last_was_empty };
             }
             if !blocks.is_empty() {
+                starts.push(BlockStart { input: self.consumed, output });
                 let batch = self.dispatch(compressed, blocks);
-                self.pending.push_back(batch);
+                self.pending.push_back(Queued { batch, starts });
             }
             if let Some(e) = tail {
-                self.pending.push_back(Pending::Ready(Batch::failed(e)));
+                let batch = Pending::Ready(Batch::failed(e));
+                self.pending.push_back(Queued { batch, starts: Vec::new() });
             }
         }
     }
