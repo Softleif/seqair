@@ -296,12 +296,15 @@ pub(super) fn encode(
     let regenerates = !unmapped && !seq_unknown && reference.is_some();
     // seqair's decode writes a reference byte that is no IUPAC code into
     // `MD` as `N`, htslib's as it is: only drop what both regenerate.
-    let iupac_reference = reference.is_some_and(|r| {
-        let from = view.pos.map_or(0, Pos0::as_usize);
-        let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.end());
-        r.range(from, to).unwrap_or_default().iter().all(|b| IupacBase::ASCII.contains(b))
-    });
-    let track = regenerates && iupac_reference && (checked.has_md || checked.has_nm);
+    let iupac_reference = || {
+        reference.is_some_and(|r| {
+            let from = view.pos.map_or(0, Pos0::as_usize);
+            let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.end());
+            let span = r.range(from, to).unwrap_or_default();
+            span.iter().all(|&b| IS_IUPAC.get(usize::from(b)).copied().unwrap_or(false))
+        })
+    };
+    let track = regenerates && (checked.has_md || checked.has_nm) && iupac_reference();
     let md = &mut scratch.md;
     md.start();
     let mut deletion_past_end = false;
@@ -514,13 +517,24 @@ impl Features<'_, '_> {
             return;
         };
         let mut run_start = refpos;
-        for i in 0..len {
+        let (read_end, ref_end) = (read.saturating_add(len), refpos.saturating_add(len));
+        let mut i = 0;
+        while i < len {
+            // The run of matches up to the next mismatch, a vector at a time:
+            // the same letter, as htslib compares them (a reference letter
+            // that is no IUPAC code, or `U`, reads as `N` but is no match).
+            let seq = view.seq.get(read.saturating_add(i)..read_end).unwrap_or_default();
+            let g = refpos.saturating_add(i);
+            let refs = reference.range(g, ref_end.min(reference.end())).unwrap_or_default();
+            i = i.saturating_add(IupacBase::ascii_prefix_len(seq, refs));
+            if i >= len {
+                break;
+            }
             let g = refpos.saturating_add(i);
             let r = read.saturating_add(i);
+            i = i.saturating_add(1);
             let base = view.seq.get(r).copied().unwrap_or(IupacBase::N);
             let ref_base = reference.get(g);
-            // The same letter, as htslib compares them: a reference letter
-            // that is no IUPAC code (or `U`) reads as `N` but is no match.
             if ref_base == Some(base.to_ascii()) {
                 continue;
             }
@@ -559,6 +573,21 @@ impl Features<'_, '_> {
         }
     }
 }
+
+/// Whether a byte is an upper-case IUPAC code, as a table: the check runs
+/// on every reference base a record spans.
+const IS_IUPAC: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0;
+    while i < IupacBase::ASCII.len() {
+        #[allow(clippy::indexing_slicing, reason = "const: i < 16, a u8 indexes 256")]
+        {
+            table[IupacBase::ASCII[i] as usize] = true;
+        }
+        i += 1;
+    }
+    table
+};
 
 /// The matrix row of reference base `ref_base` (`ACGTN`), and the index of
 /// `read` among that row's other bases in `ACGTN` order: `None` where a `B`
