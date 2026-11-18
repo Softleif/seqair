@@ -546,13 +546,16 @@ mod tests {
     use crate::cram::rans::decode;
     use hegel::prelude::*;
 
-    /// A block: bytes of an alphabet of 1 to 256 symbols, uniform or in
-    /// runs (repeated pairs, which the fast counts split four ways), of any
-    /// length, the short ones below 4 included.
+    /// A block: bytes of an alphabet of 1 to 256 symbols, uniform, in runs
+    /// (repeated pairs, which the fast counts split eight ways), or skewed
+    /// (one symbol and, one byte in 512, others: frequencies of 1 against
+    /// one near 4095, so states climb high enough to emit two bytes), of
+    /// any length, the short ones below 4 included.
     #[hegel::composite]
     fn arb_block(tc: &TestCase) -> Vec<u8> {
         let alphabet: u32 = tc.draw(gs::integers::<u32>().min_value(1).max_value(256));
-        let max_run: u32 = tc.draw(gs::sampled_from(&[1, 4, 64]));
+        // 0: skewed.
+        let max_run: u32 = tc.draw(gs::sampled_from(&[0, 1, 4, 64]));
         let len: usize = tc.draw(gs::integers::<usize>().max_value(20_000));
         let mut x = tc.draw(gs::integers::<u64>()) | 1;
         let mut next = || {
@@ -562,6 +565,16 @@ mod tests {
             x
         };
         let mut data = Vec::with_capacity(len);
+        if max_run == 0 {
+            #[allow(clippy::cast_possible_truncation, reason = "below alphabet ≤ 256")]
+            let symbol = |r: u64| (r % u64::from(alphabet)) as u8;
+            let dominant = symbol(next());
+            data.extend((0..len).map(|_| {
+                let r = next();
+                if r % 512 == 0 { symbol(r >> 16) } else { dominant }
+            }));
+            return data;
+        }
         while data.len() < len {
             let r = next();
             #[allow(clippy::cast_possible_truncation, reason = "below alphabet ≤ 256")]
@@ -685,21 +698,59 @@ mod tests {
     }
 
     #[test]
+    // r[verify cram_writer.rans4x8.simd]
+    /// Edge inputs round-trip, and the fast path writes the reference's
+    /// bytes for them at every SIMD level.
     fn edge_inputs_round_trip() {
-        let inputs: [&[u8]; 6] =
-            [b"", b"a", b"abcd", b"abcde", &[0; 1000], &[255, 0, 255, 0, 1, 254, 254, 254, 254]];
+        let every_byte: Vec<u8> = (0..=255).cycle().take(10_000).collect();
+        // One symbol at frequency 1 among 20 000 of another.
+        let mut rare = vec![b'A'; 20_000];
+        rare[19_999] = b'B';
+        rare[7] = b'C';
+        let inputs: [&[u8]; 8] = [
+            b"",
+            b"a",
+            b"abcd",
+            b"abcde",
+            &[0; 1000],
+            &[255, 0, 255, 0, 1, 254, 254, 254, 254],
+            &every_byte,
+            &rare,
+        ];
         for data in inputs {
             for order in [Order::Zero, Order::One] {
-                if let Some(encoded) = encode(data, order) {
-                    assert_eq!(decode(&encoded).unwrap(), data, "{order:?} {data:?}");
+                let reference = encode_with(data, order, Coder::Reference);
+                if let Some(encoded) = &reference {
+                    assert_eq!(decode(encoded).unwrap(), data, "{order:?} {data:?}");
+                }
+                for level in crate::simd_levels::levels() {
+                    let fast = encode_with(data, order, Coder::Fast(level));
+                    assert!(fast == reference, "{order:?} {level:?} of {} bytes", data.len());
                 }
             }
         }
-        let every_byte: Vec<u8> = (0..=255).cycle().take(10_000).collect();
         for order in [Order::Zero, Order::One] {
-            let encoded = encode(&every_byte, order).unwrap();
-            assert_eq!(decode(&encoded).unwrap(), every_byte);
+            assert!(encode(&every_byte, order).is_some());
         }
+    }
+
+    /// A scratch already in use hands out a fresh one rather than
+    /// panicking, and a word buffer past the cap is not kept. (The other
+    /// fallback, a thread-local being destroyed, takes the same path.)
+    #[test]
+    fn scratch_in_use_or_too_large_is_not_kept() {
+        let nested = with_scratch(&WORDS, |outer| {
+            outer.resize(MAX_KEPT_WORDS + 1, 0);
+            with_scratch(&WORDS, |inner: &mut Vec<u8>| Some(inner.capacity()))
+        });
+        assert_eq!(nested, Some(0), "the nested call gets a fresh buffer");
+        assert_eq!(WORDS.with_borrow(Vec::capacity), 0, "an oversized buffer is dropped");
+        // An encode while the order-1 scratch is held still writes the
+        // reference bytes, on a fresh scratch.
+        let data: Vec<u8> = (0..5000u32).map(|i| u8::try_from(i % 7).unwrap()).collect();
+        let reference = encode_with(&data, Order::One, Coder::Reference);
+        let nested = with_scratch(&ORDER_1, |_| Some(encode(&data, Order::One)));
+        assert!(nested == Some(reference));
     }
 
     #[test]
