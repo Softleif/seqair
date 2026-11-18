@@ -296,6 +296,14 @@ pub(super) struct SliceBuilder {
     prev_ap: i64,
 }
 
+/// Whether a slice of `n_records` and `n_bases` holding at most
+/// `max_records` is full before a record of `read_len` bases.
+pub(super) fn is_full(n_records: u32, n_bases: u64, read_len: i32, max_records: u32) -> bool {
+    n_records >= max_records
+        || n_bases.saturating_add(u64::from(read_len.unsigned_abs()))
+            > MAX_BASES.max(u64::from(max_records).saturating_mul(BASES_PER_RECORD))
+}
+
 /// htslib's `seqs_per_slice` and `bases_per_slice` defaults.
 pub(super) const MAX_RECORDS: u32 = 10_000;
 /// htslib's archive profile's `seqs_per_slice`.
@@ -324,10 +332,7 @@ impl SliceBuilder {
     /// `read_len` bases, holding at most `max_records`.
     pub(super) fn ends_before(&self, kind: SliceKind, read_len: i32, max_records: u32) -> bool {
         self.kind.is_some_and(|k| {
-            k != kind
-                || self.n_records >= max_records
-                || self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()))
-                    > MAX_BASES.max(u64::from(max_records).saturating_mul(BASES_PER_RECORD))
+            k != kind || is_full(self.n_records, self.n_bases, read_len, max_records)
         })
     }
 
@@ -942,6 +947,11 @@ impl Drop for TrialGuard {
 const MIN_COMPRESSED: usize = 32;
 
 impl Codecs {
+    /// Codecs of the same level and version that learn with these.
+    pub(super) fn fork(&self) -> Self {
+        Self::new(self.level, self.version, Arc::clone(&self.metrics))
+    }
+
     pub(super) fn new(
         level: CompressionLevel,
         version: CramVersion,

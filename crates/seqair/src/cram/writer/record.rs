@@ -59,6 +59,7 @@ pub(super) struct Scratch {
 }
 
 /// What [`check`] found out about a record it accepts.
+#[derive(Debug, Clone)]
 pub(super) struct Checked {
     pub placement: Placement,
     /// `RL`.

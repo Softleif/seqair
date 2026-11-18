@@ -219,6 +219,39 @@ pub enum CramWriteError {
     NoSuchRecord { idx: RecordIdx },
 }
 
+/// Record `idx` of `store` as the writer reads it.
+fn store_view(store: &RecordStore, idx: RecordIdx) -> Option<RecordView<'_>> {
+    let rec = store.record(idx)?;
+    Some(RecordView {
+        tid: rec.tid,
+        pos: rec.tid.map(|_| rec.pos),
+        flags: rec.flags,
+        mapq: rec.mapq,
+        mate: rec.mate_fields,
+        qname: rec.qname(),
+        cigar: rec.cigar(),
+        seq: rec.seq(),
+        qual: qualities(rec.qual()),
+        aux: rec.aux(),
+    })
+}
+
+/// Encode the held records of `slice`, on `tid`, a reference the FASTA
+/// lacks, against a reference built from them where one can be.
+fn encode_held(slice: &mut SliceBuilder, tid: Tid, header: &CramHeader, scratch: &mut Scratch) {
+    let held = slice.take_held();
+    let (start, end) = embed::extent(&held, header.target_len(tid));
+    let embedded = embed::consensus(&held, start, end);
+    let kind = SliceKind::Mapped { tid, reference: false };
+    let reference = embedded.as_deref().map(|bases| SliceRef { bases, start, embedded: true });
+    for h in &held {
+        record::encode(slice, kind, &h.view(), &h.checked, reference, header, scratch);
+    }
+    if let Some(bases) = embedded {
+        slice.embed(bases);
+    }
+}
+
 /// A record's qualities, `None` when it has none: empty, or `0xFF` first,
 /// as [`RawBamRecord::qual`] reads them.
 fn qualities(qual: &[BaseQuality]) -> Option<&[u8]> {
@@ -245,10 +278,13 @@ impl<W: Write> Counting<W> {
 /// records, then [`finish`](Self::finish).
 pub struct CramWriter<W: Write> {
     out: Counting<W>,
-    header: CramHeader,
+    /// Shared with the threads `write_store` encodes slices on.
+    header: Arc<CramHeader>,
     fasta: IndexedFastaReader,
-    /// The uppercased bases of the reference the current slice is on.
-    reference: Option<(Tid, Vec<u8>)>,
+    /// The uppercased bases of the reference the current slice is on,
+    /// shared with the slices `write_store` encodes against them.
+    #[allow(clippy::rc_buffer, reason = "the buffer is reused once no slice holds it")]
+    reference: Option<(Tid, Arc<Vec<u8>>)>,
     slice: SliceBuilder,
     last: Option<Placement>,
     record_counter: u64,
@@ -261,6 +297,8 @@ pub struct CramWriter<W: Write> {
     /// Slices back from the pool, to fill again.
     spare: Vec<SliceBuilder>,
     records_per_slice: u32,
+    /// `compression_threads`: also the threads `write_store` encodes on.
+    threads: usize,
     /// The next slice holds several references (`r[cram_writer.multi_ref]`).
     multi_ref: bool,
     /// The slice before the current one held few records.
@@ -295,9 +333,9 @@ impl<W: Write> CramWriter<W> {
         out.write_all(&container::header_container(header.text(), &mut codecs)?)?;
         Ok(Self {
             out,
-            header,
+            header: Arc::new(header),
             fasta,
-            reference: hashed,
+            reference: hashed.map(|(tid, bases)| (tid, Arc::new(bases))),
             slice: SliceBuilder::default(),
             last: None,
             record_counter: 0,
@@ -312,6 +350,7 @@ impl<W: Write> CramWriter<W> {
                 CramVersion::V3_1(CramProfile::Archive) => container::ARCHIVE_RECORDS,
                 _ => container::MAX_RECORDS,
             }),
+            threads: options.threads,
             multi_ref: false,
             last_slice_small: false,
             warned_unmapped_alignment: false,
@@ -381,19 +420,7 @@ impl<W: Write> CramWriter<W> {
         store: &RecordStore,
         idx: RecordIdx,
     ) -> Result<(), CramWriteError> {
-        let rec = store.record(idx).ok_or(CramWriteError::NoSuchRecord { idx })?;
-        let view = RecordView {
-            tid: rec.tid,
-            pos: rec.tid.map(|_| rec.pos),
-            flags: rec.flags,
-            mapq: rec.mapq,
-            mate: rec.mate_fields,
-            qname: rec.qname(),
-            cigar: rec.cigar(),
-            seq: rec.seq(),
-            qual: qualities(rec.qual()),
-            aux: rec.aux(),
-        };
+        let view = store_view(store, idx).ok_or(CramWriteError::NoSuchRecord { idx })?;
         self.write_view(&view)
     }
 
@@ -409,6 +436,16 @@ impl<W: Write> CramWriter<W> {
             // The slice's end may have switched multi-reference slices on or off.
             kind = self.kind_of(view.tid);
         }
+        self.add(kind, view, checked)
+    }
+
+    /// Put a checked record in the current slice of `kind`.
+    fn add(
+        &mut self,
+        kind: SliceKind,
+        view: &RecordView<'_>,
+        checked: record::Checked,
+    ) -> Result<(), CramWriteError> {
         let (drops_alignment, placement) = (checked.drops_alignment, checked.placement);
         match kind {
             // r[impl cram_writer.embedded_reference]
@@ -419,6 +456,11 @@ impl<W: Write> CramWriter<W> {
             _ => self.encode(kind, view, &checked)?,
         }
         self.last = Some(placement);
+        self.warn_once(drops_alignment, view);
+        Ok(())
+    }
+
+    fn warn_once(&mut self, drops_alignment: bool, view: &RecordView<'_>) {
         if drops_alignment && !self.warned_unmapped_alignment {
             self.warned_unmapped_alignment = true;
             tracing::warn!(
@@ -427,7 +469,6 @@ impl<W: Write> CramWriter<W> {
                  with MAPQ 0 and no CIGAR (warned once per writer)"
             );
         }
-        Ok(())
     }
 
     /// The kind of slice a record on `tid` goes in.
@@ -458,7 +499,8 @@ impl<W: Write> CramWriter<W> {
         if let Some(tid) = tid {
             self.load_reference(tid)?;
         }
-        let reference = tid.and(self.reference.as_ref()).map(|(_, bases)| SliceRef::fasta(bases));
+        let reference =
+            tid.and(self.reference.as_ref()).map(|(_, bases)| SliceRef::fasta(bases.as_slice()));
         record::encode(
             &mut self.slice,
             kind,
@@ -474,25 +516,7 @@ impl<W: Write> CramWriter<W> {
     /// Encode the held records of a slice on a reference the FASTA lacks,
     /// against a reference built from them where one can be.
     fn encode_held(&mut self, tid: Tid) {
-        let held = self.slice.take_held();
-        let (start, end) = embed::extent(&held, self.header.target_len(tid));
-        let embedded = embed::consensus(&held, start, end);
-        let kind = SliceKind::Mapped { tid, reference: false };
-        let reference = embedded.as_deref().map(|bases| SliceRef { bases, start, embedded: true });
-        for h in &held {
-            record::encode(
-                &mut self.slice,
-                kind,
-                &h.view(),
-                &h.checked,
-                reference,
-                &self.header,
-                &mut self.scratch,
-            );
-        }
-        if let Some(bases) = embedded {
-            self.slice.embed(bases);
-        }
+        encode_held(&mut self.slice, tid, &self.header, &mut self.scratch);
     }
 
     /// Make `self.reference` the bases of `tid`, checking them against the
@@ -501,15 +525,16 @@ impl<W: Write> CramWriter<W> {
         if self.reference.as_ref().is_some_and(|(loaded, _)| *loaded == tid) {
             return Ok(());
         }
-        let mut bases = self.reference.take().map(|(_, b)| b).unwrap_or_default();
+        // The buffer is reused unless a slice `write_store` encodes holds it.
+        let mut bases =
+            self.reference.take().and_then(|(_, b)| Arc::try_unwrap(b).ok()).unwrap_or_default();
         // Not a chr1-sized buffer for a small contig for the rest of the file.
         let len = usize::try_from(self.header.target_len(tid)).unwrap_or(usize::MAX);
         if bases.capacity() / 2 > len {
             bases = Vec::new();
         }
-        let result = self.header.fetch(tid, &mut self.fasta, &mut bases);
-        result?;
-        self.reference = Some((tid, bases));
+        self.header.fetch(tid, &mut self.fasta, &mut bases)?;
+        self.reference = Some((tid, Arc::new(bases)));
         Ok(())
     }
 
@@ -520,17 +545,7 @@ impl<W: Write> CramWriter<W> {
         if let SliceKind::Mapped { tid, reference: false } = kind {
             self.encode_held(tid);
         }
-        // r[impl cram_writer.multi_ref]
-        // htslib's `cram_put_bam_seq`: two small slices in a row switch
-        // multi-reference slices on; one holding a single reference id off.
-        let n = self.slice.n_records();
-        let small = u64::from(n) + 8 < (u64::from(self.records_per_slice) + 8) / 4;
-        if kind == SliceKind::Multi {
-            self.multi_ref = self.slice.reference_runs() > 1;
-        } else if small && self.last_slice_small {
-            self.multi_ref = true;
-        }
-        self.last_slice_small = small;
+        self.slice_ends(kind, self.slice.n_records(), self.slice.reference_runs());
         let reference = match kind {
             SliceKind::Mapped { tid, reference: true } => self
                 .reference
@@ -559,6 +574,19 @@ impl<W: Write> CramWriter<W> {
             }
         }
         Ok(())
+    }
+
+    // r[impl cram_writer.multi_ref]
+    /// htslib's `cram_put_bam_seq`: two small slices in a row switch
+    /// multi-reference slices on; one holding a single reference id off.
+    fn slice_ends(&mut self, kind: SliceKind, n_records: u32, reference_runs: usize) {
+        let small = u64::from(n_records) + 8 < (u64::from(self.records_per_slice) + 8) / 4;
+        if kind == SliceKind::Multi {
+            self.multi_ref = reference_runs > 1;
+        } else if small && self.last_slice_small {
+            self.multi_ref = true;
+        }
+        self.last_slice_small = small;
     }
 
     /// Write the containers the pool has finished, in order; with `all`,
