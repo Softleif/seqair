@@ -1,12 +1,13 @@
 //! Vectorized byte scans: the next occurrence of a byte (a newline in a SAM
-//! block, a CRAM `BYTE_ARRAY_STOP` terminator), and the TAB-separated fields
-//! of a line.
+//! block, a CRAM `BYTE_ARRAY_STOP` terminator), the TAB-separated fields of a
+//! line, every occurrence of a separator, and the entries of a VCF INFO column.
 //!
-//! Both are written once over `fearless_simd` (`r[io.simd_portable]`) and
+//! All are written once over `fearless_simd` (`r[io.simd_portable]`) and
 //! compare one native-width vector per iteration. `find_byte` gates on
 //! `any_true` and builds a bitmask only for the vector that holds the hit;
-//! `split_tabs` walks the set bits of each vector's TAB mask.
+//! the others walk the set bits of each vector's separator mask.
 
+use core::ops::{ControlFlow, Range};
 use fearless_simd::{Level, dispatch, prelude::*, u8x64};
 use fearless_simd_macros::simd;
 
@@ -188,8 +189,168 @@ fn scan_block<S: Simd>(
     }
 }
 
+/// Calls `f` with the offset of every `needle` in `hay`, in order, until `f`
+/// breaks — the sample columns of a VCF line (`\t`), the fields of a sample
+/// (`:`), the elements of a value (`,`).
+// r[impl vcf_reader.text_scan]
+#[expect(dead_code, reason = "used by the VCF reader in a later commit")]
+pub(crate) fn for_each_byte<B, F>(hay: &[u8], needle: u8, f: F) -> ControlFlow<B>
+where
+    F: FnMut(usize) -> ControlFlow<B>,
+{
+    for_each_byte_at(Level::new(), hay, needle, f)
+}
+
+// r[impl io.simd_portable]
+fn for_each_byte_at<B, F>(level: Level, hay: &[u8], needle: u8, f: F) -> ControlFlow<B>
+where
+    F: FnMut(usize) -> ControlFlow<B>,
+{
+    dispatch!(level, simd => for_each_byte_simd(simd, hay, needle, f))
+}
+
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+#[allow(clippy::arithmetic_side_effects, reason = "`bits - 1` runs only on a nonzero `bits`")]
+fn for_each_byte_simd<S: Simd, B, F>(simd: S, hay: &[u8], needle: u8, mut f: F) -> ControlFlow<B>
+where
+    F: FnMut(usize) -> ControlFlow<B>,
+{
+    let mut chunks = hay.chunks_exact(S::u8s::LEN);
+    let mut offset = 0usize;
+    for chunk in &mut chunks {
+        let hits = S::u8s::from_slice(simd, chunk).simd_eq(needle);
+        if hits.any_true() {
+            let mut bits = hits.to_bitmask();
+            while bits != 0 {
+                f(offset.saturating_add(bits.trailing_zeros() as usize))?;
+                bits &= bits - 1;
+            }
+        }
+        offset = offset.saturating_add(S::u8s::LEN);
+    }
+    for (i, &b) in chunks.remainder().iter().enumerate() {
+        if b == needle {
+            f(offset.saturating_add(i))?;
+        }
+    }
+    ControlFlow::Continue(())
+}
+
+/// One `KEY` or `KEY=VALUE` entry of an INFO column, as byte ranges into it.
+/// The first `=` splits key from value; later ones belong to the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfoEntry {
+    pub(crate) key: Range<usize>,
+    /// `None` for a flag (no `=`); `Some` and possibly empty otherwise.
+    pub(crate) value: Option<Range<usize>>,
+}
+
+/// Calls `f` with every `;`-separated entry of `info`, in order, until `f`
+/// breaks: exactly the entries of `info.split(|&b| b == b';')`, empty ones
+/// included (`""` is one empty entry), so the caller decides what an empty
+/// key or a `.` column means.
+// r[impl vcf_reader.text_scan]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the VCF reader in a later commit"))]
+pub(crate) fn for_each_info_entry<B, F>(info: &[u8], f: F) -> ControlFlow<B>
+where
+    F: FnMut(InfoEntry) -> ControlFlow<B>,
+{
+    for_each_info_entry_at(Level::new(), info, f)
+}
+
+// r[impl io.simd_portable]
+fn for_each_info_entry_at<B, F>(level: Level, info: &[u8], f: F) -> ControlFlow<B>
+where
+    F: FnMut(InfoEntry) -> ControlFlow<B>,
+{
+    dispatch!(level, simd => for_each_info_entry_simd(simd, info, f))
+}
+
+/// The entry being read: where it starts and its first `=`, if seen.
+struct InfoSplitter<F> {
+    start: usize,
+    eq: Option<usize>,
+    f: F,
+}
+
+impl<B, F: FnMut(InfoEntry) -> ControlFlow<B>> InfoSplitter<F> {
+    #[inline(always)]
+    fn eq_at(&mut self, pos: usize) {
+        self.eq.get_or_insert(pos);
+    }
+
+    #[inline(always)]
+    fn semi_at(&mut self, pos: usize) -> ControlFlow<B> {
+        let entry = self.entry(pos);
+        self.start = pos.saturating_add(1);
+        self.eq = None;
+        (self.f)(entry)
+    }
+
+    #[inline(always)]
+    fn entry(&self, end: usize) -> InfoEntry {
+        match self.eq {
+            Some(eq) => InfoEntry { key: self.start..eq, value: Some(eq.saturating_add(1)..end) },
+            None => InfoEntry { key: self.start..end, value: None },
+        }
+    }
+}
+
+/// One mask of `;` and `=` per vector; its set bits are walked in order, and
+/// the `;` mask alone says which of the two each one is.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+#[allow(clippy::arithmetic_side_effects, reason = "`bits - 1` runs only on a nonzero `bits`")]
+fn for_each_info_entry_simd<S: Simd, B, F>(simd: S, info: &[u8], f: F) -> ControlFlow<B>
+where
+    F: FnMut(InfoEntry) -> ControlFlow<B>,
+{
+    let mut s = InfoSplitter { start: 0, eq: None, f };
+    let mut chunks = info.chunks_exact(S::u8s::LEN);
+    let mut offset = 0usize;
+    for chunk in &mut chunks {
+        let v = S::u8s::from_slice(simd, chunk);
+        let semis = v.simd_eq(b';');
+        let seps = semis | v.simd_eq(b'=');
+        if seps.any_true() {
+            let semi_bits = semis.to_bitmask();
+            let mut bits = seps.to_bitmask();
+            while bits != 0 {
+                let lane = bits.trailing_zeros();
+                let pos = offset.saturating_add(lane as usize);
+                if (semi_bits >> lane) & 1 == 1 {
+                    s.semi_at(pos)?;
+                } else {
+                    s.eq_at(pos);
+                }
+                bits &= bits - 1;
+            }
+        }
+        offset = offset.saturating_add(S::u8s::LEN);
+    }
+    for (i, &b) in chunks.remainder().iter().enumerate() {
+        let pos = offset.saturating_add(i);
+        match b {
+            b';' => s.semi_at(pos)?,
+            b'=' => s.eq_at(pos),
+            _ => {}
+        }
+    }
+    let last = s.entry(info.len());
+    (s.f)(last)
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::arithmetic_side_effects, reason = "test arithmetic on small offsets")]
+
     use super::*;
     use hegel::prelude::*;
 
@@ -255,5 +416,96 @@ mod tests {
             let (fields, n) = split_tabs(&line);
             assert_eq!(&fields[..n], expected.as_slice(), "all tabs, len={len}");
         }
+    }
+
+    /// Draws text dense in INFO and sample separators.
+    fn vcf_text(tc: &TestCase, max: usize) -> Vec<u8> {
+        let alphabet = gs::sampled_from(vec![b';', b'=', b',', b':', b'\t', b'A', b'.']);
+        tc.draw(gs::vecs(alphabet).max_size(max))
+    }
+
+    // r[verify vcf_reader.text_scan]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn for_each_byte_every_level_matches_scalar(tc: TestCase) {
+        let hay = vcf_text(&tc, 400);
+        let stop_after = tc.draw(gs::integers::<usize>().max_value(400));
+        for needle in *b"\t:," {
+            let all: Vec<usize> = (0..hay.len()).filter(|&i| hay[i] == needle).collect();
+            for level in crate::simd_levels::levels() {
+                let mut got = Vec::new();
+                let flow = for_each_byte_at(level, &hay, needle, |pos| {
+                    got.push(pos);
+                    if got.len() > stop_after {
+                        ControlFlow::Break(pos)
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                });
+                let expected = &all[..all.len().min(stop_after + 1)];
+                assert_eq!(got, expected, "{level:?}");
+                assert_eq!(flow.break_value(), all.get(stop_after).copied(), "{level:?}");
+            }
+        }
+    }
+
+    /// The splitter's oracle: `split` and `position`, nothing shared with it.
+    fn scalar_info_entries(info: &[u8]) -> Vec<InfoEntry> {
+        let mut start = 0;
+        info.split(|&b| b == b';')
+            .map(|entry| {
+                let e = match entry.iter().position(|&b| b == b'=') {
+                    Some(eq) => InfoEntry {
+                        key: start..start + eq,
+                        value: Some(start + eq + 1..start + entry.len()),
+                    },
+                    None => InfoEntry { key: start..start + entry.len(), value: None },
+                };
+                start += entry.len() + 1;
+                e
+            })
+            .collect()
+    }
+
+    // r[verify vcf_reader.text_scan]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn info_entries_every_level_match_scalar(tc: TestCase) {
+        let info = vcf_text(&tc, 400);
+        let expected = scalar_info_entries(&info);
+        let stop_after = tc.draw(gs::integers::<usize>().max_value(expected.len()));
+        for level in crate::simd_levels::levels() {
+            let mut got = Vec::new();
+            let flow = for_each_info_entry_at(level, &info, |e| {
+                got.push(e);
+                if got.len() > stop_after {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            assert_eq!(got, expected[..expected.len().min(stop_after + 1)], "{level:?}");
+            assert_eq!(flow.is_break(), stop_after < expected.len(), "{level:?}");
+        }
+    }
+
+    // r[verify vcf_reader.text_scan]
+    #[test]
+    fn info_entries_flags_values_and_empty_entries() {
+        let info = b"DP=10;DB;AF=0.5,0.25;;X=a=b;E=";
+        let mut got = Vec::new();
+        let _ = for_each_info_entry(info, |e| {
+            got.push((&info[e.key], e.value.map(|v| &info[v])));
+            ControlFlow::<()>::Continue(())
+        });
+        let expected: Vec<(&[u8], Option<&[u8]>)> = vec![
+            (b"DP", Some(b"10")),
+            (b"DB", None),
+            (b"AF", Some(b"0.5,0.25")),
+            (b"", None),
+            (b"X", Some(b"a=b")),
+            (b"E", Some(b"")),
+        ];
+        assert_eq!(got, expected);
     }
 }
