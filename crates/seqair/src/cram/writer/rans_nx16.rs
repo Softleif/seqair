@@ -90,12 +90,14 @@ enum Coder {
 
 /// `data` as a rANS Nx16 stream, or `None` when it is too large for the
 /// format's sizes (htscodecs refuses more than `i32::MAX` bytes).
+#[cfg(test)]
 pub(super) fn encode(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
     encode_prepared(&Prepared::new(data), flags)
 }
 
-/// [`encode`] of a block several combinations are tried on: what they
-/// share is computed once.
+/// A block as a rANS Nx16 stream (`None` when it is too large for the
+/// format's sizes, more than `i32::MAX` bytes): what the combinations tried
+/// on one block share is computed once, in `data`.
 pub(super) fn encode_prepared(data: &Prepared<'_>, flags: Nx16Flags) -> Option<Vec<u8>> {
     encode_with(data, flags, Coder::Simd(Level::new()))
 }

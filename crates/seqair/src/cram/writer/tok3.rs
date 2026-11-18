@@ -80,10 +80,14 @@ fn compress_stream(token_type: u8, data: &[u8]) -> Option<Vec<u8>> {
         DELTA0 => &[128],
         _ => &[0],
     };
+    // One preparation (histogram, PACK, RLE) serves every flag byte.
+    let prepared = super::rans_nx16::Prepared::new(data);
     methods
         .iter()
         .filter(|&&m| m & 8 == 0 || data.len().is_multiple_of(4))
-        .filter_map(|&m| super::rans_nx16::encode(data, super::rans_nx16::Nx16Flags::from_byte(m)))
+        .filter_map(|&m| {
+            super::rans_nx16::encode_prepared(&prepared, super::rans_nx16::Nx16Flags::from_byte(m))
+        })
         .min_by_key(Vec::len)
         .or_else(|| super::rans_nx16::encode_cat(data))
 }
