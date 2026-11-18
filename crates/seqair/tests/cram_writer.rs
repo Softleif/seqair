@@ -748,7 +748,7 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
 // r[verify cram_writer.test_roundtrip]
 // r[verify cram_writer.inputs]
 // r[verify cram_writer.features]
-// r[verify cram_writer.substitution]
+// r[verify cram_writer.substitution+2]
 // r[verify cram_writer.past_reference_end]
 // r[verify cram_writer.md_nm]
 // r[verify cram_writer.record.read_group]
@@ -765,7 +765,7 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
 // r[verify cram_writer.slice_header]
 // r[verify cram_writer.slice_extent]
 // r[verify cram_writer.preservation_map]
-// r[verify cram_writer.data_series]
+// r[verify cram_writer.data_series+2]
 /// Drawn reads written by seqair read back as samtools' CRAM 3.0 of them
 /// does, through samtools and through seqair; and every input writes the
 /// same bytes.

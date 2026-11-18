@@ -154,7 +154,7 @@ fn a_sink_error_poisons_the_writer() {
 }
 
 // r[verify cram_writer.tags]
-// r[verify cram_writer.blocks]
+// r[verify cram_writer.blocks+2]
 /// Hundreds of tag lines in one slice (a `TL` of more than one ITF8 byte),
 /// and zero-length CIGAR operations, which read back as nothing.
 #[test]
@@ -312,5 +312,41 @@ fn every_reference_gets_its_md5() {
     for bases in [BASES, &second[..]] {
         let m5 = format!("{:x}", md5::compute(bases.to_ascii_uppercase()));
         assert!(text.contains(&format!("M5:{m5}")), "{text}");
+    }
+}
+
+// r[verify cram_writer.substitution+2]
+/// The slice's `SM`, read by the decoder's own parser, turns every coded
+/// `BS` back into the read base, and codes each row's bases from the most
+/// substituted down.
+#[hegel::test]
+fn the_substitution_matrix_orders_bases_by_frequency(tc: hegel::TestCase) {
+    use crate::cram::compression_header::SubstitutionMatrix;
+    use hegel::generators as gs;
+    let n = tc.draw(gs::integers::<usize>().max_value(400));
+    // Skewed draws, so some rows have a clear favourite and some ties.
+    let pairs: Vec<(usize, usize)> = (0..n)
+        .map(|_| {
+            let row = tc.draw(gs::integers::<usize>().max_value(4));
+            let alt = tc
+                .draw(gs::integers::<usize>().max_value(3))
+                .min(tc.draw(gs::integers::<usize>().max_value(3)));
+            (row, alt)
+        })
+        .collect();
+    let refs = *b"ACGTN";
+    let others = |row: usize| refs.iter().copied().filter(move |&b| b != refs[row]).take(4);
+    let encoded: Vec<u8> = pairs.iter().map(|&(row, alt)| u8::try_from(row * 4 + alt).unwrap()).collect();
+    let (sm, coded) = container::substitution_matrix(&encoded);
+    let matrix = SubstitutionMatrix::parse(&sm);
+    for (&(row, alt), &code) in pairs.iter().zip(&coded) {
+        assert_eq!(matrix.substitute(refs[row], code), others(row).nth(alt).unwrap());
+    }
+    for (row, codes) in matrix.matrix.iter().enumerate() {
+        let count = |base: u8| {
+            pairs.iter().filter(|&&(r, a)| r == row && others(row).nth(a) == Some(base)).count()
+        };
+        let counts: Vec<usize> = codes.iter().map(|&b| count(b)).collect();
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "row {row}: {codes:?} {counts:?}");
     }
 }

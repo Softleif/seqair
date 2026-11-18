@@ -91,7 +91,7 @@ impl Series {
         (self as i32).saturating_add(1)
     }
 
-    // r[impl cram_writer.data_series]
+    // r[impl cram_writer.data_series+2]
     /// The series' key and encoding in the data series map; `None` for
     /// `BbLen`, which `BB`'s encoding names.
     fn encoding(self, out: &mut Vec<u8>) -> Option<()> {
@@ -313,6 +313,14 @@ impl SliceBuilder {
         &mut self.series[index]
     }
 
+    /// Store an `X` feature's substitution: reference row `row` (`ACGTN`),
+    /// and `alt`, the read base's index among the row's other bases. `BS`
+    /// holds `row * 4 + alt` until the slice's matrix codes it.
+    pub(super) fn substitution(&mut self, row: u8, alt: u8) {
+        debug_assert!(row < 5 && alt < 4);
+        self.buf(Series::Bs).push(row.saturating_mul(4).saturating_add(alt));
+    }
+
     // r[impl cram_writer.tags]
     /// Store a tag's value: `head` is its name and type, `value` its BAM
     /// bytes (with the NUL of a `Z` or `H`).
@@ -415,7 +423,7 @@ impl SliceBuilder {
 
     // r[impl cram_writer.container_header]
     // r[impl cram_writer.slice_header]
-    // r[impl cram_writer.blocks]
+    // r[impl cram_writer.blocks+2]
     /// The container of this slice.
     pub(super) fn assemble(
         &self,
@@ -443,6 +451,8 @@ impl SliceBuilder {
         })?;
         let n_records = i32::try_from(self.n_records).unwrap_or(i32::MAX);
 
+        let (sm, bs) =
+            substitution_matrix(self.series.get(Series::Bs as usize).map_or(&[], Vec::as_slice));
         // r[impl cram_writer.mates]
         let mates = mates::series(
             &self.mates,
@@ -461,6 +471,7 @@ impl SliceBuilder {
                     Series::Np => &mates.np,
                     Series::Ts => &mates.ts,
                     Series::Nf => &mates.nf,
+                    Series::Bs => &bs,
                     _ => self.series.get(series as usize)?,
                 };
                 Some((series.content_id(), data.as_slice()))
@@ -491,7 +502,7 @@ impl SliceBuilder {
             &mut compression_header,
             1,
             0,
-            &self.compression_header(matches!(kind, SliceKind::Mapped { reference: true, .. })),
+            &self.compression_header(matches!(kind, SliceKind::Mapped { reference: true, .. }), sm),
         )?;
 
         let mut slice_header = Vec::new();
@@ -539,15 +550,14 @@ impl SliceBuilder {
         })
     }
 
-    fn compression_header(&self, reference: bool) -> Vec<u8> {
+    fn compression_header(&self, reference: bool, sm: [u8; 5]) -> Vec<u8> {
         // r[impl cram_writer.preservation_map]
         let mut map = Vec::new();
         write_itf8(&mut map, 5);
         map.extend_from_slice(b"RN\x01AP\x01RR");
         map.push(u8::from(reference));
         map.extend_from_slice(b"SM");
-        // r[impl cram_writer.substitution]
-        map.extend_from_slice(&[SUBSTITUTION_MATRIX_BYTE; 5]);
+        map.extend_from_slice(&sm);
         map.extend_from_slice(b"TD");
         let mut td = Vec::new();
         for line in &self.tag_lines {
@@ -615,9 +625,41 @@ pub(super) fn tag_key([a, b, ty]: [u8; 3]) -> i32 {
     i32::from(a) << 16 | i32::from(b) << 8 | i32::from(ty)
 }
 
-/// Each reference base's other bases in `ACGTN` order get codes 0–3:
-/// `0b00_01_10_11`.
-pub(super) const SUBSTITUTION_MATRIX_BYTE: u8 = 0x1B;
+// r[impl cram_writer.substitution+2]
+/// The slice's substitution matrix from its `BS` pairs (`row * 4 + alt`):
+/// the `SM` bytes, and `BS` coded by them. Each row codes its other bases by
+/// how often the slice substitutes them, most often 0, ties in `ACGTN` order.
+pub(super) fn substitution_matrix(pairs: &[u8]) -> ([u8; 5], Vec<u8>) {
+    let mut counts = [[0u32; 4]; 5];
+    for &pair in pairs {
+        if let Some(c) =
+            counts.get_mut(usize::from(pair / 4)).and_then(|row| row.get_mut(usize::from(pair % 4)))
+        {
+            *c = c.saturating_add(1);
+        }
+    }
+    let mut codes = [[0u8; 4]; 5];
+    let mut sm = [0u8; 5];
+    for ((row, code), byte) in counts.iter().zip(&mut codes).zip(&mut sm) {
+        let mut order = [0u8, 1, 2, 3];
+        // Stable: ties keep `ACGTN` order.
+        order.sort_by_key(|&alt| std::cmp::Reverse(row.get(usize::from(alt)).copied()));
+        for (rank, &alt) in (0u8..).zip(&order) {
+            if let Some(c) = code.get_mut(usize::from(alt)) {
+                *c = rank;
+            }
+        }
+        *byte = code.iter().fold(0, |b, &c| b << 2 | c);
+    }
+    let coded = pairs
+        .iter()
+        .map(|&p| {
+            codes.get(usize::from(p / 4)).and_then(|row| row.get(usize::from(p % 4))).copied()
+        })
+        .map(Option::unwrap_or_default)
+        .collect();
+    (sm, coded)
+}
 
 /// What assembling a slice needs from the writer.
 pub(super) struct Frame {
