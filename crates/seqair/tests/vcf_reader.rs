@@ -783,3 +783,365 @@ fn a_missing_index_is_fine_and_a_broken_one_fails_open() {
     std::fs::write(dir.path().join("x.bcf.csi"), b"not an index").unwrap();
     assert!(matches!(VcfFile::open(&path), Err(VcfReadError::Index(_))));
 }
+
+// ── Crafted VCF text ────────────────────────────────────────────────────
+
+const TEXT_HEADER: &str = "##fileformat=VCFv4.3\n\
+##FILTER=<ID=PASS,Description=\"All filters passed\">\n\
+##FILTER=<ID=q10,Description=\"q\">\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"d\">\n\
+##INFO=<ID=AF,Number=A,Type=Float,Description=\"a\">\n\
+##INFO=<ID=DB,Number=0,Type=Flag,Description=\"b\">\n\
+##INFO=<ID=S,Number=1,Type=String,Description=\"s\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"g\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"d\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"a\">\n\
+##contig=<ID=chr1,length=1000>\n\
+##contig=<ID=chr2,length=1000>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n";
+
+fn text_file(lines: &[&str]) -> VcfFile {
+    let mut text = TEXT_HEADER.to_owned();
+    for l in lines {
+        text.push_str(l);
+        text.push('\n');
+    }
+    VcfFile::from_bytes(text.into_bytes(), None).unwrap()
+}
+
+fn text_records(lines: &[&str]) -> Vec<FullRecord> {
+    let file = text_file(lines);
+    file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap()
+}
+
+fn text_error(lines: &[&str]) -> (u64, Option<seqair::io::VirtualOffset>, RecordError) {
+    let file = text_file(lines);
+    let mut reader = file.reader::<FullRecord>().open().unwrap();
+    loop {
+        match reader.next_record() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("no error"),
+            Err(VcfReadError::Record { ordinal, offset, source }) => {
+                return (ordinal, offset, source);
+            }
+            Err(e) => panic!("expected a record error, got {e:?}"),
+        }
+    }
+}
+
+// r[verify vcf_reader.formats]
+// r[verify vcf_fields.site]
+// r[verify vcf_values.access]
+/// The fixed columns, INFO and FORMAT of hand-written lines: IDs, symbolic
+/// and missing ALTs, QUAL, every FILTER state, flags, strings, vectors.
+#[test]
+fn text_records_read_their_columns() {
+    let recs = text_records(&[
+        "chr1\t10\trs1;rs2\tA\tC,<DEL>\t29.5\tPASS\tDP=7;AF=0.5,0.25;DB;S=x%3By\tGT:DP:AD\t0/1:3:1,2\t1|1:4:0,4",
+        "chr1\t0\t.\tN\t.\t.\t.\t.\tGT\t.\t./.",
+        "chr2\t5\t.\tAC\tA\t-1\tq10\tDP=.\tGT:DP\t0/1:.\t1/1:9",
+    ]);
+    let at = |p| VcfPos::At(seqair_types::Pos1::new(p).unwrap());
+    let [a, b, c] = &recs[..] else { panic!("three records") };
+    assert_eq!(
+        (a.locus().contig().name(), a.locus().start(), a.locus().end()),
+        ("chr1", at(10), at(10))
+    );
+    assert_eq!(a.site().ids().collect::<Vec<_>>(), ["rs1", "rs2"]);
+    assert_eq!(a.site().alleles().reference(), b"A");
+    assert_eq!(
+        a.site().alleles().alts().collect::<Vec<_>>(),
+        [Allele::Bases(b"C"), Allele::Symbolic("<DEL>")]
+    );
+    assert_eq!(a.site().qual(), Some(29.5));
+    assert_eq!(a.site().filters().status(), FilterStatus::Pass);
+    assert_eq!(b.locus().start(), VcfPos::Telomere);
+    assert_eq!(b.site().alleles().alts().count(), 0);
+    assert_eq!((b.site().qual(), b.site().filters().status()), (None, FilterStatus::Missing));
+    assert_eq!(c.locus().contig().name(), "chr2");
+    assert_eq!((c.locus().start(), c.locus().end()), (at(5), at(6)));
+    assert_eq!(c.site().qual(), Some(-1.0));
+    let FilterStatus::Failed(failed) = c.site().filters().status() else { panic!("failed") };
+    assert_eq!(failed.map(|f| f.name().to_owned()).collect::<Vec<_>>(), ["q10"]);
+
+    let file = text_file(&[
+        "chr1\t10\trs1;rs2\tA\tC,<DEL>\t29.5\tPASS\tDP=7;AF=0.5,0.25;DB;S=x%3By\tGT:DP:AD\t0/1:3:1,2\t1|1:4:0,4",
+        "chr2\t5\t.\tAC\tA\t-1\tq10\tDP=.\tGT:DP\t0/1:.\t1/1:9",
+    ]);
+    let h = file.header();
+    let dp: InfoInt = h.info_key("DP").unwrap();
+    let af: seqair::vcf::InfoFloats = h.info_key("AF").unwrap();
+    let db: InfoFlag = h.info_key("DB").unwrap();
+    let st: seqair::vcf::InfoString = h.info_key("S").unwrap();
+    let gt: FormatGt = h.format_key("GT").unwrap();
+    let fdp: seqair::vcf::FormatInt = h.format_key("DP").unwrap();
+    let ad: seqair::vcf::FormatInts = h.format_key("AD").unwrap();
+    let (s1, s2) = (h.sample("S1").unwrap(), h.sample("S2").unwrap());
+    let recs: Vec<FullRecord> =
+        file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
+    let info = recs[0].info();
+    assert_eq!(info.get(&dp).unwrap(), Some(7));
+    assert_eq!(info.get(&af).unwrap().map(Iterator::collect::<Vec<_>>), Some(vec![0.5, 0.25]));
+    assert!(info.get(&db).unwrap());
+    assert_eq!(info.get(&st).unwrap(), Some("x%3By"), "percent-encoding is left alone");
+    let samples = recs[0].samples();
+    let gts: Vec<_> =
+        samples.column(&gt).unwrap().unwrap().map(|g| g.unwrap().to_genotype()).collect();
+    assert_eq!(
+        gts,
+        [seqair::vcf::Genotype::unphased(0, 1), seqair::vcf::Genotype::phased_diploid(1, 1)]
+    );
+    assert_eq!(samples.sample(s2).get(&fdp).unwrap(), Some(4));
+    assert_eq!(
+        samples.sample(s1).get(&ad).unwrap().map(Iterator::collect::<Vec<_>>),
+        Some(vec![1, 2])
+    );
+    assert_eq!(recs[1].info().get(&dp).unwrap(), None);
+    assert!(!recs[1].info().get(&db).unwrap());
+    assert_eq!(recs[1].samples().sample(s1).get(&fdp).unwrap(), None);
+    assert_eq!(recs[1].samples().sample(s2).get(&ad).unwrap().map(|v| v.count()), None);
+}
+
+// r[verify vcf_fields.samples]
+// r[verify vcf_values.access]
+// r[verify vcf_values.duplicates]
+// r[verify vcf_reader.undeclared]
+/// A sample may drop trailing FORMAT fields (they read as missing); a
+/// repeated key reads its first value; an undeclared INFO or FORMAT key is
+/// ignored; a flag given a value is set; an integer key without a value is
+/// absent; an undeclared FILTER fails the record without being listed.
+#[test]
+fn text_edge_cases_read_as_htslib_reads_them() {
+    let file = text_file(&[
+        "chr1\t10\t.\tA\tC\t.\tPASS\tDP=1;XX=3;DP=2;DB=yes\tGT:DP:ZZ:AD\t0/1\t1/1:5:q:2,3",
+        "chr1\t11\t.\tA\tC\t.\tnope;q10\tDP\tGT:GT\t0|1:1|1\t./.:0/0",
+        "chr1\t12\t.\tA\tC\t.\tnope\t.\t.\t.\t.",
+    ]);
+    let h = file.header();
+    let dp: InfoInt = h.info_key("DP").unwrap();
+    let db: InfoFlag = h.info_key("DB").unwrap();
+    let gt: FormatGt = h.format_key("GT").unwrap();
+    let fdp: seqair::vcf::FormatInt = h.format_key("DP").unwrap();
+    let ad: seqair::vcf::FormatInts = h.format_key("AD").unwrap();
+    let (s1, s2) = (h.sample("S1").unwrap(), h.sample("S2").unwrap());
+    let recs: Vec<FullRecord> =
+        file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
+    let info = recs[0].info();
+    assert_eq!(info.get(&dp).unwrap(), Some(1), "the first DP wins");
+    assert!(info.get(&db).unwrap(), "a flag with a value is set");
+    let names: Vec<&str> = info.iter().unwrap().map(|f| f.unwrap().0).collect();
+    assert_eq!(names, ["DP", "DB"], "XX is undeclared, the second DP a duplicate");
+    let one = recs[0].samples().sample(s1);
+    assert!(one.get(&gt).unwrap().is_some());
+    assert_eq!(one.get(&fdp).unwrap(), None, "dropped trailing fields are missing");
+    assert_eq!(one.get(&ad).unwrap().map(|v| v.count()), None);
+    let fields: Vec<&str> = one.iter().unwrap().map(|f| f.unwrap().0).collect();
+    assert_eq!(fields, ["GT", "DP", "AD"], "ZZ is undeclared");
+    let two = recs[0].samples().sample(s2);
+    assert_eq!(two.get(&ad).unwrap().map(Iterator::collect::<Vec<_>>), Some(vec![2, 3]));
+
+    assert_eq!(recs[1].info().get(&dp).unwrap(), None, "a key without a value holds nothing");
+    let FilterStatus::Failed(failed) = recs[1].site().filters().status() else { panic!() };
+    assert_eq!(failed.map(|f| f.name().to_owned()).collect::<Vec<_>>(), ["q10"]);
+    let g = recs[1].samples().sample(s1).get(&gt).unwrap().unwrap().to_genotype();
+    assert_eq!(g, seqair::vcf::Genotype::phased_diploid(0, 1), "the first GT wins");
+    let FilterStatus::Failed(failed) = recs[2].site().filters().status() else {
+        panic!("an undeclared FILTER fails the record")
+    };
+    assert_eq!(failed.count(), 0);
+    assert_eq!(recs[2].samples().sample(s1).iter().unwrap().count(), 0, "FORMAT . has no fields");
+}
+
+// r[verify vcf_reader.contigs]
+/// A CHROM the header does not declare is added after the header's
+/// contigs, once, and keeps its id for every record of the file.
+#[test]
+fn undeclared_text_contigs_get_ids_after_the_headers() {
+    let recs = text_records(&[
+        "chrUn\t1\t.\tA\t.\t.\t.\t.",
+        "chrUn\t2\t.\tA\t.\t.\t.\t.",
+        "chr1\t1\t.\tA\t.\t.\t.\t.",
+        "chrM\t1\t.\tA\t.\t.\t.\t.",
+        "chrUn\t3\t.\tA\t.\t.\t.\t.",
+    ]);
+    let ids: Vec<(&str, u32)> =
+        recs.iter().map(|r| (r.locus().contig().name(), r.locus().contig().tid())).collect();
+    assert_eq!(ids, [("chrUn", 2), ("chrUn", 2), ("chr1", 0), ("chrM", 3), ("chrUn", 2)]);
+}
+
+// r[verify vcf_record.gt_first_phase+3]
+// r[verify vcf_values.gt]
+/// Before VCF 4.4 the first allele's phase is unphased; from 4.4 a leading
+/// indicator gives it, and without one it is inferred as htslib does.
+#[test]
+fn text_genotype_phase_follows_the_header_version() {
+    let read = |version: &str, gt: &str| {
+        let text = format!(
+            "##fileformat=VCFv{version}\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"g\">\n\
+             ##contig=<ID=chr1>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n\
+             chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t{gt}\n"
+        );
+        let file = VcfFile::from_bytes(text.into_bytes(), None).unwrap();
+        let key: FormatGt = file.header().format_key("GT").unwrap();
+        let rec = file.reader::<OnlySample>().open().unwrap().read().unwrap().unwrap();
+        rec.get(&key)
+            .unwrap()
+            .map(|g| g.alleles().map(|a| (a.allele, a.phased)).collect::<Vec<_>>())
+    };
+    assert_eq!(read("4.3", "0|1"), Some(vec![(Some(0), false), (Some(1), true)]));
+    assert_eq!(read("4.4", "0|1"), Some(vec![(Some(0), true), (Some(1), true)]));
+    assert_eq!(read("4.4", "/0|1"), Some(vec![(Some(0), false), (Some(1), true)]));
+    assert_eq!(read("4.4", "1"), Some(vec![(Some(1), true)]));
+    assert_eq!(read("4.5", ".|."), Some(vec![(None, true), (None, true)]));
+    assert_eq!(read("4.5", "."), None);
+}
+
+// r[verify vcf_fields.sections]
+// r[verify vcf_fields.sample]
+/// `Sample` reads its column and no further: a malformed later column does
+/// not fail it, while `Samples` reads (and refuses) them all.
+#[test]
+fn one_text_sample_scans_only_up_to_its_column() {
+    let line = "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t0/1:1:2:3:4:5";
+    let file = text_file(&[line]);
+    let gt: FormatGt = file.header().format_key("GT").unwrap();
+    let mut one = file.reader::<Sample>().sample("S1").open().unwrap();
+    assert!(one.next_record().unwrap().unwrap().get(&gt).unwrap().is_some());
+    let mut all = file.reader::<Samples>().open().unwrap();
+    let samples = all.next_record().unwrap().unwrap();
+    let e = samples.column(&gt).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            VcfReadError::Record { source: RecordError::SampleFields { sample: 1, .. }, .. }
+        ),
+        "{e:?}"
+    );
+    // Too few sample columns, for one sample and for all.
+    let file = text_file(&["chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1"]);
+    let e = file.reader::<Sample>().sample("S2").open().unwrap().read().unwrap_err();
+    assert!(
+        matches!(
+            e,
+            VcfReadError::Record { source: RecordError::SampleCount { found: 1, expected: 2 }, .. }
+        ),
+        "{e:?}"
+    );
+    let rec = file.reader::<Samples>().open().unwrap().read().unwrap().unwrap();
+    assert!(rec.column(&gt).is_err());
+}
+
+// r[verify vcf_reader.errors]
+// r[verify vcf_reader.limits]
+/// Malformed lines are typed errors with the record's ordinal; in a BGZF
+/// file, its virtual offset too. Blank lines are not records.
+#[test]
+fn malformed_text_lines_are_typed_errors_with_their_place() {
+    let ok = "chr1\t1\t.\tA\tC\t.\t.\t.";
+    let (ordinal, offset, e) = text_error(&[ok, "", ok, "chr1\t1\t.\tA"]);
+    assert_eq!((ordinal, offset, e), (2, None, RecordError::TooFewColumns { found: 4 }));
+    let (_, _, e) = text_error(&["chr1\tx\t.\tA\tC\t.\t.\t."]);
+    assert!(matches!(e, RecordError::Text { part: seqair::vcf::reader::RecordPart::Pos, .. }));
+    let (_, _, e) = text_error(&["chr1\t1\t.\tA\tC\tq\t.\t."]);
+    assert!(matches!(e, RecordError::Text { part: seqair::vcf::reader::RecordPart::Qual, .. }));
+    let (_, _, e) = text_error(&["chr1\t4294967296\t.\tA\tC\t.\t.\t."]);
+    assert!(matches!(e, RecordError::InvalidPosition { .. }), "{e:?}");
+    // Values are read on access: a malformed one fails there, with its
+    // place; so does a vector where the header declares one value.
+    let file = text_file(&[ok, "chr1\t1\t.\tA\tC\t.\t.\tDP=x", "chr1\t1\t.\tA\tC\t.\t.\tDP=1,2"]);
+    let dp: InfoInt = file.header().info_key("DP").unwrap();
+    let recs: Vec<Info> =
+        file.reader::<Info>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
+    let e = recs[1].get(&dp).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            VcfReadError::Record {
+                ordinal: 1,
+                source: RecordError::Field { source: FieldError::Text(_), .. },
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    let e = recs[2].get(&dp).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            VcfReadError::Record {
+                source: RecordError::Field { source: FieldError::NotScalar { len: 2 }, .. },
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+
+    // The same in BGZF: every error names where its record starts.
+    let mut text = TEXT_HEADER.to_owned();
+    text.push_str(&[ok, ok, "chr1\t1", ""].join("\n"));
+    let mut w = BgzfWriter::new(Vec::new());
+    w.write_all(text.as_bytes()).unwrap();
+    let file = VcfFile::from_bytes(w.finish().unwrap(), None).unwrap();
+    let mut reader = file.reader::<Locus>().open().unwrap();
+    assert!(reader.next_record().unwrap().is_some());
+    assert!(reader.next_record().unwrap().is_some());
+    let e = reader.next_record().unwrap_err();
+    let VcfReadError::Record { ordinal: 2, offset: Some(offset), .. } = e else { panic!("{e:?}") };
+    let header_len = TEXT_HEADER.len() + 2 * (ok.len() + 1);
+    assert_eq!(usize::from(offset.within_block()), header_len);
+}
+
+/// CRLF line ends, a last line without a newline, and lines longer than a
+/// BGZF block or a file buffer, which are copied together.
+#[test]
+fn text_lines_are_framed_whatever_their_length_and_ending() {
+    let long_info = format!("S={}", "x".repeat(300_000));
+    let lines = [
+        "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1/1\r".to_owned(),
+        format!("chr1\t2\t.\tA\tC\t.\t.\t{long_info}\tGT\t0/1\t1/1"),
+        "chr1\t3\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1/1".to_owned(),
+    ];
+    let mut text = TEXT_HEADER.to_owned();
+    text.push_str(&lines.join("\n")); // no final newline
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("x.vcf");
+    std::fs::write(&plain, &text).unwrap();
+    let mut w = BgzfWriter::new(Vec::new());
+    w.write_all(text.as_bytes()).unwrap();
+    let gz = dir.path().join("x.vcf.gz");
+    std::fs::write(&gz, w.finish().unwrap()).unwrap();
+    for path in [plain, gz] {
+        let file = VcfFile::open(&path).unwrap();
+        let s: seqair::vcf::InfoString = file.header().info_key("S").unwrap();
+        let gt: FormatGt = file.header().format_key("GT").unwrap();
+        let s2 = file.header().sample("S2").unwrap();
+        let recs: Vec<FullRecord> = file
+            .reader::<FullRecord>()
+            .open()
+            .unwrap()
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(recs.len(), 3, "{path:?}");
+        assert_eq!(recs[1].info().get(&s).unwrap().map(str::len), Some(300_000));
+        for r in &recs {
+            let g = r.samples().sample(s2).get(&gt).unwrap().unwrap().to_genotype();
+            assert_eq!(g, seqair::vcf::Genotype::unphased(1, 1), "{path:?}: the CR is not a value");
+        }
+    }
+}
+
+/// riker's pattern (the reading guide's "Positions only"): `Locus` alone on
+/// GIAB's truth set, the deletions spanning more than their first base.
+#[test]
+fn truth_loci_span_their_deletions() {
+    let file = VcfFile::open(fixture("truth.vcf.gz")).unwrap();
+    let mut reader = file.reader::<Locus>().open().unwrap();
+    let mut longest = 0;
+    while let Some(locus) = reader.next_record().unwrap() {
+        if let (VcfPos::At(start), VcfPos::At(end)) = (locus.start(), locus.end()) {
+            longest = longest.max(end.as_u32() - start.as_u32() + 1);
+        }
+    }
+    assert!(longest > 1);
+}
