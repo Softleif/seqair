@@ -224,6 +224,12 @@ name = "fuzz_bam_stream"
 path = "fuzz_targets/fuzz_bam_stream.rs"
 doc = false
 
+# Full-stack VCF/BCF: bytes → VcfFile → every field of every record via FullRecord
+[[bin]]
+name = "fuzz_vcf_read"
+path = "fuzz_targets/fuzz_vcf_read.rs"
+doc = false
+
 # Full-stack: BAM records → RecordStore → PileupEngine → column iteration
 [[bin]]
 name = "fuzz_pileup_full"
