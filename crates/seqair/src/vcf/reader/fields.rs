@@ -28,11 +28,21 @@ pub trait Fields: Sized + Send + Sync + Clone {
     /// The parts of a record [`fill`](Self::fill) reads.
     fn needs(plan: &Self::Plan) -> Sections;
 
-    /// A value to fill.
-    fn empty(plan: &Self::Plan) -> Self;
+    /// The record `raw`, decoded.
+    ///
+    /// # Errors
+    /// What decoding `raw` fails with.
+    fn new(plan: &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError>;
 
-    /// Replace `self` with the record `raw`, reusing `self`'s buffers.
-    fn fill(&mut self, plan: &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError>;
+    /// Overwrite `self` with the record `raw`. Override it to reuse
+    /// `self`'s buffers; the default builds a new value.
+    ///
+    /// # Errors
+    /// As [`new`](Self::new).
+    fn fill(&mut self, plan: &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
+        *self = Self::new(plan, raw)?;
+        Ok(())
+    }
 }
 
 /// An option a reader's builder can set.
@@ -195,8 +205,8 @@ macro_rules! tuple_fields {
                 Sections::FIXED $(| $t::needs(&plan.$i))+
             }
 
-            fn empty(plan: &Self::Plan) -> Self {
-                ($($t::empty(&plan.$i),)+)
+            fn new(plan: &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+                Ok(($($t::new(&plan.$i, raw)?,)+))
             }
 
             fn fill(&mut self, plan: &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {

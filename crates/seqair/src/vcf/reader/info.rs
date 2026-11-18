@@ -97,7 +97,7 @@ impl<'a> InfoRef<'a> {
 // r[impl vcf_fields.owned]
 /// A record's INFO column, owned; its index is built on first access, so a
 /// record rejected on its position or FILTER never pays for it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Info {
     bytes: Vec<u8>,
     n: usize,
@@ -186,9 +186,11 @@ impl Fields for Info {
         Sections::INFO
     }
 
-    /// No fields until filled.
-    fn empty(_: &()) -> Self {
-        Self::default()
+    fn new(plan: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let mut info =
+            Self { bytes: Vec::new(), n: 0, file: None, at: raw.at(), index: LazyIndex::default() };
+        info.fill(plan, raw)?;
+        Ok(info)
     }
 
     fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {

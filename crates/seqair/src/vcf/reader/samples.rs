@@ -445,9 +445,10 @@ impl Fields for OnlySample {
         Sections::sample(*sample)
     }
 
-    /// No fields until filled.
-    fn empty(_: &SampleIdx) -> Self {
-        Self(FormatData::default())
+    fn new(sample: &SampleIdx, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let mut data = FormatData::default();
+        data.fill_one(&raw, *sample)?;
+        Ok(Self(data))
     }
 
     fn fill(&mut self, sample: &SampleIdx, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
@@ -520,9 +521,10 @@ impl Fields for Sample {
         Sections::sample(*sample)
     }
 
-    /// No fields until filled.
-    fn empty((_, name): &Self::Plan) -> Self {
-        Self { data: FormatData::default(), name: name.clone() }
+    fn new((sample, name): &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let mut data = FormatData::default();
+        data.fill_one(&raw, *sample)?;
+        Ok(Self { data, name: name.clone() })
     }
 
     fn fill(&mut self, (sample, _): &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
@@ -532,7 +534,7 @@ impl Fields for Sample {
 
 /// Every sample's FORMAT values, by sample ([`sample`](Self::sample)) or by
 /// field ([`column`](Self::column)).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Samples(FormatData);
 
 impl Samples {
@@ -577,9 +579,10 @@ impl Fields for Samples {
         Sections::SAMPLES
     }
 
-    /// No samples until filled.
-    fn empty(_: &()) -> Self {
-        Self::default()
+    fn new(_: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let mut data = FormatData::default();
+        data.fill_all(&raw)?;
+        Ok(Self(data))
     }
 
     fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {

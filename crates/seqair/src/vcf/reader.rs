@@ -5,7 +5,7 @@
 //!
 //! [`VcfFile`] opens a file once; [`VcfFile::reader`] plans a [`Fields`] type
 //! against its header and opens a [`Reader`]. A reader hands each record to
-//! `F::fill` as a [`RawRecord`], whose views ([`SiteRef`], [`InfoRef`],
+//! `F::new` or `F::fill` as a [`RawRecord`], whose views ([`SiteRef`], [`InfoRef`],
 //! [`SampleRef`], [`SamplesRef`]) decode values through the typed keys of
 //! [`ReadKind`]. The components ([`Locus`], [`Site`], [`Info`],
 //! [`OnlySample`], [`Sample`], [`Samples`], [`FullRecord`]) own their bytes.

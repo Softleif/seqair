@@ -250,13 +250,23 @@ fn every_way_of_reading_yields_the_same_records() {
         file.reader::<Locus>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(owned, into);
     let mut reader = file.reader::<Locus>().open().unwrap();
-    let mut rec = reader.empty_record();
-    let mut lent = Vec::new();
+    let mut rec = reader.read().unwrap().unwrap();
+    let mut lent = vec![rec.clone()];
     while reader.read_into(&mut rec).unwrap() {
         lent.push(rec.clone());
     }
     assert_eq!(owned, lent);
+    let last = rec.clone();
     assert!(!reader.read_into(&mut rec).unwrap(), "stays at the end");
+    assert_eq!(rec, last, "the end leaves the record as it was");
+    assert!(reader.read().unwrap().is_none());
+    let mut reader = file.reader::<Locus>().open().unwrap();
+    let mut lent_by_reader = Vec::new();
+    while let Some(locus) = reader.next_record().unwrap() {
+        lent_by_reader.push(locus.clone());
+    }
+    assert_eq!(owned, lent_by_reader);
+    assert!(reader.next_record().unwrap().is_none(), "stays at the end");
     assert_eq!(reader.header().id(), file.header().id());
 }
 
@@ -441,11 +451,8 @@ impl Fields for BadKey {
     fn needs(_: &InfoInt) -> Sections {
         Sections::INFO
     }
-    fn empty(_: &InfoInt) -> Self {
-        Self
-    }
-    fn fill(&mut self, _: &InfoInt, _: RawRecord<'_>) -> Result<(), VcfReadError> {
-        Ok(())
+    fn new(_: &InfoInt, _: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        Ok(Self)
     }
 }
 
@@ -481,7 +488,7 @@ fn keys_and_samples_of_another_header_are_refused() {
 
 /// The reading guide's `Truth` type. (The guide's example asserts a `CpG` SNV
 /// exists, which this fixture does not have: its `CpG` sites have no ALT.)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Truth(Option<(VcfPos, u8, u8, bool)>);
 
 impl Fields for Truth {
@@ -492,20 +499,17 @@ impl Fields for Truth {
     fn needs(_: &InfoFlag) -> Sections {
         Sections::SITE | Sections::INFO
     }
-    fn empty(_: &InfoFlag) -> Self {
-        Self(None)
-    }
-    fn fill(&mut self, cpg: &InfoFlag, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
+    fn new(cpg: &InfoFlag, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let site = raw.site()?;
         let mut alts = site.alleles().alts();
-        self.0 =
+        Ok(Self(
             match (site.filters().status(), site.alleles().reference(), alts.next(), alts.next()) {
                 (FilterStatus::Pass, &[r], Some(Allele::Bases(&[a])), None) => {
                     Some((raw.locus()?.start(), r, a, raw.info()?.get(cpg)?))
                 }
                 _ => None,
-            };
-        Ok(())
+            },
+        ))
     }
 }
 
@@ -531,11 +535,8 @@ fn a_user_type_reads_through_raw_records() {
         fn needs(_: &()) -> Sections {
             Sections::SITE
         }
-        fn empty(_: &()) -> Self {
-            Self
-        }
-        fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-            raw.info().map(|_| ())
+        fn new(_: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+            raw.info().map(|_| Self)
         }
     }
     let err = file.reader::<Sneaky>().open().unwrap().next_record().unwrap_err();

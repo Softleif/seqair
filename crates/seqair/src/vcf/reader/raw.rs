@@ -91,7 +91,7 @@ pub(crate) enum Repr<'a> {
 
 // r[impl vcf_fields.user_types]
 /// One record as the reader found it, not yet decoded: what a
-/// [`Fields::fill`](super::Fields::fill) reads, through the views it hands
+/// [`Fields::new`](super::Fields::new) or `fill` reads, through the views it hands
 /// out. Only the [`Sections`] the type's `needs` named can be viewed; the
 /// others fail with [`VcfReadError::NotRequested`], as their bytes may have
 /// been skipped.
@@ -201,7 +201,7 @@ impl<'a> RawRecord<'a> {
     }
 
     /// The whole record as stored.
-    pub(crate) fn bcf_bytes(&self) -> &'a [u8] {
+    pub(crate) fn bytes(&self) -> &'a [u8] {
         self.bcf().bytes
     }
 

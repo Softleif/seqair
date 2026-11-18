@@ -89,7 +89,6 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
         let mut stream =
             BgzfStream::builder(input).workers(self.workers).start_offset(start).build();
         skip_bytes(&mut stream, skip).map_err(|e| e.into_read_error(RecordAt::default()))?;
-        let current = F::empty(&plan);
         let core = Core {
             file: Arc::clone(shared),
             plan,
@@ -99,7 +98,7 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             spans: SiteSpans::default(),
             ordinal: 0,
         };
-        Ok(Reader { core, current })
+        Ok(Reader { core, current: None })
     }
 }
 
@@ -155,10 +154,13 @@ struct Core<P> {
 impl<P> Core<P> {
     // r[impl vcf_reader.read_into+2]
     // r[impl vcf_fields.sections]
-    /// Fill `rec` with the next record; `false` at the end.
-    fn read_into<F: Fields<Plan = P>>(&mut self, rec: &mut F) -> Result<bool, VcfReadError> {
+    /// Hand the next record to `with`; `None` at the end.
+    fn next<R>(
+        &mut self,
+        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    ) -> Result<Option<R>, VcfReadError> {
         if self.stream.fill()?.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let at = RecordAt { ordinal: self.ordinal, offset: self.stream.virtual_offset() };
         self.ordinal = self.ordinal.saturating_add(1);
@@ -193,9 +195,9 @@ impl<P> Core<P> {
 
         // The whole record in the current batch: read it in place.
         if !head_read && let Some(record) = stream.fill()?.get(..end) {
-            let result = fill(file, plan, *sections, spans, at, record, shared_end, rec);
+            let result = hand_out(file, plan, *sections, spans, at, record, shared_end, with);
             stream.advance(end);
-            return result.map(|()| true);
+            return result.map(Some);
         }
         // Otherwise copy it together, skipping samples nobody reads.
         let framing = |e: Framing| e.into_read_error(at);
@@ -212,23 +214,23 @@ impl<P> Core<P> {
         if !wants_indiv {
             skip_bytes(stream, u64::from(l_indiv)).map_err(framing)?;
         }
-        fill(file, plan, *sections, spans, at, scratch, shared_end, rec).map(|()| true)
+        hand_out(file, plan, *sections, spans, at, scratch, shared_end, with).map(Some)
     }
 }
 
-/// Fill `rec` from `record`, a BCF record whose shared section ends at
+/// Hand `with` the BCF record `record`, whose shared section ends at
 /// `shared_end` (its individual section, if read, follows).
 #[expect(clippy::too_many_arguments, reason = "the reader's fields, split to borrow apart")]
-fn fill<F: Fields>(
+fn hand_out<P, R>(
     file: &Arc<FileShared>,
-    plan: &F::Plan,
+    plan: &P,
     sections: Sections,
     spans: &mut SiteSpans,
     at: RecordAt,
     record: &[u8],
     shared_end: usize,
-    rec: &mut F,
-) -> Result<(), VcfReadError> {
+    with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+) -> Result<R, VcfReadError> {
     let shared = record.get(8..shared_end).unwrap_or_default();
     let indiv = record.get(shared_end..).unwrap_or_default();
     let fixed =
@@ -243,18 +245,20 @@ fn fill<F: Fields>(
     }
     let bcf = BcfRecord { bytes: record, shared, indiv, fixed, spans };
     let raw = RawRecord { file, contig, at, sections, repr: Repr::Bcf(bcf) };
-    rec.fill(plan, raw)
+    with(plan, raw)
 }
 
 /// Records read front to back into `F`.
 ///
 /// Read with [`next_record`](Self::next_record) (lends one record at a time,
-/// allocation-free) or [`read_into`](Self::read_into) (fills a record of
-/// yours); [`records`](Self::records) and `into_iter()` hand out owned
-/// records, allocating each.
+/// allocation-free), or own them: [`read`](Self::read) hands out a record
+/// and [`read_into`](Self::read_into) overwrites one, reusing its buffers;
+/// [`records`](Self::records) and `into_iter()` hand out owned records,
+/// allocating each.
 pub struct Reader<F: Fields> {
     core: Core<F::Plan>,
-    current: F,
+    /// The record [`next_record`](Self::next_record) lends, once there is one.
+    current: Option<F>,
 }
 
 impl<F: Fields> std::fmt::Debug for Reader<F> {
@@ -273,29 +277,42 @@ impl<F: Fields> Reader<F> {
         &self.core.file.header
     }
 
-    /// A record to [`read_into`](Self::read_into).
-    pub fn empty_record(&self) -> F {
-        F::empty(&self.core.plan)
-    }
-
     // r[impl vcf_reader.read_into+2]
-    /// Fill `rec` with the next record, reusing its buffers; `false` at the
-    /// end of input.
+    /// The next record, owned; `None` at the end of input. Keep reading into
+    /// it with [`read_into`](Self::read_into).
     ///
     /// # Errors
     /// [`VcfReadError::Record`] for a malformed record (with its ordinal and
     /// virtual offset), or a decompression error.
+    pub fn read(&mut self) -> Result<Option<F>, VcfReadError> {
+        self.core.next(|plan, raw| F::new(plan, raw))
+    }
+
+    // r[impl vcf_reader.read_into+2]
+    /// Overwrite `rec` with the next record, reusing its buffers; `false`
+    /// at the end of input, leaving `rec` as it was.
+    ///
+    /// # Errors
+    /// As [`Self::read`]; `rec` may then hold parts of the failed record.
     pub fn read_into(&mut self, rec: &mut F) -> Result<bool, VcfReadError> {
-        self.core.read_into(rec)
+        Ok(self.core.next(|plan, raw| rec.fill(plan, raw))?.is_some())
     }
 
     // r[impl vcf_reader.next_record]
     /// The next record, lent until the next call; `None` at the end.
     ///
     /// # Errors
-    /// As [`Self::read_into`].
+    /// As [`Self::read`].
     pub fn next_record(&mut self) -> Result<Option<&F>, VcfReadError> {
-        Ok(self.core.read_into(&mut self.current)?.then_some(&self.current))
+        let Self { core, current } = self;
+        let read = match current {
+            Some(rec) => core.next(|plan, raw| rec.fill(plan, raw))?.is_some(),
+            None => {
+                *current = core.next(|plan, raw| F::new(plan, raw))?;
+                current.is_some()
+            }
+        };
+        Ok(if read { current.as_ref() } else { None })
     }
 
     // r[impl vcf_reader.records]
@@ -322,10 +339,9 @@ fn next_owned<F: Fields>(
     if *done {
         return None;
     }
-    let mut rec = F::empty(&core.plan);
-    match core.read_into(&mut rec) {
-        Ok(true) => Some(Ok(rec)),
-        Ok(false) => {
+    match core.next(|plan, raw| F::new(plan, raw)) {
+        Ok(Some(rec)) => Some(Ok(rec)),
+        Ok(None) => {
             *done = true;
             None
         }

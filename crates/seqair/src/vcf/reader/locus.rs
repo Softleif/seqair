@@ -5,7 +5,7 @@ use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::raw::RawRecord;
 use crate::vcf::header::{HeaderId, VcfHeader};
 use crate::vcf::record_encoder::ContigId;
-use seqair_types::{Pos1, SmolStr};
+use seqair_types::Pos1;
 
 /// A VCF position: POS 0 (BCF −1), the telomere before a contig's first
 /// base, or a base. POS N+1, the telomere after the last base, is an
@@ -75,10 +75,8 @@ impl Fields for Locus {
         Sections::FIXED
     }
 
-    /// Names no contig (an empty name) until filled.
-    fn empty(header: &HeaderId) -> Self {
-        let contig = ContigId { tid: 0, name: SmolStr::default(), header: *header };
-        Self { contig, start: VcfPos::Telomere, end: VcfPos::Telomere }
+    fn new(_: &HeaderId, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        raw.locus()
     }
 
     fn fill(&mut self, _: &HeaderId, raw: RawRecord<'_>) -> Result<(), VcfReadError> {

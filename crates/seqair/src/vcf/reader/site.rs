@@ -389,15 +389,16 @@ impl Fields for Site {
         Sections::SITE
     }
 
-    /// No alleles, no filters, no QUAL until filled.
-    fn empty(_: &()) -> Self {
-        Self {
+    fn new(plan: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let mut site = Self {
             bytes: Vec::new(),
             spans: SiteSpans::default(),
             n_allele: 0,
             qual: FLOAT_MISSING,
             file: None,
-        }
+        };
+        site.fill(plan, raw)?;
+        Ok(site)
     }
 
     fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {

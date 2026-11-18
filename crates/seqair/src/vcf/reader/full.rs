@@ -62,15 +62,15 @@ impl Fields for FullRecord {
         Sections::SITE | Sections::INFO | Sections::SAMPLES
     }
 
-    fn empty(header: &HeaderId) -> Self {
-        Self {
-            locus: Locus::empty(header),
-            site: Site::empty(&()),
-            info: Info::empty(&()),
-            samples: Samples::empty(&()),
-            bytes: Vec::new(),
+    fn new(header: &HeaderId, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        Ok(Self {
+            locus: Locus::new(header, raw)?,
+            site: Site::new(&(), raw)?,
+            info: Info::new(&(), raw)?,
+            samples: Samples::new(&(), raw)?,
+            bytes: raw.bytes().to_vec(),
             header: *header,
-        }
+        })
     }
 
     fn fill(&mut self, header: &HeaderId, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
@@ -79,7 +79,7 @@ impl Fields for FullRecord {
         self.info.fill(&(), raw)?;
         self.samples.fill(&(), raw)?;
         self.bytes.clear();
-        self.bytes.extend_from_slice(raw.bcf_bytes());
+        self.bytes.extend_from_slice(raw.bytes());
         self.header = *header;
         Ok(())
     }
