@@ -302,17 +302,24 @@ fn every_reference_gets_its_md5() {
     std::fs::write(dir.path().join("two.fa.fai"), fai).unwrap();
     let header =
         BamHeader::from_sam_text(&format!("@SQ\tSN:c0\tLN:{n0}\n@SQ\tSN:c1\tLN:{n1}\n")).unwrap();
-    let reference = IndexedFastaReader::open(&path).unwrap();
-    let (cram, _) = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
-        .build()
-        .unwrap()
-        .finish()
-        .unwrap();
-    let text = CramStreamReader::new(&cram[..]).unwrap().into_header().header_text().to_owned();
-    for bases in [BASES, &second[..]] {
-        let m5 = format!("{:x}", md5::compute(bases.to_ascii_uppercase()));
-        assert!(text.contains(&format!("M5:{m5}")), "{text}");
+    // r[verify cram_writer.header_m5.threads]
+    let mut files = Vec::new();
+    for threads in [0, 1, 3] {
+        let reference = IndexedFastaReader::open(&path).unwrap();
+        let (cram, _) = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
+            .compression_threads(threads)
+            .build()
+            .unwrap()
+            .finish()
+            .unwrap();
+        let text = CramStreamReader::new(&cram[..]).unwrap().into_header().header_text().to_owned();
+        for bases in [BASES, &second[..]] {
+            let m5 = format!("{:x}", md5::compute(bases.to_ascii_uppercase()));
+            assert!(text.contains(&format!("M5:{m5}")), "{threads} threads: {text}");
+        }
+        files.push(cram);
     }
+    assert!(files.windows(2).all(|w| w[0] == w[1]), "threads change the header");
 }
 
 // r[verify cram_writer.substitution+2]
