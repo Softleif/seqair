@@ -182,6 +182,28 @@ pub(crate) fn check_genotype<V: FieldKind>(section: Section, name: &str) -> Resu
     Ok(())
 }
 
+// r[impl vcf_values.keys]
+/// Check that marker `V` can name a field declared as `declared`/`number`.
+pub(crate) fn check_kind<V: FieldKind>(
+    section: Section,
+    name: &str,
+    declared: ValueType,
+    number: Number,
+) -> Result<(), KeyError> {
+    check_genotype::<V>(section, name)?;
+    if !V::reads_type(declared) {
+        return Err(KeyError::TypeMismatch {
+            name: SmolStr::from(name),
+            declared,
+            requested: V::VALUE_TYPE,
+        });
+    }
+    if !V::holds_number(number) {
+        return Err(KeyError::NumberMismatch { name: SmolStr::from(name), declared: number });
+    }
+    Ok(())
+}
+
 // ── Field identifiers ──────────────────────────────────────────────────
 
 // r[impl record_encoder.field_id]

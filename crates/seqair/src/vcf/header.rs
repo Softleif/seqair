@@ -1,7 +1,9 @@
 //! VCF header model with builder, field definitions, and BCF string map.
 
-use super::error::VcfHeaderError;
-use super::record_encoder::{FieldKind, Section, check_genotype};
+use super::error::{KeyError, VcfHeaderError};
+use super::record_encoder::{
+    ContigId, FieldId, FieldKind, FilterId, FormatKey, InfoKey, Section, check_genotype, check_kind,
+};
 use crate::bam::header::BamHeader;
 use indexmap::IndexMap;
 use seqair_types::SmolStr;
@@ -204,7 +206,11 @@ pub struct StringMap {
 impl StringMap {
     /// Look up the BCF dictionary index for an ID.
     pub fn get(&self, id: &str) -> Option<usize> {
-        self.ids.get(id).map(|&idx| idx as usize)
+        self.index(id).map(|idx| idx as usize)
+    }
+
+    fn index(&self, id: &str) -> Option<u32> {
+        self.ids.get(id).copied()
     }
 
     /// The id at `idx`, or `None` past the end or in a hole.
@@ -260,6 +266,27 @@ impl StringMap {
         self.ids.insert(id.clone(), idx);
         Ok(())
     }
+}
+
+// r[impl vcf_fields.sample_idx]
+/// One sample of one header: obtainable only from that header
+/// ([`VcfHeader::sample`], [`VcfHeader::sample_indices`]) and carrying its
+/// [`HeaderId`], so a record of another file refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SampleIdx {
+    pub(crate) index: u32,
+    pub(crate) header: HeaderId,
+}
+
+impl SampleIdx {
+    /// The sample's column, 0 for the first sample.
+    pub fn index(&self) -> usize {
+        self.index as usize
+    }
+}
+
+fn unknown_field(name: &str) -> KeyError {
+    KeyError::UnknownField { name: SmolStr::from(name) }
 }
 
 // r[impl vcf_header.brand]
@@ -384,6 +411,70 @@ impl VcfHeader {
     /// BCF contig dictionary: contig name to `rid`.
     pub fn contig_map(&self) -> &StringMap {
         &self.contig_map
+    }
+
+    // r[impl vcf_values.keys]
+    /// Resolve an INFO key, checking marker `V` against the declaration
+    /// ([`FieldKind`]). The marker is usually inferred from the binding:
+    /// `let dp: InfoInt = header.info_key("DP")?;`.
+    pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
+        let def = self.infos.get(name).ok_or_else(|| unknown_field(name))?;
+        check_kind::<V>(Section::Info, name, def.typ, def.number)?;
+        Ok(InfoKey(self.field_id(name)?, PhantomData))
+    }
+
+    // r[impl vcf_values.keys]
+    /// Resolve a FORMAT key, checking marker `V` against the declaration.
+    pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
+        let def = self.formats.get(name).ok_or_else(|| unknown_field(name))?;
+        check_kind::<V>(Section::Format, name, def.typ, def.number)?;
+        Ok(FormatKey(self.field_id(name)?, PhantomData))
+    }
+
+    fn field_id(&self, name: &str) -> Result<FieldId, KeyError> {
+        let dict_idx = self.string_map.index(name).ok_or_else(|| unknown_field(name))?;
+        Ok(FieldId { dict_idx, name: SmolStr::from(name), header: self.id })
+    }
+
+    // r[impl vcf_values.keys]
+    pub fn filter(&self, name: &str) -> Result<FilterId, KeyError> {
+        let unknown = || KeyError::UnknownFilter { name: SmolStr::from(name) };
+        if !self.filters.contains_key(name) {
+            return Err(unknown());
+        }
+        let dict_idx = self.string_map.index(name).ok_or_else(unknown)?;
+        Ok(FilterId { dict_idx, name: SmolStr::from(name), header: Some(self.id) })
+    }
+
+    // r[impl vcf_values.keys]
+    pub fn contig(&self, name: &str) -> Result<ContigId, KeyError> {
+        let tid = self
+            .contig_map
+            .index(name)
+            .ok_or_else(|| KeyError::UnknownContig { name: SmolStr::from(name) })?;
+        Ok(ContigId { tid, name: SmolStr::from(name), header: self.id })
+    }
+
+    // r[impl vcf_fields.sample_idx]
+    /// The sample named `name`, as a handle valid for this header's records only.
+    pub fn sample(&self, name: &str) -> Result<SampleIdx, KeyError> {
+        // A scan, not a map: it runs once per reader, and a map would double a
+        // 10-million-sample header's memory.
+        let index = self
+            .samples
+            .iter()
+            .position(|s| s == name)
+            .and_then(|i| u32::try_from(i).ok())
+            .ok_or_else(|| KeyError::UnknownSample { name: SmolStr::from(name) })?;
+        Ok(SampleIdx { index, header: self.id })
+    }
+
+    // r[impl vcf_fields.sample_idx]
+    /// Every sample, in column order.
+    pub fn sample_indices(&self) -> impl ExactSizeIterator<Item = SampleIdx> + '_ {
+        // At most MAX_SAMPLES (builder and parser both check), so this never clamps.
+        let n = u32::try_from(self.samples.len()).unwrap_or(u32::MAX);
+        (0..n).map(|index| SampleIdx { index, header: self.id })
     }
 
     // r[impl vcf_header.brand]

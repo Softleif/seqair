@@ -190,12 +190,11 @@ pub(crate) mod writer;
 
 pub use alleles::Alleles;
 pub use error::{
-    AllelesError, KeyError, MetaLineError, ReservedMarker, VcfEncodeError, VcfError,
-    VcfHeaderError,
+    AllelesError, KeyError, MetaLineError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError,
 };
 pub use header::{
-    Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef,
-    Infos, Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
+    Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, HeaderId,
+    InfoDef, Infos, Number, SampleIdx, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
 };
 pub use record::Genotype;
 pub use record_encoder::{
