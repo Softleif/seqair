@@ -118,7 +118,17 @@ impl<'a> Prepared<'a> {
     }
 
     fn packed(&self) -> Option<&(Vec<u8>, Vec<u8>)> {
-        self.packed.get_or_init(|| pack_with(self.data, self.histogram())).as_ref()
+        self.packed
+            .get_or_init(|| {
+                // The counts when another combination has taken them, else
+                // a scan that stops past 16 symbols.
+                let present = match self.histogram.get() {
+                    Some(counts) => counts.map(|c| c > 0),
+                    None => simd::pack_symbols(Level::new(), self.data)?,
+                };
+                pack_with(self.data, &present)
+            })
+            .as_ref()
     }
 }
 
@@ -295,17 +305,17 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
 /// order) and the packed bytes, each symbol's index into the map, lowest
 /// bits first. `None` for more than 16 symbols.
 pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    pack_with(data, &histogram(data))
+    pack_with(data, &simd::pack_symbols(Level::new(), data)?)
 }
 
-/// [`pack`] of `data` with its order-0 counts.
+/// [`pack`] of `data` with the bytes it holds.
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
 #[allow(clippy::cast_possible_truncation, reason = "at most 16 symbols, so indices fit 4 bits")]
 #[allow(clippy::arithmetic_side_effects, reason = "8 / per_byte with per_byte ∈ {2, 4, 8}")]
-fn pack_with(data: &[u8], counts: &[u32; 256]) -> Option<(Vec<u8>, Vec<u8>)> {
+fn pack_with(data: &[u8], present: &[bool; 256]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut code = [0u8; 256];
     let mut meta = vec![0];
-    for (sym, _) in (0u8..=255).zip(counts).filter(|(_, c)| **c > 0) {
+    for (sym, _) in (0u8..=255).zip(present).filter(|(_, p)| **p) {
         code[usize::from(sym)] = (meta.len() - 1) as u8;
         meta.push(sym);
     }
@@ -964,6 +974,23 @@ mod tests {
             })
             .collect();
         assert_eq!(pack_indices(&data, &code, per_byte), want);
+    }
+
+    // r[verify cram_writer.rans_nx16.simd]
+    // r[verify io.simd_portable]
+    /// PACK's symbols at every level: the bytes the data holds, or none
+    /// past 16 of them.
+    #[hegel::test]
+    fn pack_finds_the_symbols_the_data_holds(tc: TestCase) {
+        let data = draw_data(&tc);
+        let mut want = [false; 256];
+        for &b in &data {
+            want[usize::from(b)] = true;
+        }
+        let want = (want.iter().filter(|&&p| p).count() <= 16).then_some(want);
+        for level in crate::simd_levels::levels() {
+            assert_eq!(simd::pack_symbols(level, &data), want, "{level:?}, {} bytes", data.len());
+        }
     }
 
     // r[verify cram_writer.rans_nx16.simd]
