@@ -103,7 +103,7 @@ r[cram_writer.record.name]
 `RN` MUST be the read name. An empty read name MUST be refused (`EmptyReadName`): BAM stores none as `*`, and a CRAM reader names a record with an empty name itself. A name holding a NUL, which would end it early in `RN`, MUST be refused (`NulInReadName`).
 
 r[cram_writer.record.unmapped]
-An unmapped record's bases MUST go to `BA`, one byte each, as the ASCII of its IUPAC code. CRAM stores no CIGAR and no mapping quality for an unmapped record; one that has a CIGAR, or a MAPQ other than 0, MUST be refused (`UnmappedWithAlignment`) rather than lose them.
+An unmapped record's bases MUST go to `BA`, one byte each, as the ASCII of its IUPAC code. CRAM stores no CIGAR and no mapping quality for an unmapped record: the writer MUST drop them, as htslib does (some aligners give unmapped reads a MAPQ), and MUST log a warning the first time it does.
 
 r[cram_writer.record.quality]
 `QS` MUST hold the record's qualities as they are, `0xFF` for each base of a record without, after the `QS` values of its `B` features.
@@ -139,6 +139,7 @@ A record read back MUST equal the record written, field by field, except for the
 - `=` and `X` CIGAR operations read back as `M`, adjacent operations of one kind as one, and zero-length operations not at all.
 - Tags read back in another order: a dropped `MD`/`NM` is regenerated after the stored tags, and `RG` comes last (`r[cram.record.rg_tag+2]`). A mapped record with bases and without `MD` or `NM` reads back with the one it lacks generated, as htslib's decoder generates it; an `NM` reads back as the smallest unsigned type holding it.
 - The mate reference of a record without FLAG `0x1` reads back as none.
+- An unmapped record reads back with MAPQ 0 and no CIGAR.
 
 The oracles are seqair's CRAM reader and `samtools view`: the records of a CRAM the writer wrote MUST print, through both, as `samtools view` prints the input after the same normalizations.
 

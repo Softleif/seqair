@@ -68,6 +68,8 @@ pub(super) struct Checked {
     /// Whether the record has an `MD` tag, and an `NM` tag.
     has_md: bool,
     has_nm: bool,
+    /// An unmapped record whose CIGAR or MAPQ is not stored.
+    pub drops_alignment: bool,
 }
 
 /// One aux tag's bytes.
@@ -137,15 +139,12 @@ pub(super) fn check(
         return Err(CramWriteError::Unsorted { previous, record: placement });
     }
 
-    if unmapped && (!view.cigar.is_empty() || view.mapq.as_byte() != 0) {
-        return Err(CramWriteError::UnmappedWithAlignment {
-            cigar_ops: view.cigar.len(),
-            mapq: view.mapq.as_byte(),
-        });
-    }
+    // r[impl cram_writer.record.unmapped]
+    // CRAM has no CIGAR or MAPQ for an unmapped record; they are dropped.
+    let drops_alignment = unmapped && (!view.cigar.is_empty() || view.mapq.as_byte() != 0);
     let mut query_len = 0u64;
     let mut ref_len = 0u64;
-    for op in view.cigar {
+    for op in view.cigar.iter().filter(|_| !unmapped) {
         let len = u64::from(op.len());
         match op.op_type() {
             CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {
@@ -201,7 +200,14 @@ pub(super) fn check(
 
     let pos = view.pos.map_or(0, Pos0::as_i64);
     let span = if unmapped { 1 } else { i64::try_from(ref_len).unwrap_or(i64::MAX) };
-    Ok(Checked { placement, read_len, end: pos.saturating_add(span), has_md, has_nm })
+    Ok(Checked {
+        placement,
+        read_len,
+        end: pos.saturating_add(span),
+        has_md,
+        has_nm,
+        drops_alignment,
+    })
 }
 
 /// The record's data series, appended to `slice`. `reference` is the

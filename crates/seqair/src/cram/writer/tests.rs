@@ -65,8 +65,6 @@ fn refused_records_leave_the_writer_usable() {
     w.write(&mapped(5, b"first", b"ACGTTT")).unwrap();
 
     let mut unsorted = mapped(2, b"r", b"GT");
-    let mut unmapped_with_cigar = mapped(5, b"r", b"AC");
-    unmapped_with_cigar.flags = BamFlags::from(0x4);
     let mut tab = mapped(5, b"r", b"AC");
     // `set_string` refuses a TAB; a BAM read from disk can hold one.
     tab.aux = AuxData::from_bytes(b"ZZZa\tb\0".to_vec());
@@ -87,9 +85,6 @@ fn refused_records_leave_the_writer_usable() {
     let cases: Vec<(OwnedBamRecord, IsExpected)> = vec![
         (unsorted, |e| matches!(e, CramWriteError::Unsorted { .. })),
         (mapped(5, b"", b"AC"), |e| matches!(e, CramWriteError::EmptyReadName)),
-        (unmapped_with_cigar, |e| {
-            matches!(e, CramWriteError::UnmappedWithAlignment { cigar_ops: 1, mapq: 60 })
-        }),
         (mapped(5, b"a\0b", b"AC"), |e| matches!(e, CramWriteError::NulInReadName)),
         (bad_tag_name, |e| matches!(e, CramWriteError::InvalidTagName { .. })),
         (tab, |e| matches!(e, CramWriteError::TabInStringTag { .. })),
@@ -240,4 +235,21 @@ fn md_nm_are_dropped_only_where_the_decode_regenerates_them() {
     let aux = |i: usize| records[i].aux().as_bytes().to_vec();
     assert_eq!(aux(0), b"MDZ2G5\0NMC\x01");
     assert_eq!(aux(1), b"MDZ8\0NMC\x00");
+}
+
+// r[verify cram_writer.record.unmapped]
+/// An unmapped record's CIGAR and MAPQ are dropped, as htslib drops them.
+#[test]
+fn an_unmapped_record_loses_its_cigar_and_mapq() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = writer(dir.path(), &header(""));
+    let mut r = mapped(5, b"u", b"ACGT");
+    r.flags = BamFlags::from(0x4);
+    w.write(&r).unwrap();
+    let (cram, _) = w.finish().unwrap();
+    let records = read_back(dir.path(), &cram);
+    assert_eq!(records[0].mapq().as_byte(), 0);
+    assert!(records[0].cigar().is_empty());
+    assert_eq!(records[0].pos(), Pos0::new(5));
+    assert_eq!(records[0].seq_len(), 4);
 }

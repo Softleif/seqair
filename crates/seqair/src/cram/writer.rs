@@ -108,12 +108,6 @@ pub enum CramWriteError {
     #[error("record has an empty read name")]
     EmptyReadName,
 
-    // r[impl cram_writer.record.unmapped]
-    #[error(
-        "unmapped record has {cigar_ops} CIGAR operations and MAPQ {mapq}; CRAM stores neither for an unmapped record"
-    )]
-    UnmappedWithAlignment { cigar_ops: usize, mapq: u8 },
-
     /// `RN` is NUL-terminated.
     #[error("read name holds a NUL byte")]
     NulInReadName,
@@ -198,6 +192,7 @@ pub struct CramWriter<W: Write> {
     /// Slices back from the pool, to fill again.
     spare: Vec<SliceBuilder>,
     records_per_slice: u32,
+    warned_unmapped_alignment: bool,
     scratch: Scratch,
     poisoned: bool,
 }
@@ -234,6 +229,7 @@ impl<W: Write> CramWriter<W> {
                 .transpose()?,
             spare: Vec::new(),
             records_per_slice: options.records_per_slice,
+            warned_unmapped_alignment: false,
             scratch: Scratch::default(),
             poisoned: false,
         })
@@ -348,6 +344,14 @@ impl<W: Write> CramWriter<W> {
             &mut self.scratch,
         );
         self.last = Some(checked.placement);
+        if checked.drops_alignment && !self.warned_unmapped_alignment {
+            self.warned_unmapped_alignment = true;
+            tracing::warn!(
+                qname = %String::from_utf8_lossy(view.qname),
+                "unmapped record with a CIGAR or MAPQ; CRAM stores neither, so it reads back \
+                 with MAPQ 0 and no CIGAR (warned once per writer)"
+            );
+        }
         Ok(())
     }
 
