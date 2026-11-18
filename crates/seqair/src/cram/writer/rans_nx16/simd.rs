@@ -26,18 +26,36 @@ type Enc = u64;
 /// `q = ⌊2x·m / 2^32⌋ >> s = ⌊x·m / 2^(31+s)⌋` with `s = ⌈log2 f⌉` and
 /// `m = ⌈2^(31+s) / f⌉`, exact for every `x < 2^31` (Alverson; the error
 /// `m·f − 2^(31+s) < f ≤ 2^s` times `x` stays below `2^(31+s)`).
-#[allow(clippy::arithmetic_side_effects, reason = "1 ≤ f ≤ 4096, so s ≤ 12 and m < 2^32")]
-#[allow(clippy::cast_possible_truncation, reason = "m < 2^32")]
+#[allow(clippy::arithmetic_side_effects, reason = "1 ≤ f ≤ 4096, so s ≤ 12")]
+#[allow(clippy::indexing_slicing, reason = "f ≤ 4096")]
 pub(super) fn enc(sym: Symbol) -> Enc {
     let f = sym.freq;
     if f == 0 {
         return 0;
     }
     let s = 32 - (f - 1).leading_zeros();
-    let m = ((1u64 << (31 + s)) + u64::from(f) - 1) / u64::from(f);
-    debug_assert!(m <= u64::from(u32::MAX) && sym.start < 1 << 12 && f <= 1 << 12);
-    u64::from(m as u32) | (u64::from(sym.start | f << 12 | s << 25) << 32)
+    debug_assert!(sym.start < 1 << 12 && f <= 1 << 12);
+    u64::from(RECIPROCALS[f as usize]) | (u64::from(sym.start | f << 12 | s << 25) << 32)
 }
+
+/// [`enc`]'s `m` for each frequency up to 4096, so that building a table
+/// takes no 64-bit division per symbol.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "const table build: 1 ≤ f ≤ 4096, so s ≤ 12 and m < 2^32"
+)]
+static RECIPROCALS: [u32; 4097] = {
+    let mut t = [0u32; 4097];
+    let mut f = 1u64;
+    while f <= 4096 {
+        let s = 32 - (f as u32 - 1).leading_zeros();
+        t[f as usize] = (1u64 << (31 + s)).div_ceil(f) as u32;
+        f += 1;
+    }
+    t
+};
 
 /// The renormalization words, written backwards from the end of `buf` so
 /// that `buf[at..]` holds them in decode order. Every symbol emits at most
