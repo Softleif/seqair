@@ -5,7 +5,7 @@ use super::CramWriteError;
 use super::mates::{self, MateRecord};
 use super::metrics::{Method, Metrics, Plan, Trial};
 use super::{CramVersion, rans, rans_nx16, tok3};
-use crate::cram::varint::{write_itf8, write_ltf8};
+use crate::cram::varint::{decode_itf8, write_itf8, write_ltf8};
 use crate::io::CompressionLevel;
 use crate::reader::Tid;
 use rustc_hash::FxHashMap;
@@ -91,10 +91,36 @@ impl Series {
         (self as i32).saturating_add(1)
     }
 
+    /// The one value a series of integers or bytes holds, if it holds no
+    /// other; 0 for one that holds none. `None` for a byte-array series.
+    pub(super) fn constant(self, data: &[u8]) -> Option<i32> {
+        match self {
+            Self::Rn | Self::In | Self::Sc | Self::Bb | Self::BbLen => None,
+            Self::Fc | Self::Ba | Self::Qs | Self::Bs => {
+                let first = data.first().copied().unwrap_or(0);
+                data.iter().all(|&b| b == first).then_some(i32::from(first))
+            }
+            _ => {
+                let mut rest = data;
+                let mut first = None;
+                while !rest.is_empty() {
+                    let (value, n) = decode_itf8(rest)?;
+                    rest = rest.get(n..)?;
+                    if *first.get_or_insert(value) != value {
+                        return None;
+                    }
+                }
+                // ITF8 holds an `i32`'s bits.
+                #[allow(clippy::cast_possible_wrap, reason = "the bits of an i32")]
+                Some(first.map_or(0, |v| v as i32))
+            }
+        }
+    }
+
     // r[impl cram_writer.data_series+2]
-    /// The series' key and encoding in the data series map; `None` for
-    /// `BbLen`, which `BB`'s encoding names.
-    fn encoding(self, out: &mut Vec<u8>) -> Option<()> {
+    /// The series' key and encoding in the data series map, `constant` if
+    /// it holds one value; `None` for `BbLen`, which `BB`'s encoding names.
+    fn encoding(self, out: &mut Vec<u8>, constant: Option<i32>) -> Option<()> {
         let key: &[u8; 2] = match self {
             Self::Bf => b"BF",
             Self::Cf => b"CF",
@@ -125,6 +151,10 @@ impl Series {
             Self::BbLen => return None,
         };
         out.extend_from_slice(key);
+        if let Some(value) = constant {
+            constant_code(out, value);
+            return Some(());
+        }
         match self {
             Self::Rn | Self::In | Self::Sc => byte_array_stop(out, 0, self.content_id()),
             Self::Bb => byte_array_len(
@@ -172,7 +202,7 @@ fn byte_array_len(
 }
 
 /// A `HUFFMAN` code of one symbol, which takes no bits: a constant.
-fn constant(out: &mut Vec<u8>, value: i32) {
+fn constant_code(out: &mut Vec<u8>, value: i32) {
     encoding(out, 3, |p| {
         write_itf8(p, 1);
         write_itf8(p, value);
@@ -458,24 +488,29 @@ impl SliceBuilder {
             &self.mates,
             self.series.get(Series::Rn as usize).map_or(&[], Vec::as_slice),
         );
-        // The external blocks, series first, then tags: every series the
-        // compression header lists, empty or not, as noodles wants a block
-        // for each series a record reads, even when it reads nothing.
-        let blocks: Vec<(i32, &[u8])> = SERIES
-            .into_iter()
-            .filter_map(|series| {
-                let data = match series {
-                    Series::Cf => &mates.cf,
-                    Series::Mf => &mates.mf,
-                    Series::Ns => &mates.ns,
-                    Series::Np => &mates.np,
-                    Series::Ts => &mates.ts,
-                    Series::Nf => &mates.nf,
-                    Series::Bs => &bs,
-                    _ => self.series.get(series as usize)?,
-                };
-                Some((series.content_id(), data.as_slice()))
-            })
+        let empty = Vec::new();
+        let series_data = SERIES.map(|series| {
+            let data = match series {
+                Series::Cf => &mates.cf,
+                Series::Mf => &mates.mf,
+                Series::Ns => &mates.ns,
+                Series::Np => &mates.np,
+                Series::Ts => &mates.ts,
+                Series::Nf => &mates.nf,
+                Series::Bs => &bs,
+                _ => self.series.get(series as usize).unwrap_or(&empty),
+            };
+            (series, data.as_slice())
+        });
+        // r[impl cram_writer.data_series+2]
+        let constants = series_data.map(|(series, data)| series.constant(data));
+        // The external blocks, series first, then tags: every series that is
+        // no constant and holds data.
+        let blocks: Vec<(i32, &[u8])> = series_data
+            .iter()
+            .zip(&constants)
+            .filter(|((_, data), constant)| constant.is_none() && !data.is_empty())
+            .map(|(&(series, data), _)| (series.content_id(), data))
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
             .collect();
         let mut external = Vec::new();
@@ -502,7 +537,11 @@ impl SliceBuilder {
             &mut compression_header,
             1,
             0,
-            &self.compression_header(matches!(kind, SliceKind::Mapped { reference: true, .. }), sm),
+            &self.compression_header(
+                matches!(kind, SliceKind::Mapped { reference: true, .. }),
+                sm,
+                &constants,
+            ),
         )?;
 
         let mut slice_header = Vec::new();
@@ -550,7 +589,12 @@ impl SliceBuilder {
         })
     }
 
-    fn compression_header(&self, reference: bool, sm: [u8; 5]) -> Vec<u8> {
+    fn compression_header(
+        &self,
+        reference: bool,
+        sm: [u8; 5],
+        constants: &[Option<i32>; SERIES.len()],
+    ) -> Vec<u8> {
         // r[impl cram_writer.preservation_map]
         let mut map = Vec::new();
         write_itf8(&mut map, 5);
@@ -574,8 +618,8 @@ impl SliceBuilder {
         // Every series, used or not: htslib's decoder wants an encoding for
         // one it reads nothing of (`QS` of a record without bases).
         write_small_len(&mut ds, SERIES.len().saturating_sub(1));
-        for series in SERIES {
-            series.encoding(&mut ds);
+        for (series, &constant) in SERIES.into_iter().zip(constants) {
+            series.encoding(&mut ds, constant);
         }
 
         let mut tags = Vec::new();
@@ -594,7 +638,7 @@ impl SliceBuilder {
                 ),
                 ty => byte_array_len(
                     &mut tags,
-                    |p| constant(p, fixed_size(ty)),
+                    |p| constant_code(p, fixed_size(ty)),
                     |p| {
                         external(p, tag.key);
                     },
