@@ -175,7 +175,7 @@ thread_local! {
     /// [`Words`]' buffer, kept between blocks: a fresh one per block is a
     /// page fault per 4 KiB of bytes.
     static WORDS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// The order-1 counts and coding table (1.5 MiB), kept between blocks:
+    /// The order-1 counts and coding table (2.5 MiB), kept between blocks:
     /// zeroing them would cost a small block more than its coding.
     static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::default());
 }
@@ -231,7 +231,8 @@ const PAIR_STRIDE: usize = (1 << 16) + 16;
 /// Order-1 counts and the coding table, each indexed by the context and
 /// the symbol as a big-endian u16 ([`pair`]).
 struct Order1Scratch {
-    counts: Box<[[u32; PAIR_STRIDE]; PAIR_TABLES]>,
+    /// [`PAIR_TABLES`] tables of [`PAIR_STRIDE`] counts, end to end.
+    counts: Vec<u32>,
     /// The rows of `counts` the last block may have left non-zero.
     dirty: [bool; 256],
     /// Rows of contexts the current block lacks hold an earlier block's
@@ -241,17 +242,19 @@ struct Order1Scratch {
 
 impl Scratch for Order1Scratch {}
 
-/// A zeroed `Box<[T; N]>` straight from the allocator, never on the stack.
-fn zeroed_box<T: Clone, const N: usize>(zero: T) -> Box<[T; N]> {
-    let Ok(b) = vec![zero; N].into_boxed_slice().try_into() else {
-        unreachable!("a Vec of N elements converts to [T; N]")
-    };
-    b
+/// [`Order1Scratch::counts`] as fixed-size tables the counting loops index
+/// without bounds checks; `None` never happens.
+fn pair_tables(counts: &mut [u32]) -> Option<&mut [[u32; PAIR_STRIDE]; PAIR_TABLES]> {
+    counts.as_chunks_mut::<PAIR_STRIDE>().0.try_into().ok()
 }
 
 impl Default for Order1Scratch {
     fn default() -> Self {
-        Self { counts: zeroed_box([0; PAIR_STRIDE]), dirty: [false; 256], enc: zeroed_box(0) }
+        // Zeroed by the allocator: no table is built on the stack first.
+        let Ok(enc) = vec![0; 1 << 16].into_boxed_slice().try_into() else {
+            unreachable!("a Vec of 2^16 elements converts to [Enc; 2^16]")
+        };
+        Self { counts: vec![0; PAIR_STRIDE * PAIR_TABLES], dirty: [false; 256], enc }
     }
 }
 
@@ -308,7 +311,7 @@ fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
         return None;
     }
     with_scratch(&ORDER_1, |o1| {
-        let table = order_1_tables(o1, data, level);
+        let table = order_1_tables(o1, data, level)?;
         let enc = &*o1.enc;
         with_scratch(&WORDS, |scratch| {
             let mut words = Words::new(scratch, data.len())?;
@@ -326,23 +329,21 @@ fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
     clippy::arithmetic_side_effects,
     reason = "counts ≤ data.len() < 2^32; each quarter start was counted once as a pair"
 )]
-fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], level: Level) -> Vec<u8> {
+fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], level: Level) -> Option<Vec<u8>> {
+    let counts = pair_tables(&mut o1.counts)?;
+    let dirty = std::mem::replace(&mut o1.dirty, [false; 256]);
     // Only the first table can hold counts: the merge below empties the
     // others' rows of every context it touched.
-    for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
-        o1.counts[0][ctx << 8..][..256].fill(0);
-        *dirty = false;
+    for ctx in (0..256).filter(|&c| dirty[c]) {
+        counts[0][ctx << 8..][..256].fill(0);
     }
-    let counts = &mut *o1.counts;
     // Every context is a byte of `data`, or 0 at a quarter's start.
     let mut contexts = [false; 256];
     contexts[0] = true;
     simd::mark_present(level, data, &mut contexts);
     o1.dirty = contexts;
 
-    let Some((&first, rest)) = data.split_first() else {
-        return Vec::new();
-    };
+    let (&first, rest) = data.split_first()?;
     counts[0][pair(0, first)] += 1;
     let mut prev = first;
     let (rounds, tail) = rest.as_chunks::<PAIR_TABLES>();
@@ -392,7 +393,7 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], level: Level) -> Vec<u8> 
             pack_row(&freq, &mut enc[ctx << 8..][..256]);
         }
     });
-    table
+    Some(table)
 }
 
 /// One state's step: renormalize (0–2 bytes, `x` being below 2^31 and
