@@ -212,7 +212,7 @@ pub(super) struct SliceBuilder {
 }
 
 /// htslib's `seqs_per_slice` and `bases_per_slice` defaults.
-const MAX_RECORDS: u32 = 10_000;
+pub(super) const MAX_RECORDS: u32 = 10_000;
 const MAX_BASES: u64 = 5_000_000;
 
 impl SliceBuilder {
@@ -225,11 +225,11 @@ impl SliceBuilder {
     }
 
     /// Whether the slice must be written before a record of `kind` with
-    /// `read_len` bases.
-    pub(super) fn ends_before(&self, kind: SliceKind, read_len: i32) -> bool {
+    /// `read_len` bases, holding at most `max_records`.
+    pub(super) fn ends_before(&self, kind: SliceKind, read_len: i32, max_records: u32) -> bool {
         self.kind.is_some_and(|k| {
             k != kind
-                || self.n_records >= MAX_RECORDS
+                || self.n_records >= max_records
                 || self.n_bases.saturating_add(u64::from(read_len.unsigned_abs())) > MAX_BASES
         })
     }
@@ -246,6 +246,9 @@ impl SliceBuilder {
         self.n_bases = self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()));
         let ap = pos1.saturating_sub(self.prev_ap);
         self.prev_ap = pos1;
+        // Both are 0 or a 1-based position below `i32::MAX` (`check` refuses
+        // `Pos0::MAX`), so their difference fits.
+        debug_assert!(i32::try_from(ap).is_ok(), "AP delta {ap}");
         self.int(Series::Ap, i32::try_from(ap).unwrap_or(i32::MAX));
     }
 
@@ -410,7 +413,6 @@ impl SliceBuilder {
             .count()
             .saturating_add(self.tags.len());
 
-        // r[impl cram_writer.compression_header]
         let mut compression_header = Vec::new();
         Codecs::raw_block(
             &mut compression_header,

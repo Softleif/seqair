@@ -37,7 +37,7 @@ r[cram_writer.header_text]
 CRAM has no binary reference list: the header text is the only place the reader learns the references. If the header's text has no `@SQ` lines, the writer MUST write one per target (`SN`, `LN`) after the `@HD` line (or first, if there is none). If it has `@SQ` lines, their names MUST be the targets', in order, or the build fails with `CramWriteError::HeaderTargetsMismatch`.
 
 r[cram_writer.header_m5]
-Every `@SQ` line of a reference the FASTA holds MUST carry `M5`, the lowercase hex MD5 of the reference's bases uppercased, which is what htslib checks a reference against. The writer MUST add `M5` where the line has none. Where the line has one that is not the FASTA's, or an `LN` that is not the FASTA's length, the build MUST fail (`ReferenceMd5Mismatch`, `ReferenceLengthMismatch`): the file would claim a reference it was not written against. A reference the FASTA lacks keeps its line as it is, and its records are written without the reference (`r[cram_writer.reference_free]`). Computing the MD5s reads the whole FASTA once, at `build()`.
+Every `@SQ` line of a reference the FASTA holds MUST carry `M5`, the lowercase hex MD5 of the reference's bases uppercased, which is what htslib checks a reference against. The writer MUST add `M5` where the line has none. An `LN` that is not the FASTA's length MUST fail the build (`ReferenceLengthMismatch`). An `M5` that is not the FASTA's MUST refuse the first record on that reference and every later one (`ReferenceMd5Mismatch`) without reading the reference again: the file would claim a reference it was not written against. It is checked when the writer first reads the reference rather than at build, so a header that carries every `M5` (one copied from a CRAM) costs no pass over the FASTA. A reference the FASTA lacks keeps its line as it is, and its records are written without the reference (`r[cram_writer.reference_free]`). Computing the missing MD5s reads those references once, at `build()`.
 
 r[cram_writer.eof]
 The file MUST end with the CRAM 3 EOF container, the 38 bytes htslib's `cram_check_EOF` matches.
@@ -63,10 +63,10 @@ r[cram_writer.blocks]
 Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. An external block MUST be written for each data series and tag that has data in the slice, and only for those. The compression header MUST list an encoding for every data series all the same: htslib's decoder refuses a slice that lacks the encoding of a series it reads, even when it reads nothing of it (`QS` for a record without bases), and finds an absent block empty.
 
 r[cram_writer.compression]
-Each block's data MUST be stored by whichever of the writer's codecs gives the fewest bytes, raw included; phase 1 offers gzip (at the builder's `compression_level`) and rANS 4×8 order 0 and order 1 (`r[cram_writer.threads]
-`CramWriterBuilder::compression_threads(n)` MUST assemble and compress containers on `n` worker threads while the calling thread encodes the next slice, and write them in order; `n = 0` (the default) does it on the calling thread. The file and its index MUST be byte for byte those of the single-threaded writer: a slice's content and its codec choices depend on its records only.
+Each block's data MUST be stored by whichever of the writer's codecs gives the fewest bytes, raw included; phase 1 offers gzip (at the builder's `compression_level`) and rANS 4×8 order 0 and order 1 (`r[cram_writer.rans4x8]`). The choice is per block and changes no decoded byte.
 
-r[cram_writer.rans4x8]`). The choice is per block and changes no decoded byte.
+r[cram_writer.threads]
+`CramWriterBuilder::compression_threads(n)` MUST assemble and compress containers on `n` worker threads while the calling thread encodes the next slice, and write them in order; `n = 0` (the default) does it on the calling thread. The file and its index MUST be byte for byte those of the single-threaded writer: a slice's content and its codec choices depend on its records only.
 
 r[cram_writer.rans4x8]
 The rANS 4×8 encoder MUST write streams `r[cram.codec.rans4x8]` decodes to the input, order 0 and order 1, with each table's frequencies summing to 4095, as htscodecs normalizes them (its decoder takes 4095 or 4096), every present symbol at least 1. Order 1 needs four bytes at least; a block too small for it is not tried with it. The decoder is its oracle: every input MUST round-trip.
@@ -80,7 +80,7 @@ r[cram_writer.data_series]
 Every data series MUST be encoded `EXTERNAL`, each in a block of its own content id. `RN`, `IN` and `SC` MUST be `BYTE_ARRAY_STOP` with stop byte 0; `BB` MUST be `BYTE_ARRAY_LEN` with external length and external bytes, in two blocks.
 
 r[cram_writer.tags]
-A tag is keyed by its name and BAM type, `name[0] << 16 | name[1] << 8 | type`, and stored in the external block of that key, as htslib does. `A`, `c`, `C`, `s`, `S`, `i`, `I` and `f` values MUST be `BYTE_ARRAY_LEN` with a constant length (a one-symbol `HUFFMAN` code of the type's size) and external bytes; `Z` and `H` values (with their NUL) `BYTE_ARRAY_STOP` with stop byte TAB; `B` arrays `BYTE_ARRAY_LEN` with external length and bytes in the same block. A `Z` or `H` value holding a TAB, which SAM does not allow and the stop byte could not frame, MUST be refused (`TabInStringTag`). A `cF` tag (htslib's private CRAM flags, which readers drop) MUST be refused (`ReservedTag`).
+A tag is keyed by its name and BAM type, `name[0] << 16 | name[1] << 8 | type`, and stored in the external block of that key, as htslib does. `A`, `c`, `C`, `s`, `S`, `i`, `I` and `f` values MUST be `BYTE_ARRAY_LEN` with a constant length (a one-symbol `HUFFMAN` code of the type's size) and external bytes; `Z` and `H` values (with their NUL) `BYTE_ARRAY_STOP` with stop byte TAB; `B` arrays `BYTE_ARRAY_LEN` with external length and bytes in the same block. A `Z` or `H` value holding a TAB, which SAM does not allow and the stop byte could not frame, MUST be refused (`TabInStringTag`). A `cF` tag (htslib's private CRAM flags, which readers drop) MUST be refused (`ReservedTag`), and so MUST a tag name other than a letter followed by a letter or digit (`InvalidTagName`): the tag dictionary is NUL-separated.
 
 ## Records
 
@@ -100,7 +100,7 @@ r[cram_writer.record.mate]
 Every record MUST be detached: `MF` (bit `0x1` for FLAG `0x20`, bit `0x2` for `0x8`), `NS` (the mate's reference id, `-1` for none), `NP` (the mate's 1-based position, 0 for none) and `TS` (the template length) carry the BAM mate fields as they are.
 
 r[cram_writer.record.name]
-`RN` MUST be the read name. An empty read name MUST be refused (`EmptyReadName`): BAM stores none as `*`, and a CRAM reader names a record with an empty name itself.
+`RN` MUST be the read name. An empty read name MUST be refused (`EmptyReadName`): BAM stores none as `*`, and a CRAM reader names a record with an empty name itself. A name holding a NUL, which would end it early in `RN`, MUST be refused (`NulInReadName`).
 
 r[cram_writer.record.unmapped]
 An unmapped record's bases MUST go to `BA`, one byte each, as the ASCII of its IUPAC code. CRAM stores no CIGAR and no mapping quality for an unmapped record; one that has a CIGAR, or a MAPQ other than 0, MUST be refused (`UnmappedWithAlignment`) rather than lose them.
@@ -126,7 +126,7 @@ r[cram_writer.reference_free]
 A slice on a reference the FASTA lacks MUST be written without it (`RR` false): every `M`, `=` and `X` run becomes a `b` feature holding its bases (`BB`), as htslib does without a reference.
 
 r[cram_writer.md_nm]
-The writer MUST drop a record's `MD:Z` tag when it is byte for byte the `MD` a decode generates from the stored features (`r[cram.stream.md_nm]`), and its `NM` tag when its value is the generated `NM`; otherwise it keeps them. No tag is generated, so none is dropped, for an unmapped record, SEQ `*`, or a slice without the reference.
+The writer MUST drop a record's `MD:Z` tag when it is byte for byte the `MD` a decode generates from the stored features (`r[cram.stream.md_nm]`), and its `NM` tag when its value is the generated `NM`; otherwise it keeps them. No tag is generated, so none is dropped, for an unmapped record, SEQ `*`, or a slice without the reference. Neither is dropped where the read's reference span holds a byte that is no IUPAC code: seqair's decode writes it into `MD` as `N`, htslib's as it is.
 
 r[cram_writer.md_nm.past_reference_end]
 A record with a deletion that runs past its reference's end MUST keep `MD` and `NM` as they are, and MUST flag the ones it lacks in a `cF:C` tag (bit 1 `MD`, bit 2 `NM`), htslib's private flags, which every reader drops (`r[cram.record.cf_tag]`). htslib's decoder fails such a record whenever it generates either tag ("CRAM CIGAR extends beyond slice reference extents"), even in files htslib wrote.
@@ -136,7 +136,7 @@ A record with a deletion that runs past its reference's end MUST keep `MD` and `
 r[cram_writer.fidelity]
 A record read back MUST equal the record written, field by field, except for these normalizations, each one htslib's:
 
-- `=` and `X` CIGAR operations read back as `M`, and adjacent operations of one kind as one.
+- `=` and `X` CIGAR operations read back as `M`, adjacent operations of one kind as one, and zero-length operations not at all.
 - Tags read back in another order: a dropped `MD`/`NM` is regenerated after the stored tags, and `RG` comes last (`r[cram.record.rg_tag+2]`). A mapped record with bases and without `MD` or `NM` reads back with the one it lacks generated, as htslib's decoder generates it; an `NM` reads back as the smallest unsigned type holding it.
 - The mate reference of a record without FLAG `0x1` reads back as none.
 

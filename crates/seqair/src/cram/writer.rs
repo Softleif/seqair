@@ -109,8 +109,17 @@ pub enum CramWriteError {
     EmptyReadName,
 
     // r[impl cram_writer.record.unmapped]
-    #[error("unmapped record has a CIGAR or a MAPQ other than 0, which CRAM cannot store")]
-    UnmappedWithAlignment,
+    #[error(
+        "unmapped record has {cigar_ops} CIGAR operations and MAPQ {mapq}; CRAM stores neither for an unmapped record"
+    )]
+    UnmappedWithAlignment { cigar_ops: usize, mapq: u8 },
+
+    /// `RN` is NUL-terminated.
+    #[error("read name holds a NUL byte")]
+    NulInReadName,
+
+    #[error("tag name {tag} is not a letter and a letter or digit")]
+    InvalidTagName { tag: AuxTag },
 
     #[error("CIGAR covers {cigar} query bases, but SEQ has {seq}")]
     CigarSeqLengthMismatch { cigar: u64, seq: usize },
@@ -149,6 +158,13 @@ pub enum CramWriteError {
     NoSuchRecord { idx: RecordIdx },
 }
 
+/// A record's qualities, `None` when it has none: empty, or `0xFF` first,
+/// as [`RawBamRecord::qual`] reads them.
+fn qualities(qual: &[BaseQuality]) -> Option<&[u8]> {
+    let bytes = BaseQuality::slice_to_bytes(qual);
+    bytes.first().filter(|&&q| q != 0xFF).map(|_| bytes)
+}
+
 /// Bytes written so far, which the index's container offsets count.
 struct Counting<W> {
     inner: W,
@@ -181,6 +197,7 @@ pub struct CramWriter<W: Write> {
     pool: Option<Pool>,
     /// Slices back from the pool, to fill again.
     spare: Vec<SliceBuilder>,
+    records_per_slice: u32,
     scratch: Scratch,
     poisoned: bool,
 }
@@ -191,13 +208,11 @@ impl<W: Write> CramWriter<W> {
         file_id: [u8; 20],
         header: &BamHeader,
         mut fasta: IndexedFastaReader,
-        write_index: bool,
-        level: CompressionLevel,
-        threads: usize,
+        options: Options,
     ) -> Result<Self, CramWriteError> {
         let header = CramHeader::new(header, &mut fasta)?;
         let mut out = Counting { inner, written: 0 };
-        let mut codecs = container::Codecs::new(level);
+        let mut codecs = container::Codecs::new(options.level);
         // r[impl cram_writer.file_definition]
         let mut def = Vec::with_capacity(26);
         def.extend_from_slice(b"CRAM\x03\x00");
@@ -212,10 +227,13 @@ impl<W: Write> CramWriter<W> {
             slice: SliceBuilder::default(),
             last: None,
             record_counter: 0,
-            index: write_index.then(Vec::new),
+            index: options.write_index.then(Vec::new),
             codecs,
-            pool: (threads > 0).then(|| Pool::new(threads, level)).transpose()?,
+            pool: (options.threads > 0)
+                .then(|| Pool::new(options.threads, options.level))
+                .transpose()?,
             spare: Vec::new(),
+            records_per_slice: options.records_per_slice,
             scratch: Scratch::default(),
             poisoned: false,
         })
@@ -229,7 +247,6 @@ impl<W: Write> CramWriter<W> {
     /// is refused and leaves the writer as it was. An error writing a full
     /// slice to the sink poisons the writer.
     pub fn write(&mut self, record: &OwnedBamRecord) -> Result<(), CramWriteError> {
-        let qual = BaseQuality::slice_to_bytes(&record.qual);
         let view = RecordView {
             tid: record.tid,
             pos: record.pos,
@@ -239,7 +256,7 @@ impl<W: Write> CramWriter<W> {
             qname: &record.qname,
             cigar: &record.cigar,
             seq: &record.seq,
-            qual: (!qual.is_empty()).then_some(qual),
+            qual: qualities(&record.qual),
             aux: record.aux.as_bytes(),
         };
         self.write_view(&view)
@@ -284,7 +301,6 @@ impl<W: Write> CramWriter<W> {
         idx: RecordIdx,
     ) -> Result<(), CramWriteError> {
         let rec = store.record(idx).ok_or(CramWriteError::NoSuchRecord { idx })?;
-        let qual = BaseQuality::slice_to_bytes(rec.qual());
         let view = RecordView {
             tid: rec.tid,
             pos: rec.tid.map(|_| rec.pos),
@@ -294,7 +310,7 @@ impl<W: Write> CramWriter<W> {
             qname: rec.qname(),
             cigar: rec.cigar(),
             seq: rec.seq(),
-            qual: (!qual.is_empty()).then_some(qual),
+            qual: qualities(rec.qual()),
             aux: rec.aux(),
         };
         self.write_view(&view)
@@ -310,7 +326,7 @@ impl<W: Write> CramWriter<W> {
             None => SliceKind::Unplaced,
         };
         // r[impl cram_writer.slicing]
-        if self.slice.ends_before(kind, checked.read_len) {
+        if self.slice.ends_before(kind, checked.read_len, self.records_per_slice) {
             self.flush_slice().inspect_err(|_| self.poisoned = true)?;
         }
         if let SliceKind::Mapped { tid, reference: true } = kind {
@@ -442,9 +458,16 @@ pub struct CramWriterBuilder<'a, T> {
     target: T,
     header: &'a BamHeader,
     reference: IndexedFastaReader,
+    options: Options,
+}
+
+/// What a [`CramWriterBuilder`] sets.
+#[derive(Debug, Clone, Copy)]
+struct Options {
     write_index: bool,
-    compression_level: CompressionLevel,
-    compression_threads: usize,
+    level: CompressionLevel,
+    threads: usize,
+    records_per_slice: u32,
 }
 
 impl<'a> CramWriterBuilder<'a, ToPath<'a>> {
@@ -470,9 +493,7 @@ impl<'a> CramWriterBuilder<'a, ToPath<'a>> {
             file_id,
             self.header,
             self.reference,
-            self.write_index,
-            self.compression_level,
-            self.compression_threads,
+            self.options,
         )
     }
 }
@@ -494,9 +515,7 @@ impl<'a, W: Write> CramWriterBuilder<'a, ToWriter<W>> {
             [0; 20],
             self.header,
             self.reference,
-            self.write_index,
-            self.compression_level,
-            self.compression_threads,
+            self.options,
         )
     }
 }
@@ -507,9 +526,12 @@ impl<'a, T> CramWriterBuilder<'a, T> {
             target,
             header,
             reference,
-            write_index: false,
-            compression_level: CompressionLevel::default(),
-            compression_threads: 0,
+            options: Options {
+                write_index: false,
+                level: CompressionLevel::default(),
+                threads: 0,
+                records_per_slice: container::MAX_RECORDS,
+            },
         }
     }
 
@@ -517,7 +539,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     /// returns it. Defaults to `false`.
     #[must_use]
     pub fn write_index(mut self, write_index: bool) -> Self {
-        self.write_index = write_index;
+        self.options.write_index = write_index;
         self
     }
 
@@ -526,7 +548,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     /// [`CompressionLevel::Level6`].
     #[must_use]
     pub fn compression_level(mut self, level: CompressionLevel) -> Self {
-        self.compression_level = level;
+        self.options.level = level;
         self
     }
 
@@ -536,7 +558,16 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     /// calling thread. The output is the same either way.
     #[must_use]
     pub fn compression_threads(mut self, threads: usize) -> Self {
-        self.compression_threads = threads;
+        self.options.threads = threads;
+        self
+    }
+
+    /// End slices after `records` records rather than htslib's 10,000, for
+    /// tests that want many slices from few records.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn records_per_slice(mut self, records: u32) -> Self {
+        self.options.records_per_slice = records.max(1);
         self
     }
 }

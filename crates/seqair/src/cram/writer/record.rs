@@ -103,6 +103,10 @@ pub(super) fn check(
     if view.qname.is_empty() {
         return Err(CramWriteError::EmptyReadName);
     }
+    // `RN` is NUL-terminated.
+    if view.qname.contains(&0) {
+        return Err(CramWriteError::NulInReadName);
+    }
     let n_targets = header.n_targets();
     for tid in [view.tid, view.mate.tid].into_iter().flatten() {
         if tid.as_usize() >= n_targets {
@@ -110,6 +114,12 @@ pub(super) fn check(
         }
     }
 
+    // `AP` and `NP` are 1-based i32s, which `Pos0::MAX` overflows.
+    for pos in [view.pos, view.mate.pos].into_iter().flatten() {
+        if pos == Pos0::MAX {
+            return Err(CramWriteError::ValueTooLarge { what: "position", value: pos.as_u64() });
+        }
+    }
     let placement = Placement { tid: view.tid, pos: view.pos };
     let unmapped = view.flags.is_unmapped();
     if (view.tid.is_some() && view.pos.is_none()) || (!unmapped && view.tid.is_none()) {
@@ -128,7 +138,10 @@ pub(super) fn check(
     }
 
     if unmapped && (!view.cigar.is_empty() || view.mapq.as_byte() != 0) {
-        return Err(CramWriteError::UnmappedWithAlignment);
+        return Err(CramWriteError::UnmappedWithAlignment {
+            cigar_ops: view.cigar.len(),
+            mapq: view.mapq.as_byte(),
+        });
     }
     let mut query_len = 0u64;
     let mut ref_len = 0u64;
@@ -167,6 +180,10 @@ pub(super) fn check(
     for tag in tags(view.aux) {
         let Tag { head: [a, b, ty], value } = tag?;
         let name = AuxTag([a, b]);
+        // The tag dictionary is NUL-separated; SAM allows no other names.
+        if !a.is_ascii_alphabetic() || !b.is_ascii_alphanumeric() {
+            return Err(CramWriteError::InvalidTagName { tag: name });
+        }
         match ty {
             b'A' | b'c' | b'C' | b's' | b'S' | b'i' | b'I' | b'f' | b'B' => {}
             b'Z' | b'H' if value.contains(&b'\t') => {
@@ -228,7 +245,14 @@ pub(super) fn encode(
 
     // `MD`/`NM` are generated on decode only for these.
     let regenerates = !unmapped && !seq_unknown && reference.is_some();
-    let track = regenerates && (checked.has_md || checked.has_nm);
+    // seqair's decode writes a reference byte that is no IUPAC code into
+    // `MD` as `N`, htslib's as it is: only drop what both regenerate.
+    let iupac_reference = reference.is_some_and(|r| {
+        let from = view.pos.map_or(0, Pos0::as_usize);
+        let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.len());
+        r.get(from..to).unwrap_or_default().iter().all(|b| IupacBase::ASCII.contains(b))
+    });
+    let track = regenerates && iupac_reference && (checked.has_md || checked.has_nm);
     let md = &mut scratch.md;
     md.start();
     let mut deletion_past_end = false;
@@ -342,7 +366,8 @@ impl Features<'_, '_> {
         let seq_unknown = view.seq.is_empty();
         let mut read = 0usize;
         let mut refpos = view.pos.map_or(0, Pos0::as_usize);
-        for op in view.cigar {
+        // A zero-length operation is no feature; it reads back as nothing.
+        for op in view.cigar.iter().filter(|op| op.len() > 0) {
             let len = op.len() as usize;
             match op.op_type() {
                 CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {

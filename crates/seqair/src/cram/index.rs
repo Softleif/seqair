@@ -139,7 +139,10 @@ impl CramIndex {
     pub fn write_crai(&self, out: impl std::io::Write) -> std::io::Result<()> {
         use std::io::Write as _;
         let mut gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
-        for e in &self.entries {
+        // Unmapped entries last, where samtools puts them.
+        let (placed, unmapped): (Vec<_>, Vec<_>) =
+            self.entries.iter().partition(|e| e.ref_id.is_some());
+        for e in placed.into_iter().chain(unmapped) {
             let ref_id = e.ref_id.map_or(-1, i64::from);
             writeln!(
                 gz,
