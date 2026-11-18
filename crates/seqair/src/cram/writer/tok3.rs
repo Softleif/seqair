@@ -140,8 +140,12 @@ struct Encoder<'a> {
     names: Vec<(usize, usize)>,
     /// The most recent name of each text, for `DUP`.
     seen: FxHashMap<&'a [u8], usize>,
-    /// The most recent name of each [`known_prefix`], to diff against.
+    /// The most recent name of each [`known_prefix`], to diff against;
+    /// but for the latest prefix's, which is `last_prefix`.
     prefixes: FxHashMap<&'a [u8], usize>,
+    /// The latest name's prefix and its index: an Illumina block's names
+    /// share one, so the map is touched only when it changes.
+    last_prefix: Option<(&'a [u8], usize)>,
     /// The current name's tokens.
     scratch: Vec<Token<'a>>,
 }
@@ -158,8 +162,16 @@ impl<'a> Encoder<'a> {
     fn name(&mut self, name: &'a [u8]) -> Option<()> {
         let n = self.names.len();
         let prefix = known_prefix(name);
-        let prefix_previous =
-            prefix.and_then(|p| name.get(..p.len)).and_then(|p| self.prefixes.insert(p, n));
+        let prefix_previous = prefix.and_then(|p| name.get(..p.len)).and_then(|p| {
+            match self.last_prefix.replace((p, n)) {
+                Some((last, m)) if last == p => Some(m),
+                Some((last, m)) => {
+                    self.prefixes.insert(last, m);
+                    self.prefixes.get(p).copied()
+                }
+                None => self.prefixes.get(p).copied(),
+            }
+        });
 
         // As htscodecs, an empty name is never a duplicate.
         if let Some(m) = self.seen.insert(name, n)
