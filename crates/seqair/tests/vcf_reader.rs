@@ -121,11 +121,7 @@ fn close(a: f32, b: f32) -> bool {
 }
 
 fn render_alt(a: Allele<'_>) -> String {
-    match a {
-        Allele::Bases(b) => String::from_utf8(b.to_vec()).unwrap(),
-        Allele::Symbolic(s) | Allele::Breakend(s) => s.to_owned(),
-        Allele::Overlapping => "*".to_owned(),
-    }
+    String::from_utf8(a.as_bytes().to_vec()).unwrap()
 }
 
 // r[verify vcf_reader.oracles]
@@ -799,6 +795,40 @@ fn crafted_records_read_back() {
     assert_eq!(recs[0].locus().start(), VcfPos::At(seqair_types::Pos1::new(11).unwrap()));
 }
 
+// r[verify vcf_fields.site+2]
+/// htslib writes a text ALT `.` as one `.` allele after REF: no ALT, as the
+/// text reads; a `.` among ALTs keeps its place as `Missing`.
+#[test]
+fn a_bcf_alt_dot_is_no_alt() {
+    let site = |alts: &[&[u8]]| {
+        let mut site = vec![0x17, b'.', 0x17, b'A'];
+        for alt in alts {
+            site.push(0x07 | ((alt.len() as u8) << 4));
+            site.extend_from_slice(alt);
+        }
+        site.extend_from_slice(&[0x11, 0x00]);
+        Rec { n_allele: 1 + alts.len() as u16, site, ..Rec::default() }
+    };
+    let file =
+        VcfFile::from_bytes(bcf(&[site(&[b"."]), site(&[b"T", b"."]), site(&[])]), None).unwrap();
+    let sites: Vec<Site> =
+        file.reader::<Site>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
+    fn alts(s: &Site) -> Vec<Allele<'_>> {
+        s.alleles().alts().collect()
+    }
+    assert_eq!(alts(&sites[0]), []);
+    assert_eq!(sites[0].alleles().len(), 1);
+    assert_eq!(alts(&sites[1]), [Allele::Bases(b"T"), Allele::Missing]);
+    assert_eq!(sites[1].alleles().get(2), Some(Allele::Missing));
+    assert_eq!(alts(&sites[2]), []);
+    let text = text_records(&["chr1\t5\t.\tA\t.\t.\t.\t.", "chr1\t6\t.\tA\tT,.\t.\t.\t."]);
+    assert_eq!(text[0].site().alleles().alts().count(), 0);
+    let all: Vec<_> = text[1].site().alleles().iter().collect();
+    assert_eq!(all, [Allele::Bases(b"A"), Allele::Bases(b"T"), Allele::Missing]);
+    assert_eq!(text[1].site().alleles().get(0), Some(Allele::Bases(b"A")));
+    assert_eq!(text[1].site().alleles().get(3), None);
+}
+
 // r[verify vcf_reader.limits]
 // r[verify vcf_reader.errors]
 // r[verify vcf_reader.undeclared]
@@ -962,7 +992,7 @@ fn text_error(lines: &[&str]) -> (u64, Option<seqair::io::VirtualOffset>, Record
 }
 
 // r[verify vcf_reader.formats]
-// r[verify vcf_fields.site]
+// r[verify vcf_fields.site+2]
 // r[verify vcf_values.access]
 /// The fixed columns, INFO and FORMAT of hand-written lines: IDs, symbolic
 /// and missing ALTs, QUAL, every FILTER state, flags, strings, vectors.

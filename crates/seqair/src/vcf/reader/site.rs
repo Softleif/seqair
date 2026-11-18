@@ -1,4 +1,4 @@
-//! [`Site`]: ID, REF, ALT, QUAL and FILTER (`r[vcf_fields.site]`).
+//! [`Site`]: ID, REF, ALT, QUAL and FILTER (`r[vcf_fields.site+2]`).
 
 use super::bcf_value::{BcfValueError, TypedValue, skip_typed_value};
 use super::error::{KeyKind, RecordError, RecordPart, VcfReadError};
@@ -16,10 +16,10 @@ use seqair_types::{Base, SmallVec, SmolStr};
 use std::ops::Range;
 use std::sync::Arc;
 
-/// One ALT allele.
+/// One allele of a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Allele<'a> {
-    /// Bases (`C`, `CTT`), as stored.
+    /// Bases (`C`, `CTT`), as stored; REF is always `Bases`.
     Bases(&'a [u8]),
     /// A symbolic allele, brackets included: `<DEL>`, `<*>`, `<NON_REF>`.
     Symbolic(&'a str),
@@ -27,13 +27,30 @@ pub enum Allele<'a> {
     Breakend(&'a str),
     /// `*`: the allele is deleted by an overlapping variant.
     Overlapping,
+    /// `.` inside a list of ALTs (`T,.`): malformed, but kept so the
+    /// alleles after it keep their GT index. A record without ALT has no
+    /// alleles past REF instead.
+    Missing,
 }
 
 impl<'a> Allele<'a> {
+    /// The allele as written: `b"*"` for [`Overlapping`](Self::Overlapping),
+    /// `b"."` for [`Missing`](Self::Missing).
+    pub fn as_bytes(&self) -> &'a [u8] {
+        match *self {
+            Self::Bases(b) => b,
+            Self::Symbolic(s) | Self::Breakend(s) => s.as_bytes(),
+            Self::Overlapping => b"*",
+            Self::Missing => b".",
+        }
+    }
+
     fn classify(allele: &'a str) -> Self {
         let bytes = allele.as_bytes();
         if bytes == b"*" {
             Self::Overlapping
+        } else if bytes == b"." {
+            Self::Missing
         } else if bytes.first() == Some(&b'<') && bytes.last() == Some(&b'>') {
             Self::Symbolic(allele)
         } else if bytes.iter().any(|&b| b == b'[' || b == b']')
@@ -92,7 +109,7 @@ impl SiteParts {
         self.qual = other.qual;
     }
 
-    // r[impl vcf_fields.site]
+    // r[impl vcf_fields.site+2]
     /// Decode the site columns of a BCF shared section (after its 24 fixed
     /// bytes): IDs and alleles UTF-8, every FILTER index a FILTER of the
     /// header. Returns where INFO starts.
@@ -119,6 +136,13 @@ impl SiteParts {
             let allele = string(&mut at, RecordPart::Alleles)?;
             self.alleles.push(allele);
         }
+        // r[impl vcf_fields.site+2]
+        // htslib writes a text ALT `.` as one `.` allele after REF.
+        if let [_, alt] = self.alleles.as_slice()
+            && shared.get(alt.start as usize..alt.end as usize) == Some(b".")
+        {
+            self.alleles.truncate(1);
+        }
         let rest = shared.get(at..).unwrap_or_default();
         let (value, len) =
             TypedValue::parse(rest).map_err(|e| value_error(RecordPart::Filter, e))?;
@@ -141,7 +165,7 @@ impl SiteParts {
 }
 
 impl SiteParts {
-    // r[impl vcf_fields.site]
+    // r[impl vcf_fields.site+2]
     // r[impl vcf_reader.undeclared.filter]
     /// Decode the site columns of a VCF text line: IDs and alleles UTF-8,
     /// QUAL a float or `.`, FILTER names looked up in the header. A FILTER
@@ -256,6 +280,34 @@ impl<'a> AllelesRef<'a> {
     /// The REF bases as stored.
     pub fn reference(&self) -> &'a [u8] {
         self.spans.first().map_or(&[], |r| text(self.bytes, r).as_bytes())
+    }
+
+    // r[impl vcf_fields.site+2]
+    /// Allele `i` as a GT names it: 0 is REF, 1 the first ALT; `None` past
+    /// the last.
+    pub fn get(&self, i: u16) -> Option<Allele<'a>> {
+        let span = self.spans.get(usize::from(i))?;
+        let allele = text(self.bytes, span);
+        Some(if i == 0 { Allele::Bases(allele.as_bytes()) } else { Allele::classify(allele) })
+    }
+
+    /// REF, then the ALTs, in GT index order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Allele<'a>> + Clone + use<'a> {
+        let this = *self;
+        // At most 65 535 alleles (`r[vcf_reader.limits]`).
+        let n = u16::try_from(self.spans.len()).unwrap_or(u16::MAX);
+        // `get` finds every index below the count.
+        (0..n).map(move |i| this.get(i).unwrap_or(Allele::Missing))
+    }
+
+    /// How many alleles there are, REF included.
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Never true for a decoded record, which has a REF.
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
     }
 
     fn alt_strs(&self) -> impl ExactSizeIterator<Item = &'a str> + Clone + use<'a> {
@@ -388,7 +440,7 @@ impl PartialEq for FailedFilters<'_> {
     }
 }
 
-// r[impl vcf_fields.site]
+// r[impl vcf_fields.site+2]
 /// A record's ID, REF, ALT, QUAL and FILTER, borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct SiteRef<'a> {
@@ -512,9 +564,13 @@ mod tests {
         assert_eq!(Allele::classify("G]17:198982]"), Allele::Breakend("G]17:198982]"));
         assert_eq!(Allele::classify(".A"), Allele::Breakend(".A"));
         assert_eq!(Allele::classify("A."), Allele::Breakend("A."));
+        assert_eq!(Allele::classify("."), Allele::Missing);
+        for a in ["ACGT", "*", "<DEL>", "G]17:198982]", "."] {
+            assert_eq!(Allele::classify(a).as_bytes(), a.as_bytes());
+        }
     }
 
-    // r[verify vcf_fields.site]
+    // r[verify vcf_fields.site+2]
     #[test]
     fn to_alleles_finds_the_writers_shapes() {
         let typed = |alleles: &[&str]| {
