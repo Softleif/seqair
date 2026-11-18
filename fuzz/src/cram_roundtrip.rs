@@ -7,7 +7,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::RawBamRecord;
 use seqair::cram::stream::CramStreamReader;
-use seqair::cram::writer::{CramWriteError, CramWriterBuilder};
+use seqair::cram::writer::{CramVersion, CramWriteError, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
 use seqair::sam::format::format_sam_record;
 use seqair_types::IupacBase;
@@ -134,11 +134,13 @@ pub fn write(
     records: &[RawBamRecord],
     threads: usize,
     records_per_slice: u32,
+    version: CramVersion,
 ) -> (Vec<u8>, Vec<RawBamRecord>) {
     let reference = IndexedFastaReader::open(fasta).unwrap();
     let mut writer = match CramWriterBuilder::to_writer(Vec::new(), header, reference)
         .compression_threads(threads)
         .records_per_slice(records_per_slice)
+        .version(version)
         .write_index(true)
         .build()
     {
@@ -178,8 +180,15 @@ pub fn read(cram: &[u8], fasta: &Path) -> (BamHeader, Vec<RawBamRecord>) {
 /// Write, read back, compare each record with what was written; then write
 /// what was read and read it again, which must give the same records (the
 /// normalizations are a fixed point). Every record read formats as SAM.
-pub fn check(header: &BamHeader, fasta: &Path, records: &[RawBamRecord], threads: usize, rps: u32) {
-    let (cram, accepted) = write(header, fasta, records, threads, rps);
+pub fn check(
+    header: &BamHeader,
+    fasta: &Path,
+    records: &[RawBamRecord],
+    threads: usize,
+    rps: u32,
+    version: CramVersion,
+) {
+    let (cram, accepted) = write(header, fasta, records, threads, rps, version);
     if cram.is_empty() {
         return;
     }
@@ -201,7 +210,7 @@ pub fn check(header: &BamHeader, fasta: &Path, records: &[RawBamRecord], threads
         format_sam_record(output, &cram_header, &mut sam).unwrap();
     }
 
-    let (again, accepted_again) = write(&cram_header, fasta, &decoded, threads, rps);
+    let (again, accepted_again) = write(&cram_header, fasta, &decoded, threads, rps, version);
     assert_eq!(accepted_again.len(), decoded.len(), "decoded records are all writable");
     let (_, decoded_again) = read(&again, fasta);
     for (i, (a, b)) in decoded.iter().zip(&decoded_again).enumerate() {

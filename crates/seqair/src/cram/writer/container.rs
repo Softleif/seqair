@@ -3,7 +3,7 @@
 
 use super::CramWriteError;
 use super::mates::{self, MateRecord};
-use super::rans;
+use super::{CramVersion, rans, rans_nx16, tok3};
 use crate::cram::varint::{write_itf8, write_ltf8};
 use crate::io::CompressionLevel;
 use crate::reader::Tid;
@@ -444,7 +444,9 @@ impl SliceBuilder {
             .collect();
         let mut external = Vec::new();
         for &(id, data) in &blocks {
-            codecs.block(&mut external, 4, id, data)?;
+            let content =
+                if id == Series::Rn.content_id() { Content::Names } else { Content::Data };
+            codecs.block(&mut external, 4, id, data, content)?;
         }
         let n_external = blocks.len();
 
@@ -603,9 +605,20 @@ fn push_crc(out: &mut Vec<u8>, from: usize) {
     out.extend_from_slice(&crc.sum().to_le_bytes());
 }
 
+/// What a block holds, for the codecs it is tried with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Content {
+    /// The SAM header: gzip only, which every reader takes.
+    Header,
+    /// The `RN` block: the name tokeniser too, in CRAM 3.1.
+    Names,
+    Data,
+}
+
 /// The block codecs, with their reusable state.
 pub(super) struct Codecs {
     level: CompressionLevel,
+    version: CramVersion,
     gzip: libdeflater::Compressor,
     scratch: Vec<u8>,
 }
@@ -615,21 +628,23 @@ pub(super) struct Codecs {
 const MIN_COMPRESSED: usize = 32;
 
 impl Codecs {
-    pub(super) fn new(level: CompressionLevel) -> Self {
+    pub(super) fn new(level: CompressionLevel, version: CramVersion) -> Self {
         let gzip_level = libdeflater::CompressionLvl::new(i32::from(level.get()))
             .unwrap_or_else(|_| libdeflater::CompressionLvl::default());
-        Self { level, gzip: libdeflater::Compressor::new(gzip_level), scratch: Vec::new() }
+        Self { level, version, gzip: libdeflater::Compressor::new(gzip_level), scratch: Vec::new() }
     }
 
     // r[impl cram_writer.compression]
     /// Append a block of `data`, stored by whichever codec gives the fewest
-    /// bytes.
+    /// bytes: gzip, and rANS 4×8 (CRAM 3.0) or rANS Nx16 with htslib's
+    /// normal profile and, for names, the name tokeniser (CRAM 3.1).
     fn block(
         &mut self,
         out: &mut Vec<u8>,
         content_type: u8,
         content_id: i32,
         data: &[u8],
+        content: Content,
     ) -> Result<(), CramWriteError> {
         if data.len() < MIN_COMPRESSED || self.level == CompressionLevel::Level0 {
             return Self::raw_block(out, content_type, content_id, data);
@@ -644,9 +659,26 @@ impl Codecs {
         if let Ok(n) = self.gzip.gzip_compress(data, &mut self.scratch) {
             consider(1, self.scratch.get(..n).unwrap_or_default().to_vec());
         }
-        for order in [rans::Order::Zero, rans::Order::One] {
-            if let Some(bytes) = rans::encode(data, order) {
-                consider(4, bytes);
+        match (content, self.version) {
+            (Content::Header, _) => {}
+            (_, CramVersion::V3_0) => {
+                for order in [rans::Order::Zero, rans::Order::One] {
+                    if let Some(bytes) = rans::encode(data, order) {
+                        consider(4, bytes);
+                    }
+                }
+            }
+            (_, CramVersion::V3_1) => {
+                for flags in rans_nx16::normal_profile(data.len()) {
+                    if let Some(bytes) = rans_nx16::encode(data, flags) {
+                        consider(5, bytes);
+                    }
+                }
+                if content == Content::Names
+                    && let Some(bytes) = tok3::encode(data)
+                {
+                    consider(8, bytes);
+                }
             }
         }
         match best {
@@ -693,7 +725,7 @@ pub(super) fn header_container(text: &str, codecs: &mut Codecs) -> Result<Vec<u8
     data.extend_from_slice(&len_i32("header text", text.len())?.to_le_bytes());
     data.extend_from_slice(text.as_bytes());
     let mut block = Vec::new();
-    codecs.block(&mut block, 0, 0, &data)?;
+    codecs.block(&mut block, 0, 0, &data, Content::Header)?;
 
     let mut bytes = Vec::with_capacity(block.len().saturating_add(32));
     bytes.extend_from_slice(&len_i32("container length", block.len())?.to_le_bytes());

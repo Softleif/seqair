@@ -9,7 +9,7 @@ The purpose is smaller output for rastair/postalt than BAM at close to `BamWrite
 ## Scope
 
 r[cram_writer.scope]
-The writer MUST write CRAM version 3.0. Its input MUST be coordinate-sorted (`r[cram_writer.sort_order]`). Every slice holds the records of one reference, or only unplaced records; there are no multi-reference slices and no embedded references. Read names are always stored (`RN` true). Mates in one slice are attached where the decode rebuilds their mate fields exactly (`r[cram_writer.mates]`); every other record's are stored as they are (`r[cram_writer.record.mate]`).
+The writer MUST write CRAM version 3.1, or 3.0 when asked (`r[cram_writer.version]`). Its input MUST be coordinate-sorted (`r[cram_writer.sort_order]`). Every slice holds the records of one reference, or only unplaced records; there are no multi-reference slices and no embedded references. Read names are always stored (`RN` true). Mates in one slice are attached where the decode rebuilds their mate fields exactly (`r[cram_writer.mates]`); every other record's are stored as they are (`r[cram_writer.record.mate]`).
 
 ## Writer
 
@@ -62,8 +62,11 @@ The slice header MUST give the slice's reference id, alignment start and span, r
 r[cram_writer.blocks]
 Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. An external block MUST be written for each data series and tag that has data in the slice, and only for those. The compression header MUST list an encoding for every data series all the same: htslib's decoder refuses a slice that lacks the encoding of a series it reads, even when it reads nothing of it (`QS` for a record without bases), and finds an absent block empty.
 
+r[cram_writer.version]
+`CramWriterBuilder::version` MUST choose the CRAM version, 3.1 by default as htslib's, or 3.0 for readers without 3.1's codecs; the file definition's minor version MUST be the one chosen.
+
 r[cram_writer.compression]
-Each block's data MUST be stored by whichever of the writer's codecs gives the fewest bytes, raw included; phase 1 offers gzip (at the builder's `compression_level`) and rANS 4×8 order 0 and order 1 (`r[cram_writer.rans4x8]`). The choice is per block and changes no decoded byte.
+Each block's data MUST be stored by whichever of the version's codecs gives the fewest bytes, raw included: gzip (at the builder's `compression_level`) for both; then rANS 4×8 order 0 and order 1 (`r[cram_writer.rans4x8]`) in CRAM 3.0, or rANS Nx16 under htslib's normal profile (`r[cram_writer.rans_nx16]`) and, for the `RN` block, the name tokeniser (`r[cram_writer.tok3]`) in CRAM 3.1. The header block is gzip or raw. The choice is per block and changes no decoded byte.
 
 r[cram_writer.threads]
 `CramWriterBuilder::compression_threads(n)` MUST assemble and compress containers on `n` worker threads while the calling thread encodes the next slice, and write them in order; `n = 0` (the default) does it on the calling thread. The file and its index MUST be byte for byte those of the single-threaded writer: a slice's content and its codec choices depend on its records only.

@@ -1,8 +1,8 @@
 //! Containers assembled (compressed) on worker threads while the caller
 //! encodes the next slice, and handed back in the order they were submitted.
 
-use super::CramWriteError;
 use super::container::{Assembled, Codecs, Frame, SliceBuilder};
+use super::{CramVersion, CramWriteError};
 use crate::io::CompressionLevel;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc};
@@ -35,7 +35,11 @@ pub(super) struct Pool {
 }
 
 impl Pool {
-    pub(super) fn new(threads: usize, level: CompressionLevel) -> Result<Self, CramWriteError> {
+    pub(super) fn new(
+        threads: usize,
+        level: CompressionLevel,
+        version: CramVersion,
+    ) -> Result<Self, CramWriteError> {
         let threads = threads.max(1);
         let (job_tx, job_rx) = mpsc::sync_channel::<Job>(threads);
         let (done_tx, done_rx) = mpsc::channel::<Done>();
@@ -47,7 +51,7 @@ impl Pool {
             let worker = thread::Builder::new()
                 .name(format!("seqair-cram-{i}"))
                 .spawn(move || {
-                    let mut codecs = Codecs::new(level);
+                    let mut codecs = Codecs::new(level, version);
                     // Hold the lock only to take a job, not while compressing.
                     while let Ok(Job { index, slice, frame }) =
                         jobs.lock().map_err(drop).and_then(|rx| rx.recv().map_err(drop))
