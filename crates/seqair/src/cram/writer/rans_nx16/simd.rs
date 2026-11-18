@@ -422,6 +422,13 @@ fn order_1_tables(
     counts: &[u32; 256],
     n: usize,
 ) -> Option<(u32, Vec<u8>)> {
+    // The tables are cleared over `counts`' alphabet below: it must be the
+    // histogram of `data`, or stale counts outlive the block.
+    debug_assert_eq!(
+        counts.iter().map(|&c| u64::from(c)).sum::<u64>(),
+        data.len() as u64,
+        "order-1 tables need the histogram of their data"
+    );
     if o1.dirty {
         for c in &mut o1.counts {
             c.fill(0);

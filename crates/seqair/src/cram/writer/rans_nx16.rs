@@ -869,6 +869,25 @@ mod tests {
         assert_every_level_is_scalar(&draw_data(&tc));
     }
 
+    // r[verify cram_writer.rans_nx16]
+    /// One `Prepared` shared by every combination, in either order (so PACK
+    /// takes its symbols from a histogram one time and scans for them the
+    /// other), writes what a fresh one writes for each.
+    #[hegel::test(test_cases = crate::pinned::cases(60))]
+    fn a_shared_preparation_writes_what_a_fresh_one_does(tc: TestCase) {
+        let data = draw_data(&tc);
+        let flags: Vec<Nx16Flags> = every_flags().collect();
+        let fresh: Vec<_> =
+            flags.iter().map(|&f| encode_prepared(&Prepared::new(&data), f)).collect();
+        for order in [flags.clone(), flags.iter().rev().copied().collect()] {
+            let shared = Prepared::new(&data);
+            for f in order {
+                let i = flags.iter().position(|g| flags_byte(*g) == flags_byte(f)).unwrap();
+                assert!(encode_prepared(&shared, f) == fresh[i], "{f:?}");
+            }
+        }
+    }
+
     // r[verify cram_writer.rans_nx16.simd]
     /// Blocks past the 32-state threshold and into the order-1 table's
     /// compression, from every alphabet size, at every level.
