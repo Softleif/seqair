@@ -19,6 +19,9 @@ r[cram_writer.builder]
 r[cram_writer.inputs]
 `write(&OwnedBamRecord)`, `write_raw(&RawBamRecord)` and `write_store_record(&RecordStore, RecordIdx)` MUST encode the same record to the same bytes, whichever form it arrives in. A raw record whose CIGAR is held in a `CG` tag (`r[bam.record.long_cigar]`) is written with its real CIGAR and without the `CG` tag; CRAM stores CIGARs of any length.
 
+r[cram_writer.store]
+`write_store(&RecordStore)` MUST write every record of the store, in store order, to the bytes `write_store_record` would write for each in turn: the slices, codec choices, file and index are the same. The store holds each record's fields in contiguous slabs and outlives the call, so the writer need not copy a record into its slice as it arrives: a slice that the store's records complete is encoded (its read features against the reference) and compressed whole, from the store, on one of `compression_threads` threads (on the calling thread for `0`), while the calling thread only checks records and decides where slices end; the slice the store's last records leave open is encoded into the writer as `write_store_record` would, for later records to complete. A record the writer refuses ends the call with its error, the records before it written and it and the ones after it not, as if `write_store_record` had been called for each until the refusal.
+
 r[cram_writer.validate_before_write]
 A record the writer refuses MUST leave the writer as it was: it is not part of the output and the next record is written as if it had not been offered. Records are buffered until their slice is complete, so a refusal costs nothing. An error writing a container to the sink (I/O, or a codec failure) MUST poison the writer: every later call returns `CramWriteError::Poisoned`, as `r[bam_writer.error_poisoning]`.
 
