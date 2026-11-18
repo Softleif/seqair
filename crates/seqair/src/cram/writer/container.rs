@@ -278,6 +278,10 @@ pub(super) struct SliceBuilder {
     qs_starts: Vec<usize>,
     tag_lines: Vec<Vec<u8>>,
     line_ids: FxHashMap<Vec<u8>, i32>,
+    /// The tag block after the one last written, and the last tag line:
+    /// records mostly repeat their tags in order, so both are tried first.
+    next_tag: usize,
+    last_line: Option<i32>,
     /// Records on a reference the FASTA lacks, encoded when the slice is
     /// complete (`r[cram_writer.embedded_reference]`).
     held: Vec<Held>,
@@ -451,13 +455,15 @@ impl SliceBuilder {
     /// bytes (with the NUL of a `Z` or `H`).
     pub(super) fn tag(&mut self, head: [u8; 3], value: &[u8]) {
         let key = tag_key(head);
-        let block = match self.tags.iter().position(|t| t.key == key) {
-            Some(i) => self.tags.get_mut(i),
-            None => {
-                self.tags.push(TagBlock { key, data: Vec::new() });
-                self.tags.last_mut()
-            }
-        };
+        let hinted = self.tags.get(self.next_tag).is_some_and(|t| t.key == key);
+        let found =
+            if hinted { Some(self.next_tag) } else { self.tags.iter().position(|t| t.key == key) };
+        let index = found.unwrap_or_else(|| {
+            self.tags.push(TagBlock { key, data: Vec::new() });
+            self.tags.len().saturating_sub(1)
+        });
+        self.next_tag = index.saturating_add(1);
+        let block = self.tags.get_mut(index);
         let Some(block) = block else { return };
         match head[2] {
             b'Z' | b'H' => {
@@ -475,12 +481,22 @@ impl SliceBuilder {
     /// The tag dictionary index of the tag line `line` (its tags' 3-byte
     /// heads, concatenated).
     pub(super) fn tag_line(&mut self, line: &[u8]) -> i32 {
+        if let Some(id) = self.last_line
+            && usize::try_from(id)
+                .ok()
+                .and_then(|i| self.tag_lines.get(i))
+                .is_some_and(|l| l == line)
+        {
+            return id;
+        }
         if let Some(&id) = self.line_ids.get(line) {
+            self.last_line = Some(id);
             return id;
         }
         let id = i32::try_from(self.tag_lines.len()).unwrap_or(i32::MAX);
         self.tag_lines.push(line.to_vec());
         self.line_ids.insert(line.to_vec(), id);
+        self.last_line = Some(id);
         id
     }
 
@@ -494,6 +510,8 @@ impl SliceBuilder {
             qs_starts,
             tag_lines,
             line_ids,
+            next_tag,
+            last_line,
             held,
             embedded,
             runs,
@@ -510,6 +528,8 @@ impl SliceBuilder {
         qs_starts.clear();
         tag_lines.clear();
         line_ids.clear();
+        *next_tag = 0;
+        *last_line = None;
         held.clear();
         embedded.clear();
         runs.clear();
