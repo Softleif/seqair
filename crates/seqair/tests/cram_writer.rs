@@ -209,7 +209,7 @@ fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
 // r[verify cram_writer.file_definition]
 // r[verify cram_writer.header_container]
 // r[verify cram_writer.eof]
-// r[verify cram_writer.compression]
+// r[verify cram_writer.compression+2]
 // r[verify cram_writer.builder]
 // r[verify cram_writer.finish]
 // r[verify cram_writer.scope]
@@ -276,6 +276,52 @@ fn fixture_reads_back_as_samtools_cram_does() {
         }
         let threaded = writer.finish().unwrap().0;
         assert!(threaded[26..] == std::fs::read(&ours).unwrap()[26..], "threads change the file");
+    }
+}
+
+// r[verify cram_writer.compression.learning]
+// r[verify cram_writer.threads+2]
+/// With many slices, most try only the two codecs the trial slices chose:
+/// the file reads back as the exhaustive search's does, is within 1% of its
+/// size, and threads do not change a byte.
+#[test]
+fn learned_codecs_keep_the_records_and_the_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = data("test.fasta.gz");
+    let (header, records) = stream_bam(&data("test.bam"));
+    // Every 150th record: 196 records in slices of 1, 197 slices, so trials
+    // at 0, 70 and 140 and each block small enough for a debug build.
+    let records: Vec<_> = records.into_iter().step_by(150).collect();
+    for version in [CramVersion::V3_0, CramVersion::V3_1] {
+        let write = |exhaustive: bool, threads: usize| {
+            let reference = IndexedFastaReader::open(&fasta).unwrap();
+            let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
+                .version(version)
+                .records_per_slice(1)
+                .exhaustive_codec_search(exhaustive)
+                .compression_threads(threads)
+                .build()
+                .unwrap();
+            for record in &records {
+                writer.write_raw(record).unwrap();
+            }
+            writer.finish().unwrap().0
+        };
+        let learned = write(false, 0);
+        let exhaustive = write(true, 0);
+        assert!(write(false, 3) == learned, "threads change the learned file");
+        let (ours, theirs) = (dir.path().join("learned.cram"), dir.path().join("all.cram"));
+        std::fs::write(&ours, &learned).unwrap();
+        std::fs::write(&theirs, &exhaustive).unwrap();
+        assert_eq!(samtools_lines(&ours, &fasta), samtools_lines(&theirs, &fasta));
+        assert!(seqair_lines(&ours, &fasta) == samtools_lines(&theirs, &fasta));
+        eprintln!("{version:?}: learned {} bytes, exhaustive {}", learned.len(), exhaustive.len());
+        assert!(learned.len() * 100 <= exhaustive.len() * 101, "{version:?} grew more than 1%");
+        if version == CramVersion::V3_1 {
+            // Some learned slice made another choice than the full search:
+            // the learning ran.
+            assert!(learned != exhaustive, "no slice learned");
+        }
     }
 }
 
@@ -676,7 +722,7 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
         }
     });
     assert!(raw == owned, "write and write_raw differ");
-    // r[verify cram_writer.threads]
+    // r[verify cram_writer.threads+2]
     assert!(write(3, &raw_of(false)) == raw, "the threaded writer's file or index differs");
     // The store keeps placed records only.
     let mut store = RecordStore::new();

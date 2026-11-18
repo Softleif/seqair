@@ -2,6 +2,7 @@
 //! encodes the next slice, and handed back in the order they were submitted.
 
 use super::container::{Assembled, Codecs, Frame, SliceBuilder};
+use super::metrics::{MAX_IN_FLIGHT, Metrics};
 use super::{CramVersion, CramWriteError};
 use crate::io::CompressionLevel;
 use std::collections::VecDeque;
@@ -21,7 +22,7 @@ pub(super) struct Done {
     pub result: Result<Assembled, CramWriteError>,
 }
 
-// r[impl cram_writer.threads]
+// r[impl cram_writer.threads+2]
 pub(super) struct Pool {
     jobs: Option<mpsc::SyncSender<Job>>,
     done: mpsc::Receiver<Done>,
@@ -39,6 +40,7 @@ impl Pool {
         threads: usize,
         level: CompressionLevel,
         version: CramVersion,
+        metrics: &Arc<Metrics>,
     ) -> Result<Self, CramWriteError> {
         let threads = threads.max(1);
         let (job_tx, job_rx) = mpsc::sync_channel::<Job>(threads);
@@ -48,10 +50,11 @@ impl Pool {
         for i in 0..threads {
             let jobs = Arc::clone(&job_rx);
             let done = done_tx.clone();
+            let metrics = Arc::clone(metrics);
             let worker = thread::Builder::new()
                 .name(format!("seqair-cram-{i}"))
                 .spawn(move || {
-                    let mut codecs = Codecs::new(level, version);
+                    let mut codecs = Codecs::new(level, version, metrics);
                     // Hold the lock only to take a job, not while compressing.
                     while let Ok(Job { index, slice, frame }) =
                         jobs.lock().map_err(drop).and_then(|rx| rx.recv().map_err(drop))
@@ -78,7 +81,10 @@ impl Pool {
             next_in: 0,
             next_out: 0,
             // Each worker busy and one queued: no worker waits for the caller.
-            max_in_flight: u64::try_from(threads.saturating_mul(2)).unwrap_or(u64::MAX),
+            // At most `MAX_IN_FLIGHT`, which the learned codec choices rely on.
+            max_in_flight: u64::try_from(threads.saturating_mul(2))
+                .unwrap_or(u64::MAX)
+                .min(MAX_IN_FLIGHT),
         })
     }
 
