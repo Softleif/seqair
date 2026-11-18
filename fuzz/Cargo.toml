@@ -134,6 +134,12 @@ name = "fuzz_cram_tok3"
 path = "fuzz_targets/fuzz_cram_tok3.rs"
 doc = false
 
+# CRAM writer: rANS Nx16 encoder, SIMD against scalar, and round trip
+[[bin]]
+name = "fuzz_cram_rans_nx16_encode"
+path = "fuzz_targets/fuzz_cram_rans_nx16_encode.rs"
+doc = false
+
 # CRAM variable-length integer decoding
 [[bin]]
 name = "fuzz_cram_varint"
