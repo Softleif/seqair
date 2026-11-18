@@ -7,7 +7,7 @@ use super::error::{RecordAt, RecordError, RecordPart, RecordSection, VcfReadErro
 use super::fields::{SampleSelection, Sections};
 use super::file::FileShared;
 use super::info::InfoRef;
-use super::locus::Locus;
+use super::locus::{Locus, VcfPos, span_of};
 use super::rlen::{RlenColumns, text_rlen};
 use super::samples::{FormatSource, FormatView, SampleRef, SamplesRef};
 use super::site::{SiteParts, SiteRef, span};
@@ -224,16 +224,20 @@ impl<'a> RawRecord<'a> {
     /// [`VcfReadError::Record`] for a position or span outside VCF's range,
     /// or a VCF text POS that is not a number.
     pub fn locus(&self) -> Result<Locus, VcfReadError> {
-        let contig = self.contig.clone();
+        let (start, end) = self.span()?;
+        Ok(Locus::new_unchecked(self.contig.clone(), start, end))
+    }
+
+    /// The record's start and inclusive end.
+    pub(crate) fn span(&self) -> Result<(VcfPos, VcfPos), VcfReadError> {
         match self.repr {
-            Repr::Bcf(r) => Locus::from_bcf(contig, r.fixed.pos, r.fixed.rlen),
-            Repr::Text(TextRecord { line, cols }) => {
-                let pos = cols.col(line, Col::Pos);
-                let pos1 = parse_pos(pos).ok_or(RecordError::Text {
+            Repr::Bcf(r) => span_of(i64::from(r.fixed.pos), i64::from(r.fixed.rlen)),
+            Repr::Text(TextRecord { line, cols }) => parse_pos(cols.col(line, Col::Pos))
+                .ok_or(RecordError::Text {
                     part: RecordPart::Pos,
                     source: TextValueError::InvalidInteger,
-                });
-                pos1.and_then(|pos1| {
+                })
+                .and_then(|pos1| {
                     let pos0 = pos1.saturating_sub(1);
                     let rlen = RlenColumns {
                         reference: cols.col(line, Col::Ref),
@@ -241,9 +245,8 @@ impl<'a> RawRecord<'a> {
                         info: cols.col(line, Col::Info),
                         format: cols.rest(line),
                     };
-                    Locus::from_zero_based(contig, pos0, text_rlen(&rlen, self.file, pos0))
-                })
-            }
+                    span_of(pos0, text_rlen(&rlen, self.file, pos0))
+                }),
         }
         .map_err(|e| self.error(e))
     }

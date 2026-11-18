@@ -26,13 +26,25 @@ impl VcfPos {
     }
 }
 
+// r[impl vcf_values.rlen]
+/// A record's start and inclusive end from its 0-based position (−1 for the
+/// telomere) and reference length: the end is `start + rlen − 1`.
+pub(crate) fn span_of(pos: i64, rlen: i64) -> Result<(VcfPos, VcfPos), RecordError> {
+    let start = pos.saturating_add(1);
+    let end = start.saturating_add(rlen).saturating_sub(1);
+    let start = VcfPos::from_one_based(start).ok_or(RecordError::InvalidPosition { pos })?;
+    let end = VcfPos::from_one_based(end).ok_or(RecordError::InvalidSpan { pos, rlen })?;
+    Ok((start, end))
+}
+
 // r[impl vcf_fields.locus+2]
 /// A record's contig, start and inclusive end. Cheap to clone; reading it
 /// skips everything past a record's fixed fields.
 ///
 /// The end is the start plus the reference length minus one, as the index
-/// was built: for BCF the stored `rlen`, which accounts for INFO END,
-/// symbolic alleles' SVLEN and gVCF blocks.
+/// was built: for BCF the stored `rlen`, for VCF text the length htslib
+/// computes; both account for INFO END, symbolic alleles' SVLEN and gVCF
+/// blocks' FORMAT LEN.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Locus {
     contig: ContigId,
@@ -41,24 +53,9 @@ pub struct Locus {
 }
 
 impl Locus {
-    /// A record's locus from its 0-based BCF position and reference length.
-    pub(crate) fn from_bcf(contig: ContigId, pos: i32, rlen: i32) -> Result<Self, RecordError> {
-        Self::from_zero_based(contig, i64::from(pos), i64::from(rlen))
-    }
-
-    // r[impl vcf_values.rlen]
-    /// A record's locus from its 0-based position (−1 for the telomere) and
-    /// reference length: the end is `start + rlen − 1`.
-    pub(crate) fn from_zero_based(
-        contig: ContigId,
-        pos: i64,
-        rlen: i64,
-    ) -> Result<Self, RecordError> {
-        let start = pos.saturating_add(1);
-        let end = start.saturating_add(rlen).saturating_sub(1);
-        let start = VcfPos::from_one_based(start).ok_or(RecordError::InvalidPosition { pos })?;
-        let end = VcfPos::from_one_based(end).ok_or(RecordError::InvalidSpan { pos, rlen })?;
-        Ok(Self { contig, start, end })
+    /// A locus whose span [`span_of`] checked.
+    pub(crate) fn new_unchecked(contig: ContigId, start: VcfPos, end: VcfPos) -> Self {
+        Self { contig, start, end }
     }
 
     pub fn contig(&self) -> &ContigId {
@@ -91,8 +88,13 @@ impl Fields for Locus {
     }
 
     fn fill(&mut self, _: &HeaderId, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        // `locus` clones the contig: a `SmolStr` of a name is inline.
-        *self = raw.locus()?;
+        let (start, end) = raw.span()?;
+        // Sorted files change contig rarely: compare before cloning.
+        if self.contig != *raw.contig() {
+            self.contig = raw.contig().clone();
+        }
+        self.start = start;
+        self.end = end;
         Ok(())
     }
 }
@@ -103,19 +105,16 @@ mod tests {
 
     // r[verify vcf_fields.locus+2]
     #[test]
-    fn bcf_positions_and_spans() {
-        let header = VcfHeader::builder().build().unwrap();
-        let chr = ContigId { tid: 0, name: "chr1".into(), header: header.id() };
+    fn positions_and_spans() {
         let at = |p| VcfPos::At(Pos1::new(p).unwrap());
-        let locus = |pos, rlen| Locus::from_bcf(chr.clone(), pos, rlen);
-        let span = |l: Locus| (l.start(), l.end());
-        assert_eq!(span(locus(99, 1).unwrap()), (at(100), at(100)));
-        assert_eq!(span(locus(99, 4).unwrap()), (at(100), at(103)));
-        assert_eq!(span(locus(-1, 1).unwrap()), (VcfPos::Telomere, VcfPos::Telomere));
-        assert_eq!(span(locus(-1, 2).unwrap()), (VcfPos::Telomere, at(1)));
+        let locus = span_of;
+        assert_eq!(locus(99, 1).unwrap(), (at(100), at(100)));
+        assert_eq!(locus(99, 4).unwrap(), (at(100), at(103)));
+        assert_eq!(locus(-1, 1).unwrap(), (VcfPos::Telomere, VcfPos::Telomere));
+        assert_eq!(locus(-1, 2).unwrap(), (VcfPos::Telomere, at(1)));
         assert!(matches!(locus(-2, 1), Err(RecordError::InvalidPosition { pos: -2 })));
         assert!(matches!(locus(0, -5), Err(RecordError::InvalidSpan { .. })));
-        assert!(matches!(locus(i32::MAX, 2), Err(RecordError::InvalidPosition { .. })));
+        assert!(matches!(locus(i64::from(i32::MAX), 2), Err(RecordError::InvalidPosition { .. })));
         assert!(VcfPos::Telomere < at(1));
     }
 }
