@@ -627,7 +627,7 @@ mod tests {
             "Passed",
             "the file's PASS replaces the default"
         );
-        assert_eq!(h.contigs()["c"].length, Some(5), "the first definition wins");
+        assert_eq!(h.contig_defs()["c"].length, Some(5), "the first definition wins");
         assert_eq!(h.other_lines(), ["no equals sign"]);
         assert_eq!(h.version(), VcfVersion::V4_5);
     }
@@ -645,8 +645,8 @@ mod tests {
     #[test]
     fn contig_lengths_are_integers() {
         let h = parse("##contig=<ID=a>\n##contig=<ID=b,length=\"7\",md5=x>\n").unwrap();
-        assert_eq!(h.contigs()["a"], ContigDef::new(None));
-        assert_eq!(h.contigs()["b"].length, Some(7));
+        assert_eq!(h.contig_defs()["a"], ContigDef::new(None));
+        assert_eq!(h.contig_defs()["b"].length, Some(7));
         let e = err("##contig=<ID=c,length=-1>\n");
         assert!(
             matches!(e, VcfHeaderError::InvalidContigLength { ref name, ref value } if name == "c" && value == "-1"),
@@ -669,6 +669,8 @@ mod tests {
         let ids: Vec<_> = h.string_map().iter().collect();
         assert_eq!(ids, [(0, "PASS"), (1, "DP"), (2, "q10"), (3, "GT")]);
         assert_eq!(h.contig_map().iter().collect::<Vec<_>>(), [(0, "b"), (1, "a")]);
+        let names: Vec<_> = h.contigs().map(|(c, _)| c.name().clone()).collect();
+        assert_eq!(names, ["b", "a"], "dictionary order");
         // Written back in canonical order (FILTER, INFO, FORMAT), this order
         // needs IDX to survive.
         let again = VcfHeader::parse(&h.to_vcf_text()).unwrap();
@@ -721,6 +723,9 @@ mod tests {
         assert_eq!(h.string_map().len(), 7);
         assert_eq!(h.string_map().name(1), None, "a hole");
         assert_eq!(h.contig_map().get("c"), Some(3));
+        // r[verify vcf_header.contigs]
+        let contigs: Vec<_> = h.contigs().map(|(c, _)| (c.index(), c.name().clone())).collect();
+        assert_eq!(contigs, [(3, "c".into())], "by IDX, the holes skipped");
         let text = h.to_vcf_text();
         assert!(
             text.contains("##FILTER=<ID=PASS,Description=\"All filters passed\",IDX=0>"),

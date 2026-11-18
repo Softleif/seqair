@@ -513,7 +513,7 @@ mod tests {
         assert!(table.by_rid(1).is_none() && table.by_rid(-1).is_none());
         assert_eq!(table.by_name(&header, "chr1").tid(), 0);
         let un = table.by_name(&header, "chrUn");
-        assert_eq!((un.tid(), un.name()), (1, "chrUn"));
+        assert_eq!((un.tid(), un.name().as_str()), (1, "chrUn"));
         assert_eq!(table.by_name(&header, "chrUn"), un);
         assert_eq!(table.by_name(&header, "chrM").tid(), 2);
     }

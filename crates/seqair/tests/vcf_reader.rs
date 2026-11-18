@@ -1007,7 +1007,7 @@ fn text_records_read_their_columns() {
     let at = |p| VcfPos::At(seqair_types::Pos1::new(p).unwrap());
     let [a, b, c] = &recs[..] else { panic!("three records") };
     assert_eq!(
-        (a.locus().contig().name(), a.locus().start(), a.locus().end()),
+        (a.locus().contig().name().as_str(), a.locus().start(), a.locus().end()),
         ("chr1", at(10), at(10))
     );
     assert_eq!(a.site().ids().collect::<Vec<_>>(), ["rs1", "rs2"]);
@@ -1128,13 +1128,15 @@ fn undeclared_text_contigs_get_ids_after_the_headers() {
         "chrM\t1\t.\tA\t.\t.\t.\t.",
         "chrUn\t3\t.\tA\t.\t.\t.\t.",
     ]);
-    let ids: Vec<(&str, u32)> =
-        recs.iter().map(|r| (r.locus().contig().name(), r.locus().contig().tid())).collect();
+    let ids: Vec<(&str, u32)> = recs
+        .iter()
+        .map(|r| (r.locus().contig().name().as_str(), r.locus().contig().tid()))
+        .collect();
     assert_eq!(ids, [("chrUn", 2), ("chrUn", 2), ("chr1", 0), ("chrM", 3), ("chrUn", 2)]);
 }
 
 // r[verify vcf_record.gt_first_phase+3]
-// r[verify vcf_values.gt]
+// r[verify vcf_values.gt+2]
 /// Before VCF 4.4 the first allele's phase is unphased; from 4.4 a leading
 /// indicator gives it, and without one it is inferred as htslib does.
 #[test]

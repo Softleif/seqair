@@ -383,7 +383,21 @@ impl VcfHeader {
         &self.filters
     }
 
-    pub fn contigs(&self) -> &IndexMap<SmolStr, ContigDef> {
+    // r[impl vcf_header.contigs]
+    /// Every contig with its definition, in contig dictionary order: the
+    /// BCF `rid` order, which [`ContigId::index`] gives and htslib numbers
+    /// contigs by.
+    pub fn contigs(&self) -> impl Iterator<Item = (ContigId, &ContigDef)> + '_ {
+        self.contig_map.iter().filter_map(|(rid, name)| {
+            let (name, def) = self.contigs.get_key_value(name)?;
+            let id =
+                ContigId { tid: u32::try_from(rid).ok()?, name: name.clone(), header: self.id };
+            Some((id, def))
+        })
+    }
+
+    /// The contig definitions by name, in header line order.
+    pub(crate) fn contig_defs(&self) -> &IndexMap<SmolStr, ContigDef> {
         &self.contigs
     }
 
@@ -409,7 +423,7 @@ impl VcfHeader {
     }
 
     /// BCF contig dictionary: contig name to `rid`.
-    pub fn contig_map(&self) -> &StringMap {
+    pub(crate) fn contig_map(&self) -> &StringMap {
         &self.contig_map
     }
 
@@ -1114,7 +1128,7 @@ mod tests {
         let header = builder.build().unwrap();
 
         assert_eq!(header.version(), VcfVersion::V4_5);
-        assert!(header.contigs().contains_key("chr1"));
+        assert!(header.contig_defs().contains_key("chr1"));
         assert!(header.infos().contains_key("DP"));
         assert!(header.formats().contains_key("GT"));
         assert_eq!(header.samples(), &[SmolStr::from("sample0")]);

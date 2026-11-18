@@ -101,7 +101,7 @@ fn write_seqair_tbi(
     header: &VcfHeader,
 ) {
     use seqair_types::SmolStr;
-    let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
+    let names: Vec<SmolStr> = header.contigs().map(|(c, _)| c.name().clone()).collect();
     let file = std::fs::File::create(tbi_path).unwrap();
     index.write_tbi(file, &names).unwrap();
 }
@@ -354,7 +354,7 @@ fn write_generated_vcf(
     let index = index.expect("should produce index").into_builder();
     let tbi_path = vcf_path.with_extension("gz.tbi");
     use seqair_types::SmolStr;
-    let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
+    let names: Vec<SmolStr> = header.contigs().map(|(c, _)| c.name().clone()).collect();
     let file = std::fs::File::create(&tbi_path).unwrap();
     index.write_tbi(file, &names).unwrap();
 
@@ -601,7 +601,7 @@ fn write_large_vcf(
         enc.emit().unwrap();
     }
     let (_inner, index) = writer.finish().unwrap();
-    let names = header.contigs().keys().cloned().collect();
+    let names = header.contigs().map(|(c, _)| c.name().clone()).collect();
     (vcf_path, index.expect("should produce index").into_builder(), names)
 }
 

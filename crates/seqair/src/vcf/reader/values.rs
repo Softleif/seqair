@@ -153,6 +153,17 @@ macro_rules! number_views {
             pub fn get(&self, i: usize) -> Option<$t> {
                 self.0.get_inner(i).flatten()
             }
+
+            // r[impl vcf_values.access+2]
+            /// The elements not yet yielded as an array, if there are
+            /// exactly `N`: `let [ref_depth, alt_depth] = ad.to_array()?;`.
+            pub fn to_array<const N: usize>(&self) -> Option<[$t; N]> {
+                if self.len() != N {
+                    return None;
+                }
+                let mut values = self.clone();
+                Some(std::array::from_fn(|_| values.next().unwrap_or_default()))
+            }
         }
 
         impl Iterator for Values<'_, $t> {
@@ -304,6 +315,27 @@ mod tests {
         assert_eq!(v.collect::<Vec<_>>(), [1, 2]);
     }
 
+    // r[verify vcf_values.access+2]
+    #[test]
+    fn values_convert_to_arrays_of_their_length() {
+        let v = text::<i32>(b"3,4").all_present().unwrap();
+        assert_eq!(v.to_array::<2>(), Some([3, 4]));
+        assert_eq!((v.to_array::<1>(), v.to_array::<3>()), (None, None));
+        assert_eq!(text::<f32>(b"0.5").all_present().unwrap().to_array(), Some([0.5]));
+        assert_eq!(format!("{:?}", text::<i32>(b"1,.")), "[Some(1), None]");
+    }
+
+    // r[verify vcf_values.gt+2]
+    #[test]
+    fn genotypes_index_their_alleles() {
+        let gt = GenotypeRef(GtAlleles::Text(TextGt::new(b"0|1/.", true).unwrap()));
+        assert_eq!((gt.ploidy(), gt.get(0).map(|a| a.allele)), (3, Some(Some(0))));
+        assert_eq!(gt.get(1), Some(GtAllele { allele: Some(1), phased: true }));
+        assert_eq!(gt.get(2), Some(GtAllele { allele: None, phased: false }));
+        assert_eq!(gt.get(3), None);
+        assert_eq!(format!("{gt:?}"), r#"GenotypeRef("0|1/.")"#);
+    }
+
     #[test]
     fn a_lone_missing_element_or_nothing_is_missing() {
         assert!(bcf(&[0x01]).is_missing());
@@ -389,7 +421,7 @@ mod tests {
             .collect()
     }
 
-    // r[verify vcf_values.gt]
+    // r[verify vcf_values.gt+2]
     // r[verify vcf_record.gt_first_phase+3]
     /// The examples of `[VCF45]` §6.3.3's GT table, and two VCF 4.4 prefixed
     /// ones, read from text and from BCF; before 4.4 the first phase is unphased.
@@ -497,7 +529,7 @@ mod tests {
         }
     }
 
-    // r[verify vcf_values.gt]
+    // r[verify vcf_values.gt+2]
     // r[verify vcf_record.gt_first_phase+3]
     /// Text genotypes read as drawn, and BCF genotypes encoded per `[VCF45]`
     /// §6.3.3 (`(allele + 1) << 1 | phased`, int32, end-of-vector padding to

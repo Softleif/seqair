@@ -361,10 +361,10 @@ impl<W: Write> Writer<W> {
         // with contigs but no declared lengths is `None`, which takes htslib's
         // assumption rather than a guess of ours; an empty header indexes
         // nothing, so its depth is immaterial and stays at the BAI default.
-        let max_ref_len: Option<u64> = if header.contigs().is_empty() {
+        let max_ref_len: Option<u64> = if header.contig_defs().is_empty() {
             Some(0)
         } else {
-            header.contigs().values().filter_map(|contig| contig.length).max()
+            header.contig_defs().values().filter_map(|contig| contig.length).max()
         };
 
         match &mut writer.inner {

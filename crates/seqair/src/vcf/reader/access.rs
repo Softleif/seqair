@@ -177,7 +177,7 @@ impl ReadKind for Gt {
         None
     }
 
-    // r[impl vcf_values.gt]
+    // r[impl vcf_values.gt+2]
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
     fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError> {

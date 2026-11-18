@@ -287,11 +287,17 @@ pub struct ContigId {
 }
 
 impl ContigId {
-    pub fn name(&self) -> &str {
+    // r[impl vcf_header.contigs]
+    pub fn name(&self) -> &SmolStr {
         &self.name
     }
     pub fn tid(&self) -> u32 {
         self.tid
+    }
+    /// The contig's place in its header's contig dictionary, from 0: the
+    /// BCF `rid`.
+    pub fn index(&self) -> usize {
+        self.tid as usize
     }
 }
 

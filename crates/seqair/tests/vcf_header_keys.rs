@@ -99,7 +99,7 @@ fn filters_contigs_and_samples_resolve() {
     assert_eq!(h.filter("PASS").unwrap().dict_idx(), 0);
     assert_eq!(h.filter("q10").unwrap().dict_idx(), 1);
     let chr2 = h.contig("chr2").unwrap();
-    assert_eq!((chr2.name(), chr2.tid()), ("chr2", 1));
+    assert_eq!((chr2.name().as_str(), chr2.index()), ("chr2", 1));
     let hg002 = h.sample("HG002").unwrap();
     assert_eq!(hg002.index(), 1);
     let all: Vec<_> = h.sample_indices().collect();

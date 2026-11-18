@@ -85,7 +85,8 @@ fn dictionaries(header: &VcfHeader) -> (Dictionary, Dictionary) {
     let collect = |map: &seqair::vcf::header::StringMap| {
         map.iter().map(|(idx, id)| (id.to_owned(), idx)).collect()
     };
-    (collect(header.string_map()), collect(header.contig_map()))
+    let contigs = header.contigs().map(|(c, _)| (c.name().to_string(), c.index())).collect();
+    (collect(header.string_map()), contigs)
 }
 
 /// Everything a header holds, in order (an `IndexMap`'s `==` ignores order).
@@ -102,13 +103,12 @@ struct Snapshot {
 }
 
 fn snapshot(h: &VcfHeader) -> Snapshot {
-    let pairs = |m: &indexmap::IndexMap<SmolStr, _>| m.clone().into_iter().collect();
     Snapshot {
         version: h.version(),
         filters: h.filters().clone().into_iter().collect(),
         infos: h.infos().clone().into_iter().collect(),
         formats: h.formats().clone().into_iter().collect(),
-        contigs: pairs(h.contigs()),
+        contigs: h.contigs().map(|(c, def)| (c.name().clone(), def.clone())).collect(),
         samples: h.samples().to_vec(),
         other_lines: h.other_lines().to_vec(),
         dictionaries: dictionaries(h),
@@ -160,7 +160,7 @@ fn a_parsed_header_keeps_its_version_and_attributes() {
     assert!(rastair.other_lines().iter().any(|l| l.starts_with("rastairConfig={")));
 
     let giab = VcfHeader::parse(&fixture("giab_hg002.vcf.header")).unwrap();
-    let chr1 = &giab.contigs()["chr1"];
+    let (_, chr1) = giab.contigs().find(|(c, _)| c.name() == "chr1").unwrap();
     assert_eq!(chr1.length, Some(248_956_422));
     assert_eq!(
         chr1.attributes.first().map(|a| (a.key.as_str(), a.value.as_str())),

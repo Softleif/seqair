@@ -206,7 +206,7 @@ impl<'a> TypedValue<'a> {
         BcfVec::new(self)
     }
 
-    // r[impl vcf_values.gt]
+    // r[impl vcf_values.gt+2]
     /// One sample's GT vector. `first_phase_is_read` is false for VCF 4.3 and
     /// earlier, whose first allele's phase bit is treated as unphased
     /// (`r[vcf_record.gt_first_phase+3]`).
@@ -435,7 +435,7 @@ fn gt_allele(value: i32) -> Result<Option<u16>, BcfValueError> {
     }
 }
 
-// r[impl vcf_values.gt]
+// r[impl vcf_values.gt+2]
 /// One sample's GT alleles, each with its phase bit; a ploidy below the
 /// field's is padded with end-of-vector, which ends it. The int missing value
 /// (htslib's fill for a sample without GT) is a missing, unphased allele.
@@ -735,7 +735,7 @@ mod tests {
         assert!(matches!(read_typed_int(&[0x13, 1]), Err(BcfValueError::Truncated { .. })));
     }
 
-    // r[verify vcf_values.gt]
+    // r[verify vcf_values.gt+2]
     #[test]
     fn malformed_bcf_genotypes_are_typed_errors() {
         fn gt(bytes: &[u8]) -> Result<BcfGt<'_>, BcfValueError> {

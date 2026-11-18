@@ -1,11 +1,12 @@
-//! [`Locus`]: where a record is (`r[vcf_fields.locus+2]`).
+//! [`Locus`]: where a record is (`r[vcf_fields.locus+3]`).
 
 use super::error::{RecordError, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::raw::RawRecord;
 use crate::vcf::header::{HeaderId, VcfHeader};
 use crate::vcf::record_encoder::ContigId;
-use seqair_types::Pos1;
+use seqair_types::{Pos0, Pos1};
+use std::ops::RangeInclusive;
 
 /// A VCF position: POS 0 (BCF −1), the telomere before a contig's first
 /// base, or a base. POS N+1, the telomere after the last base, is an
@@ -27,6 +28,20 @@ impl std::fmt::Display for VcfPos {
 }
 
 impl VcfPos {
+    // r[impl vcf_fields.locus+3]
+    /// The base, 1-based; `None` for the telomere.
+    pub fn pos1(self) -> Option<Pos1> {
+        match self {
+            Self::Telomere => None,
+            Self::At(pos) => Some(pos),
+        }
+    }
+
+    /// The base, 0-based; `None` for the telomere.
+    pub fn pos0(self) -> Option<Pos0> {
+        self.pos1().map(Pos1::to_zero_based)
+    }
+
     /// The 1-based position `pos` (0 for the telomere).
     pub(crate) fn from_one_based(pos: i64) -> Option<Self> {
         match pos {
@@ -47,7 +62,7 @@ pub(crate) fn span_of(pos: i64, rlen: i64) -> Result<(VcfPos, VcfPos), RecordErr
     Ok((start, end))
 }
 
-// r[impl vcf_fields.locus+2]
+// r[impl vcf_fields.locus+3]
 /// A record's contig, start and inclusive end. Cheap to clone; reading it
 /// skips everything past a record's fixed fields.
 ///
@@ -92,6 +107,14 @@ impl Locus {
     pub fn end(&self) -> VcfPos {
         self.end
     }
+
+    // r[impl vcf_fields.locus+3]
+    /// The reference bases the record spans, from base 1 when it starts at
+    /// the telomere before it; `None` when it spans that telomere only.
+    pub fn bases(&self) -> Option<RangeInclusive<Pos1>> {
+        let end = self.end.pos1()?;
+        Some(self.start.pos1().unwrap_or(Pos1::MIN)..=end)
+    }
 }
 
 impl Fields for Locus {
@@ -125,7 +148,7 @@ impl Fields for Locus {
 mod tests {
     use super::*;
 
-    // r[verify vcf_fields.locus+2]
+    // r[verify vcf_fields.locus+3]
     #[test]
     fn positions_and_spans() {
         let at = |p| VcfPos::At(Pos1::new(p).unwrap());
@@ -138,5 +161,16 @@ mod tests {
         assert!(matches!(locus(0, -5), Err(RecordError::InvalidSpan { .. })));
         assert!(matches!(locus(i64::from(i32::MAX), 2), Err(RecordError::InvalidPosition { .. })));
         assert!(VcfPos::Telomere < at(1));
+        assert_eq!((at(7).pos1(), at(7).pos0()), (Pos1::new(7), Some(Pos0::new(6).unwrap())));
+        assert_eq!((VcfPos::Telomere.pos1(), VcfPos::Telomere.pos0()), (None, None));
+        let contig = ContigId {
+            tid: 0,
+            name: "c".into(),
+            header: VcfHeader::builder().build().unwrap().id(),
+        };
+        let bases = |s, e| Locus::new_unchecked(contig.clone(), s, e).bases();
+        assert_eq!(bases(at(5), at(7)), Some(Pos1::new(5).unwrap()..=Pos1::new(7).unwrap()));
+        assert_eq!(bases(VcfPos::Telomere, at(1)), Some(Pos1::MIN..=Pos1::MIN));
+        assert_eq!(bases(VcfPos::Telomere, VcfPos::Telomere), None);
     }
 }

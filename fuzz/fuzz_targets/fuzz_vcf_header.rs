@@ -13,6 +13,9 @@ fuzz_target!(|data: &[u8]| {
     let Ok(header) = VcfHeader::parse(text) else { return };
     let again = VcfHeader::parse(&header.to_vcf_text()).expect("written header text parses");
     assert_eq!(again.string_map(), header.string_map());
-    assert_eq!(again.contig_map(), header.contig_map());
+    let contigs = |h: &VcfHeader| -> Vec<_> {
+        h.contigs().map(|(c, def)| (c.name().clone(), c.index(), def.clone())).collect()
+    };
+    assert_eq!(contigs(&again), contigs(&header));
     assert_eq!(again.samples(), header.samples());
 });

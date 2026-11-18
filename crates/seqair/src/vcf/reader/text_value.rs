@@ -237,7 +237,7 @@ fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
         .map_err(|_| TextValueError::GenotypeAlleleOutOfRange { value: Offending::new(token) })
 }
 
-// r[impl vcf_values.gt]
+// r[impl vcf_values.gt+2]
 /// A text GT (`0/1`, `0|1`, `.`, `./.`, `1`, `0/1|2`, VCF 4.4's `|0|1`),
 /// allele by allele, checked once by [`TextGt::new`].
 #[derive(Debug, Clone)]
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(v.collect::<Vec<_>>(), [None, Some(0.5), Some(f32::INFINITY)]);
     }
 
-    // r[verify vcf_values.gt]
+    // r[verify vcf_values.gt+2]
     #[test]
     fn malformed_text_genotypes_are_typed_errors() {
         for bad in
