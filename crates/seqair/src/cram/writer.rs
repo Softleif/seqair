@@ -98,7 +98,7 @@ use self::container::{Assembled, SliceBuilder, SliceKind};
 use self::header::CramHeader;
 use self::metrics::Metrics;
 use self::pool::{Done, Pool};
-use self::record::{RecordView, Scratch, SliceRef};
+use self::record::{RecordView, RefBases, Scratch, SliceRef};
 use super::index::{CraiEntry, CramIndex};
 use crate::bam::aux::AuxTag;
 use crate::bam::header::BamHeader;
@@ -244,7 +244,9 @@ fn encode_held(slice: &mut SliceBuilder, tid: Tid, header: &CramHeader, scratch:
     let (start, end) = embed::extent(&held, header.target_len(tid));
     let embedded = embed::consensus(&held, start, end);
     let kind = SliceKind::Mapped { tid, reference: false };
-    let reference = embedded.as_deref().map(|bases| SliceRef { bases, start, embedded: true });
+    // A consensus is `ACGTN` only.
+    let reference =
+        embedded.as_deref().map(|bases| SliceRef { bases, start, embedded: true, iupac: true });
     for h in &held {
         record::encode(slice, kind, &h.view(), &h.checked, reference, header, scratch);
     }
@@ -285,7 +287,7 @@ pub struct CramWriter<W: Write> {
     /// The uppercased bases of the reference the current slice is on,
     /// shared with the slices `write_store` encodes against them.
     #[allow(clippy::rc_buffer, reason = "the buffer is reused once no slice holds it")]
-    reference: Option<(Tid, Arc<Vec<u8>>)>,
+    reference: Option<(Tid, Arc<RefBases>)>,
     slice: SliceBuilder,
     last: Option<Placement>,
     record_counter: u64,
@@ -336,7 +338,7 @@ impl<W: Write> CramWriter<W> {
             out,
             header: Arc::new(header),
             fasta,
-            reference: hashed.map(|(tid, bases)| (tid, Arc::new(bases))),
+            reference: hashed.map(|(tid, bases)| (tid, Arc::new(RefBases::new(bases)))),
             slice: SliceBuilder::default(),
             last: None,
             record_counter: 0,
@@ -500,8 +502,7 @@ impl<W: Write> CramWriter<W> {
         if let Some(tid) = tid {
             self.load_reference(tid)?;
         }
-        let reference =
-            tid.and(self.reference.as_ref()).map(|(_, bases)| SliceRef::fasta(bases.as_slice()));
+        let reference = tid.and(self.reference.as_ref()).map(|(_, bases)| SliceRef::fasta(bases));
         record::encode(
             &mut self.slice,
             kind,
@@ -527,15 +528,19 @@ impl<W: Write> CramWriter<W> {
             return Ok(());
         }
         // The buffer is reused unless a slice `write_store` encodes holds it.
-        let mut bases =
-            self.reference.take().and_then(|(_, b)| Arc::try_unwrap(b).ok()).unwrap_or_default();
+        let mut bases = self
+            .reference
+            .take()
+            .and_then(|(_, b)| Arc::try_unwrap(b).ok())
+            .map(|b| b.bases)
+            .unwrap_or_default();
         // Not a chr1-sized buffer for a small contig for the rest of the file.
         let len = usize::try_from(self.header.target_len(tid)).unwrap_or(usize::MAX);
         if bases.capacity() / 2 > len {
             bases = Vec::new();
         }
         self.header.fetch(tid, &mut self.fasta, &mut bases)?;
-        self.reference = Some((tid, Arc::new(bases)));
+        self.reference = Some((tid, Arc::new(RefBases::new(bases))));
         Ok(())
     }
 
@@ -552,7 +557,7 @@ impl<W: Write> CramWriter<W> {
                 .reference
                 .as_ref()
                 .filter(|(loaded, _)| *loaded == tid)
-                .map(|(_, bases)| bases.as_slice()),
+                .map(|(_, bases)| bases.bases.as_slice()),
             _ => None,
         };
         let length = match kind {

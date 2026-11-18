@@ -5,7 +5,7 @@
 use super::container::{self, Assembled, Codecs, SliceBuilder, SliceKind};
 use super::header::CramHeader;
 use super::metrics::MAX_IN_FLIGHT;
-use super::record::{self, Checked, Scratch, SliceRef};
+use super::record::{self, Checked, RefBases, Scratch, SliceRef};
 use super::{CramWriteError, CramWriter, embed, encode_held, store_view};
 use crate::bam::record_idx::RecordIdx;
 use crate::bam::record_store::RecordStore;
@@ -18,17 +18,19 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 enum Bases {
     /// The writer's whole reference, shared: a single-reference slice.
     #[allow(clippy::rc_buffer, reason = "the writer's buffer, reused once no slice holds it")]
-    Whole(Arc<Vec<u8>>),
+    Whole(Arc<RefBases>),
     /// A copy of the window a multi-reference slice's records on it cover,
     /// so a slice across many references holds none of them whole.
-    Window { start: usize, bases: Vec<u8> },
+    Window { start: usize, bases: Vec<u8>, iupac: bool },
 }
 
 impl Bases {
     fn slice_ref(&self) -> SliceRef<'_> {
         match self {
-            Self::Whole(bases) => SliceRef::fasta(bases.as_slice()),
-            Self::Window { start, bases } => SliceRef { bases, start: *start, embedded: false },
+            Self::Whole(bases) => SliceRef::fasta(bases),
+            Self::Window { start, bases, iupac } => {
+                SliceRef { bases, start: *start, embedded: false, iupac: *iupac }
+            }
         }
     }
 }
@@ -90,10 +92,11 @@ impl Job {
                 *e = (*e).max(end);
             }
             let (start, end) = extent.unwrap_or((0, 0));
-            let end = end.min(whole.len());
+            let end = end.min(whole.bases.len());
             let start = start.min(end);
-            let window = whole.get(start..end).unwrap_or_default().to_vec();
-            *bases = Bases::Window { start, bases: window };
+            let window = whole.bases.get(start..end).unwrap_or_default().to_vec();
+            let iupac = whole.iupac || record::all_iupac(&window);
+            *bases = Bases::Window { start, bases: window, iupac };
         }
     }
 }
@@ -144,7 +147,7 @@ fn run(
     };
     let reference = match (kind, job.references.first()) {
         (SliceKind::Mapped { reference: true, .. }, Some((_, Bases::Whole(bases)))) => {
-            Some(bases.as_slice())
+            Some(bases.bases.as_slice())
         }
         _ => None,
     };

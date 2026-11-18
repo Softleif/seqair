@@ -221,11 +221,33 @@ pub(super) struct SliceRef<'a> {
     pub start: usize,
     /// Built from the slice's reads (`r[cram_writer.embedded_reference]`).
     pub embedded: bool,
+    /// Every byte of `bases` is an IUPAC code, so no record needs checking.
+    pub iupac: bool,
+}
+
+/// A reference's uppercased bases, checked once for a byte that is no IUPAC
+/// code, rather than once a record over its span.
+#[derive(Debug, Default)]
+pub(super) struct RefBases {
+    pub bases: Vec<u8>,
+    pub iupac: bool,
+}
+
+impl RefBases {
+    pub(super) fn new(bases: Vec<u8>) -> Self {
+        let iupac = all_iupac(&bases);
+        Self { bases, iupac }
+    }
+}
+
+/// Whether every byte is an upper-case IUPAC code.
+pub(super) fn all_iupac(bases: &[u8]) -> bool {
+    bases.iter().all(|&b| IS_IUPAC.get(usize::from(b)).copied().unwrap_or(false))
 }
 
 impl<'a> SliceRef<'a> {
-    pub(super) fn fasta(bases: &'a [u8]) -> Self {
-        Self { bases, start: 0, embedded: false }
+    pub(super) fn fasta(reference: &'a RefBases) -> Self {
+        Self { bases: &reference.bases, start: 0, embedded: false, iupac: reference.iupac }
     }
 
     /// `pos`'s index in `bases`; past them (never) for one before them.
@@ -300,8 +322,7 @@ pub(super) fn encode(
         reference.is_some_and(|r| {
             let from = view.pos.map_or(0, Pos0::as_usize);
             let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.end());
-            let span = r.range(from, to).unwrap_or_default();
-            span.iter().all(|&b| IS_IUPAC.get(usize::from(b)).copied().unwrap_or(false))
+            r.iupac || all_iupac(r.range(from, to).unwrap_or_default())
         })
     };
     let track = regenerates && (checked.has_md || checked.has_nm) && iupac_reference();
