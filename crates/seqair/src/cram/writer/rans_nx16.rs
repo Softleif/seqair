@@ -82,7 +82,7 @@ pub(super) fn normal_profile(len: usize) -> [Nx16Flags; 6] {
 /// SIMD kernels at a level (`r[cram_writer.rans_nx16.simd]`). Both write
 /// the same bytes.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Coder {
+enum Coder {
     Scalar,
     Simd(Level),
 }
@@ -138,7 +138,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
         byte |= FLAG_NO_SIZE;
     }
 
-    let packed = if flags.pack { pack(data, coder) } else { None };
+    let packed = if flags.pack { pack(data) } else { None };
     let mut body = data;
     if let Some((meta, packed)) = &packed {
         byte |= FLAG_PACK;
@@ -147,7 +147,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
         body = packed;
     }
 
-    let rle = if flags.rle { rle(body, coder) } else { None };
+    let rle = if flags.rle { rle(body) } else { None };
     if let Some((meta, literals)) = &rle {
         byte |= FLAG_RLE;
         let meta_len = meta.len().checked_mul(2)?;
@@ -234,7 +234,7 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
 #[allow(clippy::cast_possible_truncation, reason = "at most 16 symbols, so indices fit 4 bits")]
 #[allow(clippy::arithmetic_side_effects, reason = "8 / per_byte with per_byte ∈ {2, 4, 8}")]
-pub(super) fn pack(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut present = [false; 256];
     for &b in data {
         present[usize::from(b)] = true;
@@ -258,16 +258,7 @@ pub(super) fn pack(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
         3 | 4 => 4,
         _ => 2,
     };
-    let packed = match coder {
-        Coder::Scalar => {
-            let bits = 8 / per_byte;
-            data.chunks(per_byte)
-                .map(|c| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]))
-                .collect()
-        }
-        Coder::Simd(_) => simd::pack(data, &code, per_byte),
-    };
-    Some((meta, packed))
+    Some((meta, pack_indices(data, &code, per_byte)))
 }
 
 /// htscodecs' `hts_rle_encode`: the metadata (the run symbols, as a count
@@ -281,24 +272,8 @@ pub(super) fn pack(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
     reason = "256 symbols are written as 0, as htscodecs does"
 )]
 #[allow(clippy::arithmetic_side_effects, reason = "i + run + 1 ≤ data.len()")]
-fn rle(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
-    let saved = match coder {
-        Coder::Scalar => {
-            let mut saved = [0i64; 256];
-            let mut last = None;
-            for &b in data {
-                let s = &mut saved[usize::from(b)];
-                if last == Some(b) {
-                    *s = s.saturating_add(1);
-                } else {
-                    *s = s.saturating_sub(1);
-                    last = Some(b);
-                }
-            }
-            saved
-        }
-        Coder::Simd(_) => simd::rle_saved(data),
-    };
+fn rle(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let saved = rle_saved(data);
     let mut is_run = [false; 256];
     let mut meta = vec![0];
     for ((sym, &s), r) in (0u8..=255).zip(&saved).zip(&mut is_run) {
@@ -330,6 +305,93 @@ fn rle(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
     (coded < data.len().saturating_mul(99)).then_some((meta, literals))
 }
 
+/// Order-0 counts, in eight sub-tables past a few hundred bytes so that a
+/// run of one symbol is eight chains of increments rather than one.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 8")]
+#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
+fn histogram(data: &[u8]) -> [u32; 256] {
+    if data.len() < 256 {
+        // Zeroing and summing the sub-tables would cost more than they save.
+        let mut c = [0u32; 256];
+        for &b in data {
+            c[usize::from(b)] += 1;
+        }
+        return c;
+    }
+    let mut c = [[0u32; 256]; 8];
+    let (octets, rest) = data.as_chunks::<8>();
+    for o in octets {
+        for (k, &b) in o.iter().enumerate() {
+            c[k][usize::from(b)] += 1;
+        }
+    }
+    for &b in rest {
+        c[0][usize::from(b)] += 1;
+    }
+    let mut sum = [0u32; 256];
+    for t in &c {
+        for (s, &n) in sum.iter_mut().zip(t) {
+            *s += n;
+        }
+    }
+    sum
+}
+
+/// What RLE saves on each symbol (`rle_find_syms`: one for each repeat,
+/// minus one for each run start): a symbol's count less twice its runs,
+/// each from sub-tables, so that a long run is not a chain of increments
+/// of one counter.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 4")]
+#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
+fn rle_saved(data: &[u8]) -> [i64; 256] {
+    let total = histogram(data);
+    let mut runs = [[0u32; 256]; 4];
+    if let Some((&first, rest)) = data.split_first() {
+        runs[0][usize::from(first)] += 1;
+        let mut prev = first;
+        let (quads, tail) = rest.as_chunks::<4>();
+        for q in quads {
+            for (k, &b) in q.iter().enumerate() {
+                runs[k][usize::from(b)] += u32::from(b != prev);
+                prev = b;
+            }
+        }
+        for &b in tail {
+            runs[0][usize::from(b)] += u32::from(b != prev);
+            prev = b;
+        }
+    }
+    let mut saved = [0i64; 256];
+    for (sym, s) in saved.iter_mut().enumerate() {
+        let r: u32 = runs.iter().map(|t| t[sym]).sum();
+        *s = i64::from(total[sym]) - 2 * i64::from(r);
+    }
+    saved
+}
+
+/// `data` as `per_byte` (2, 4 or 8) symbol indices a byte, the first in
+/// the lowest bits.
+#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table")]
+#[allow(clippy::arithmetic_side_effects, reason = "per_byte ∈ {2, 4, 8}")]
+fn pack_indices(data: &[u8], code: &[u8; 256], per_byte: usize) -> Vec<u8> {
+    fn packed<const K: usize>(data: &[u8], code: &[u8; 256]) -> Vec<u8> {
+        let bits = 8 / K;
+        let (whole, tail) = data.as_chunks::<K>();
+        let byte =
+            |c: &[u8]| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]);
+        let mut out: Vec<u8> = whole.iter().map(|c| byte(c)).collect();
+        if !tail.is_empty() {
+            out.push(byte(tail));
+        }
+        out
+    }
+    match per_byte {
+        2 => packed::<2>(data, code),
+        4 => packed::<4>(data, code),
+        _ => packed::<8>(data, code),
+    }
+}
+
 /// A symbol's slot range in a frequency table.
 #[derive(Debug, Clone, Copy, Default)]
 struct Symbol {
@@ -347,16 +409,7 @@ fn encode_order_0(data: &[u8], n: usize, coder: Coder) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
     }
-    let counts = match coder {
-        Coder::Scalar => {
-            let mut counts = [0u32; 256];
-            for &b in data {
-                counts[usize::from(b)] = counts[usize::from(b)].saturating_add(1);
-            }
-            counts
-        }
-        Coder::Simd(_) => simd::histogram(data),
-    };
+    let counts = histogram(data);
     let total = u32::try_from(data.len().next_power_of_two()).ok()?.min(1 << ORDER_0_BITS);
     let freqs = normalize(&counts, total);
     let mut out = Vec::new();
@@ -366,7 +419,7 @@ fn encode_order_0(data: &[u8], n: usize, coder: Coder) -> Option<Vec<u8>> {
     }
     let table = symbols(&freqs, ORDER_0_BITS - total.trailing_zeros());
     if let Coder::Simd(level) = coder {
-        simd::code_order_0(level, data, &table, n, &mut out);
+        simd::code_order_0(level, data, &table, n, &mut out)?;
         return Some(out);
     }
 
@@ -748,19 +801,86 @@ mod tests {
     }
 
     // r[verify cram_writer.rans_nx16.simd]
-    /// The kernels' reciprocal is the division, for every frequency and the
-    /// states at the ends of the range as well as drawn ones.
+    // r[verify io.simd_portable]
+    /// The kernels' vector quotient is the division at every level, for
+    /// drawn frequencies and states and for the states at the ends of the
+    /// range and next to a multiple of the frequency.
     #[hegel::test]
-    fn the_reciprocal_divides_exactly(tc: TestCase) {
-        let f = tc.draw(gs::integers::<u32>().min_value(1).max_value(4096));
-        let start = tc.draw(gs::integers::<u32>().max_value(4096 - f));
-        let x = tc.draw(gs::integers::<u32>().max_value((1 << 31) - 1));
-        let e = simd::enc(Symbol { start, freq: f });
-        let (m, s) = (e & 0xFFFF_FFFF, (e >> 32) as u32 >> 25);
-        for x in [x, 0, 1, f - 1, f, (1 << 31) - 1, ((1u32 << 31) - 1) / f * f] {
-            let q = ((u64::from(x) * 2 * m) >> 32) >> s;
-            assert_eq!(q, u64::from(x / f), "x = {x}, f = {f}");
+    fn the_vector_quotient_divides_exactly(tc: TestCase) {
+        let mut fs = [0u32; 4];
+        let mut es = [0u64; 4];
+        for (f, e) in fs.iter_mut().zip(&mut es) {
+            *f = tc.draw(gs::integers::<u32>().min_value(1).max_value(4096));
+            let start = tc.draw(gs::integers::<u32>().max_value(4096 - *f));
+            *e = simd::enc(Symbol { start, freq: *f });
         }
+        let max = (1u32 << 31) - 1;
+        let mut drawn = [0u32; 4];
+        for x in &mut drawn {
+            *x = tc.draw(gs::integers::<u32>().max_value(max));
+        }
+        let edges = [
+            [0, 1, max, max],
+            fs.map(|f| f - 1),
+            fs,
+            fs.map(|f| max / f * f),
+            fs.map(|f| max / f * f - 1),
+        ];
+        for xs in std::iter::once(drawn).chain(edges) {
+            let want: [u32; 4] = std::array::from_fn(|l| xs[l] / fs[l]);
+            for level in crate::simd_levels::levels() {
+                let got = fearless_simd::dispatch!(level, simd => simd::quotients(simd, xs, &es));
+                assert_eq!(got, want, "{level:?}: x = {xs:?}, f = {fs:?}");
+            }
+        }
+    }
+
+    /// The order-0 histogram against every byte counted one at a time.
+    #[hegel::test]
+    fn histogram_counts_every_byte(tc: TestCase) {
+        let data = draw_data(&tc);
+        let mut want = [0u32; 256];
+        for &b in &data {
+            want[usize::from(b)] += 1;
+        }
+        assert_eq!(histogram(&data), want);
+    }
+
+    /// RLE's savings as htscodecs' `rle_find_syms` counts them: +1 for a
+    /// byte equal to the one before, −1 for any other.
+    #[hegel::test]
+    fn rle_savings_count_repeats_less_runs(tc: TestCase) {
+        let data = draw_data(&tc);
+        let mut want = [0i64; 256];
+        let mut last = None;
+        for &b in &data {
+            want[usize::from(b)] += if last == Some(b) { 1 } else { -1 };
+            last = Some(b);
+        }
+        assert_eq!(rle_saved(&data), want);
+    }
+
+    /// PACK's bytes, each built symbol by symbol from the lowest bits.
+    #[hegel::test]
+    fn packed_bytes_hold_their_symbols_lowest_first(tc: TestCase) {
+        let per_byte = [2, 4, 8][tc.draw(gs::integers::<usize>().max_value(2))];
+        let data = draw_data(&tc);
+        let bits = 8 / per_byte;
+        let mut code = [0u8; 256];
+        for (i, c) in code.iter_mut().enumerate() {
+            *c = (i % (1 << bits)) as u8;
+        }
+        let want: Vec<u8> = data
+            .chunks(per_byte)
+            .map(|c| {
+                let mut byte = 0u8;
+                for (k, &b) in c.iter().enumerate() {
+                    byte |= code[usize::from(b)] << (k * bits);
+                }
+                byte
+            })
+            .collect();
+        assert_eq!(pack_indices(&data, &code, per_byte), want);
     }
 
     #[hegel::test]

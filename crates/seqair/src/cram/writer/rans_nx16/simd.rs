@@ -1,9 +1,9 @@
 //! The rANS Nx16 encoder's fast path (`r[cram_writer.rans_nx16.simd]`):
-//! histograms that do not serialize on repeated symbols, order-1 tables for
-//! the alphabet's rows only, and SIMD kernels for the interleaved states, as
-//! htscodecs' `rANS_static32x16pr_neon.c` codes them. Every function here
-//! has a scalar counterpart in the parent module, the reference it must
-//! match byte for byte.
+//! order-1 counts that do not serialize on repeated pairs, order-1 tables
+//! for the alphabet's rows only, and SIMD kernels for the interleaved
+//! states, as htscodecs' `rANS_static32x16pr_neon.c` codes them. Every
+//! function here has a scalar counterpart in the parent module, the
+//! reference it must match byte for byte.
 
 use super::{
     Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize, order_1_header, order_1_shift,
@@ -12,6 +12,7 @@ use super::{
 use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4, u64x2};
 use fearless_simd_macros::simd;
 use std::cell::RefCell;
+use std::thread::LocalKey;
 
 // r[impl cram_writer.rans_nx16.simd]
 
@@ -49,11 +50,10 @@ struct Words<'a> {
 
 impl<'a> Words<'a> {
     /// Room for `symbols` symbols' words in `scratch`, whose old contents
-    /// are overwritten before they are read.
-    #[allow(clippy::arithmetic_side_effects, reason = "len ≤ i32::MAX")]
-    fn new(scratch: &'a mut Vec<u8>, symbols: usize) -> Self {
-        scratch.resize(16 + 2 * symbols, 0);
-        Self { at: scratch.len(), buf: scratch }
+    /// are overwritten before they are read; `None` if that overflows.
+    fn new(scratch: &'a mut Vec<u8>, symbols: usize) -> Option<Self> {
+        scratch.resize(symbols.checked_mul(2)?.checked_add(16)?, 0);
+        Some(Self { at: scratch.len(), buf: scratch })
     }
 
     #[allow(clippy::indexing_slicing, reason = "at ≤ buf.len()")]
@@ -68,7 +68,45 @@ thread_local! {
     static WORDS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// The order-1 tables, kept between blocks for the same reason: zeroing
     /// their 1.5 MiB cost a 4 KiB block several times its coding.
-    static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::new());
+    static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::default());
+}
+
+/// A word buffer larger than this (a block of 16 MiB) is dropped after use
+/// rather than kept for the thread's next block.
+const MAX_KEPT_WORDS: usize = 32 << 20;
+
+/// Per-thread scratch: what to give back after use.
+trait Scratch: Default {
+    fn trim(&mut self) {}
+}
+
+impl Scratch for Vec<u8> {
+    fn trim(&mut self) {
+        if self.capacity() > MAX_KEPT_WORDS {
+            *self = Vec::new();
+        }
+    }
+}
+
+/// `f` on this thread's scratch, or on a fresh one while the thread-local
+/// is being destroyed or already in use (neither happens in the encoder's
+/// own calls, but neither may panic).
+fn with_scratch<T: Scratch, R>(
+    key: &'static LocalKey<RefCell<T>>,
+    f: impl FnOnce(&mut T) -> Option<R>,
+) -> Option<R> {
+    let mut f = Some(f);
+    let kept = key.try_with(|cell| {
+        let mut scratch = cell.try_borrow_mut().ok()?;
+        let r = f.take().map(|f| f(&mut scratch));
+        scratch.trim();
+        r
+    });
+    match kept {
+        Ok(Some(r)) => r,
+        // `f` has not run.
+        _ => f.take()?(&mut T::default()),
+    }
 }
 
 /// Order-1 counts, in four tables so that a run of one pair is four chains
@@ -83,8 +121,10 @@ struct Order1Scratch {
     enc: Vec<Enc>,
 }
 
-impl Order1Scratch {
-    fn new() -> Self {
+impl Scratch for Order1Scratch {}
+
+impl Default for Order1Scratch {
+    fn default() -> Self {
         Self {
             counts: std::array::from_fn(|_| vec![0; 1 << 16]),
             dirty: [false; 256],
@@ -105,6 +145,7 @@ fn put(x: u32, e: Enc, bits: u32, words: &mut Words<'_>) -> u32 {
     // and kept only if the state renormalizes.
     let renorm = x >> (31 - bits) >= f;
     let at = words.at;
+    debug_assert!(at >= 2, "a word buffer holds 2 bytes a symbol");
     words.buf[at - 2..at].copy_from_slice(&(x as u16).to_le_bytes());
     words.at = at - 2 * usize::from(renorm);
     let x = if renorm { x >> 16 } else { x };
@@ -159,13 +200,12 @@ fn step4<S: Simd>(
     words: &mut Words<'_>,
     latency_bound: bool,
 ) -> u32x4<S> {
-    let a: u32x4<S> = u64x2::from_slice(simd, &e[..2]).bitcast();
-    let b: u32x4<S> = u64x2::from_slice(simd, &e[2..]).bitcast();
-    let (m, info) = (a.unzip_low(b), a.unzip_high(b));
+    let (m, info) = split(simd, e);
     let f = (info >> 12) & 0x1FFF;
     let renorm = (x >> (31 - bits)).simd_ge(f);
     let mask = (renorm.to_bitmask() & 0xF) as usize;
     let at = words.at;
+    debug_assert!(at >= 16, "a word buffer starts with 16 spare bytes");
     let low: u8x16<S> = x.bitcast();
     low.swizzle_dyn(u8x16::from_slice(simd, &EMIT4[mask])).store_slice(&mut words.buf[at - 16..at]);
     words.at = at - usize::from(EMITTED[mask]);
@@ -185,90 +225,32 @@ fn step4<S: Simd>(
     x + (info & 0xFFF) + q * (u32x4::splat(simd, 1 << bits) - f)
 }
 
+/// Four symbols' reciprocals and their start, frequency and shift.
+#[inline(always)]
+fn split<S: Simd>(simd: S, e: &[Enc; 4]) -> (u32x4<S>, u32x4<S>) {
+    let (lo, hi) = e.split_at(2);
+    let a: u32x4<S> = u64x2::from_slice(simd, lo).bitcast();
+    let b: u32x4<S> = u64x2::from_slice(simd, hi).bitcast();
+    (a.unzip_low(b), a.unzip_high(b))
+}
+
+/// The kernels' quotients `⌊x / f⌋` of four states by four symbols'
+/// frequencies, for tests.
+#[cfg(test)]
+#[inline(always)]
+pub(super) fn quotients<S: Simd>(simd: S, x: [u32; 4], e: &[Enc; 4]) -> [u32; 4] {
+    let (m, info) = split(simd, e);
+    let mut q = [0; 4];
+    quotient(u32x4::from_slice(simd, &x), m, info).store_slice(&mut q);
+    q
+}
+
+/// `⌊x / f⌋` lane by lane, with [`enc`]'s reciprocal; `x < 2^31`.
 #[inline(always)]
 #[allow(clippy::arithmetic_side_effects, reason = "vector lanes wrap")]
 fn quotient<S: Simd>(x: u32x4<S>, m: u32x4<S>, info: u32x4<S>) -> u32x4<S> {
     let (lo, hi) = (x + x).widening_mul(m);
     lo.bitcast::<u32x4<S>>().unzip_high(hi.bitcast::<u32x4<S>>()) >> (info >> 25)
-}
-
-/// Order-0 counts in eight sub-tables, so that a run of one symbol is
-/// eight chains of increments rather than one.
-#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 8")]
-#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
-pub(super) fn histogram(data: &[u8]) -> [u32; 256] {
-    let mut c = [[0u32; 256]; 8];
-    let (octets, rest) = data.as_chunks::<8>();
-    for o in octets {
-        for (k, &b) in o.iter().enumerate() {
-            c[k][usize::from(b)] += 1;
-        }
-    }
-    for &b in rest {
-        c[0][usize::from(b)] += 1;
-    }
-    let mut sum = [0u32; 256];
-    for t in &c {
-        for (s, &n) in sum.iter_mut().zip(t) {
-            *s += n;
-        }
-    }
-    sum
-}
-
-/// What RLE saves on each symbol, as the parent's `rle` counts it (one for
-/// each repeat, minus one for each run): a symbol's count less twice its
-/// runs, each from sub-tables, so that a long run is not a chain of
-/// increments of one counter.
-#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 4")]
-#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
-pub(super) fn rle_saved(data: &[u8]) -> [i64; 256] {
-    let total = histogram(data);
-    let mut runs = [[0u32; 256]; 4];
-    if let Some((&first, rest)) = data.split_first() {
-        runs[0][usize::from(first)] += 1;
-        let mut prev = first;
-        let (quads, tail) = rest.as_chunks::<4>();
-        for q in quads {
-            for (k, &b) in q.iter().enumerate() {
-                runs[k][usize::from(b)] += u32::from(b != prev);
-                prev = b;
-            }
-        }
-        for &b in tail {
-            runs[0][usize::from(b)] += u32::from(b != prev);
-            prev = b;
-        }
-    }
-    let mut saved = [0i64; 256];
-    for (sym, s) in saved.iter_mut().enumerate() {
-        let r: u32 = runs.iter().map(|t| t[sym]).sum();
-        *s = i64::from(total[sym]) - 2 * i64::from(r);
-    }
-    saved
-}
-
-/// The parent's `pack` of `data`, `per_byte` (2, 4 or 8) symbol indices a
-/// byte, the first in the lowest bits.
-#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table")]
-#[allow(clippy::arithmetic_side_effects, reason = "per_byte ∈ {2, 4, 8}")]
-pub(super) fn pack(data: &[u8], code: &[u8; 256], per_byte: usize) -> Vec<u8> {
-    fn packed<const K: usize>(data: &[u8], code: &[u8; 256]) -> Vec<u8> {
-        let bits = 8 / K;
-        let (whole, tail) = data.as_chunks::<K>();
-        let byte =
-            |c: &[u8]| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]);
-        let mut out: Vec<u8> = whole.iter().map(|c| byte(c)).collect();
-        if !tail.is_empty() {
-            out.push(byte(tail));
-        }
-        out
-    }
-    match per_byte {
-        2 => packed::<2>(data, code),
-        4 => packed::<4>(data, code),
-        _ => packed::<8>(data, code),
-    }
 }
 
 /// The parent's `encode_order_0` coding loop: `n` states, the table already
@@ -281,14 +263,16 @@ pub(super) fn code_order_0(
     table: &[Symbol; 256],
     n: usize,
     out: &mut Vec<u8>,
-) {
+) -> Option<()> {
+    debug_assert!(n == 4 || n == 32);
     let enc_table = table.map(enc);
     let whole = data.len() - data.len() % n;
     let body = &data[..whole];
     let mut states = [LOWER_BOUND; 32];
-    WORDS.with_borrow_mut(|scratch| {
-        let mut words = Words::new(scratch, data.len());
+    with_scratch(&WORDS, |scratch| {
+        let mut words = Words::new(scratch, data.len())?;
         // The last, partial round of `n`: byte `i` with state `i % n`.
+        debug_assert!(whole <= data.len() && data.len() - whole < n);
         for (l, &b) in data[whole..].iter().enumerate().rev() {
             states[l] = put(states[l], enc_table[usize::from(b)], ORDER_0_BITS, &mut words);
         }
@@ -299,7 +283,8 @@ pub(super) fn code_order_0(
             dispatch!(level, simd => code_o0(simd, body.as_chunks::<4>().0, &enc_table, s, &mut words));
         }
         finish(out, &states[..n], words.decode_order());
-    });
+        Some(())
+    })
 }
 
 /// Order 0 over whole rounds of `N` bytes, last round first, each state's
@@ -357,13 +342,13 @@ fn store_states<S: Simd, const M: usize>(xs: &[u32x4<S>; M], states: &mut [[u32;
 #[allow(clippy::arithmetic_side_effects, reason = "j·chunk ≤ len; n ≥ 1")]
 pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<u8>> {
     let chunk = data.len() / n;
-    ORDER_1.with_borrow_mut(|o1| {
+    with_scratch(&ORDER_1, |o1| {
         let (shift, table) = order_1_tables(o1, data, n)?;
         let enc_table: &[Enc; 1 << 16] = o1.enc.as_slice().try_into().ok()?;
         let mut out = order_1_header(shift, &table, Coder::Simd(level))?;
         let mut states = [LOWER_BOUND; 32];
-        WORDS.with_borrow_mut(|scratch| {
-            let mut words = Words::new(scratch, data.len());
+        with_scratch(&WORDS, |scratch| {
+            let mut words = Words::new(scratch, data.len())?;
             // The bytes after the last whole stretch, with the last state.
             for p in (chunk * n..data.len()).rev() {
                 let ctx = context(data, chunk, n, p);
@@ -380,7 +365,8 @@ pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<
                 }
             }
             finish(&mut out, &states[..n], words.decode_order());
-        });
+            Some(())
+        })?;
         Some(out)
     })
 }
@@ -507,6 +493,7 @@ fn code_o1<S: Simd, const M: usize>(
         let mut window = [[[0u8; BLOCK + 1]; 4]; M];
         for (j, w) in window.as_flattened_mut().iter_mut().enumerate() {
             let from = j * chunk + i - 1;
+            debug_assert!(from + BLOCK < data.len(), "lane {j}'s block ends in its stretch");
             w.copy_from_slice(&data[from..=from + BLOCK]);
         }
         for k in (0..BLOCK).rev() {
@@ -546,4 +533,22 @@ fn finish(out: &mut Vec<u8>, states: &[u32], words: &[u8]) {
         out.extend_from_slice(&s.to_le_bytes());
     }
     out.extend_from_slice(words);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    /// A scratch already in use hands out a fresh one rather than
+    /// panicking, and a word buffer past the cap is not kept.
+    #[test]
+    fn scratch_in_use_or_too_large_is_not_kept() {
+        let nested = with_scratch(&WORDS, |outer| {
+            outer.resize(MAX_KEPT_WORDS + 1, 0);
+            with_scratch(&WORDS, |inner: &mut Vec<u8>| Some(inner.capacity()))
+        });
+        assert_eq!(nested, Some(0), "the nested call gets a fresh buffer");
+        assert_eq!(WORDS.with_borrow(Vec::capacity), 0, "an oversized buffer is dropped");
+    }
 }
