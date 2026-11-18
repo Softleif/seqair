@@ -453,7 +453,7 @@ fn check(s: &Setup, written: &Record, read: &FullRecord) {
         let sample = samples.sample(idx);
         if let Some(key) = &k.gt {
             // A missing allele is written as 0, without the phase bit of the
-            // separator before it (`r[vcf_record.gt_first_phase+2]`).
+            // separator before it (`r[vcf_record.gt_first_phase+3]`).
             let expected =
                 f.gt.as_ref()
                     .map(|g| &g[i])

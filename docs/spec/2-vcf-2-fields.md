@@ -16,7 +16,7 @@ The access patterns this covers: riker reads only positions (`Locus`); aardvark 
 
 ## The trait
 
-> r[vcf_fields.trait]
+> r[vcf_fields.trait+2]
 > `Fields` MUST be a public trait implemented by every component, every tuple of components, `FullRecord`, and any user type:
 >
 > ```rust
@@ -24,10 +24,15 @@ The access patterns this covers: riker reads only positions (`Locus`); aardvark 
 >     type Plan: Send + Sync;
 >     fn plan(header: &VcfHeader, opts: &ReadOptions) -> Result<Self::Plan, PlanError>;
 >     fn needs(plan: &Self::Plan) -> Sections;
->     fn empty(plan: &Self::Plan) -> Self;
->     fn fill(&mut self, plan: &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError>;
+>     fn new(plan: &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError>;
+>     fn fill(&mut self, plan: &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
+>         *self = Self::new(plan, raw)?;
+>         Ok(())
+>     }
 > }
 > ```
+>
+> A value of a `Fields` type always holds a record: there is no empty or placeholder state (no contig "0 with an empty name" before the first read). `new` builds one from a record; `fill` overwrites one in place, and components override it to reuse their buffers. A user type implements `plan`, `needs` and `new`, and overrides `fill` only for speed.
 >
 > `RawRecord` is the reader's undecoded view of one record (the BCF sections or the text line with its column offsets); its decoding helpers are the only way a `fill` reads bytes. `Sections` says which parts of a record `fill` will read: the site columns, INFO, and which samples (none, one by index, all).
 

@@ -164,7 +164,7 @@ number_views!(i32, f32);
 
 /// One allele of a genotype: its index (`None` for `.`) and whether it is
 /// phased with the allele before it — for the first allele, the leading
-/// phase indicator (`r[vcf_record.gt_first_phase+2]`), always unphased in a
+/// phase indicator (`r[vcf_record.gt_first_phase+3]`), always unphased in a
 /// file older than VCF 4.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GtAllele {
@@ -353,7 +353,7 @@ mod tests {
     }
 
     // r[verify vcf_values.gt]
-    // r[verify vcf_record.gt_first_phase+2]
+    // r[verify vcf_record.gt_first_phase+3]
     /// The examples of `[VCF45]` §6.3.3's GT table, and two VCF 4.4 prefixed
     /// ones, read from text and from BCF; before 4.4 the first phase is unphased.
     #[test]
@@ -461,7 +461,7 @@ mod tests {
     }
 
     // r[verify vcf_values.gt]
-    // r[verify vcf_record.gt_first_phase+2]
+    // r[verify vcf_record.gt_first_phase+3]
     /// Text genotypes read as drawn, and BCF genotypes encoded per `[VCF45]`
     /// §6.3.3 (`(allele + 1) << 1 | phased`, int32, end-of-vector padding to
     /// the longest sample) read the same, in either version mode.

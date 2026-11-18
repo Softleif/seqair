@@ -182,7 +182,7 @@ pub(crate) struct TextGt<'a> {
 }
 
 impl<'a> TextGt<'a> {
-    // r[impl vcf_record.gt_first_phase+2]
+    // r[impl vcf_record.gt_first_phase+3]
     /// `gt` checked and its first allele's phase settled: with
     /// `first_phase_is_read` (VCF 4.4 and later) a leading `|` or `/` gives
     /// it; without one, htslib's rule infers it — a haploid allele is phased

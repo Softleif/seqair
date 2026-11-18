@@ -1370,7 +1370,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                     for (i, allele_opt) in gt.alleles.iter().enumerate() {
                         let encoded: i32 = match allele_opt {
                             Some(idx) => {
-                                // r[impl vcf_record.gt_first_phase+2]
+                                // r[impl vcf_record.gt_first_phase+3]
                                 // The first allele carries a phase bit too, and
                                 // from VCF 4.4 it is read rather than ignored:
                                 // the spec makes the leading indicator "`/` if

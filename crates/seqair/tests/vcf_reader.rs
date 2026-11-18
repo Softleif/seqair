@@ -235,7 +235,7 @@ fn panel_bcf_reads_as_bcftools_prints_it() {
 // ── Fixtures through every way of reading ──────────────────────────────
 
 // r[verify vcf_reader.reader]
-// r[verify vcf_reader.read_into]
+// r[verify vcf_reader.read_into+2]
 // r[verify vcf_reader.next_record]
 // r[verify vcf_reader.records]
 // r[verify vcf_reader.passthrough_header]
@@ -509,7 +509,7 @@ impl Fields for Truth {
     }
 }
 
-// r[verify vcf_fields.trait]
+// r[verify vcf_fields.trait+2]
 // r[verify vcf_fields.user_types]
 // r[verify vcf_fields.sections]
 #[test]

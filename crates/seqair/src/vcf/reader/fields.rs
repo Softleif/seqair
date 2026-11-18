@@ -8,7 +8,7 @@ use crate::vcf::header::{SampleIdx, VcfHeader};
 use seqair_types::SmolStr;
 use std::cell::Cell;
 
-// r[impl vcf_fields.trait]
+// r[impl vcf_fields.trait+2]
 /// A type a reader reads records into. It names what is decoded: a field
 /// the type does not hold is never read.
 ///

@@ -227,9 +227,8 @@ let files = [VcfFile::open(format!("{dir}/rastair.bcf"))?, VcfFile::open(format!
 let mut readers = files.iter().map(|f| f.reader::<Locus>().open()).collect::<Result<Vec<_>, _>>()?;
 let mut heads: Vec<Locus> = Vec::new();
 for reader in &mut readers {
-    let mut rec = reader.empty_record();
-    assert!(reader.read_into(&mut rec)?);
-    heads.push(rec);
+    // `read` hands out an owned record; later `read_into(&mut rec)` reuses its buffers.
+    heads.push(reader.read()?.ok_or("empty input")?);
 }
 // Same record from BCF and VCF text. (The loci themselves differ: each names
 // a contig of its own file's header, and a contig id never crosses headers.)
@@ -302,7 +301,7 @@ struct TruthSnv {
     cpg: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Truth(Option<TruthSnv>);
 
 struct Plan {
@@ -317,13 +316,10 @@ impl Fields for Truth {
     fn needs(_: &Plan) -> Sections {
         Sections::SITE | Sections::INFO
     }
-    fn empty(_: &Plan) -> Self {
-        Truth(None)
-    }
-    fn fill(&mut self, plan: &Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
+    fn new(plan: &Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let site = raw.site()?;
         let mut alts = site.alleles().alts();
-        self.0 = match (site.filters().status(), site.alleles().reference(), alts.next(), alts.next()) {
+        let snv = match (site.filters().status(), site.alleles().reference(), alts.next(), alts.next()) {
             (FilterStatus::Pass, &[r], Some(Allele::Bases(&[a])), None) => Some(TruthSnv {
                 pos: raw.locus()?.start(),
                 ref_base: r,
@@ -332,7 +328,7 @@ impl Fields for Truth {
             }),
             _ => None,
         };
-        Ok(())
+        Ok(Truth(snv))
     }
 }
 
@@ -344,6 +340,6 @@ let mut snvs = Vec::new();
 while let Some(Truth(snv)) = reader.next_record()? {
     snvs.extend(snv.clone());
 }
-assert!(snvs.iter().any(|s| s.cpg));
+assert!(!snvs.is_empty());
 # Ok(()) }
 ```

@@ -193,7 +193,7 @@ fn bcftools_reads_a_partially_phased_gt() {
 /// its one allele carries the phase bit: VCF 4.5's BCF table encodes haploid
 /// `1` as `0x05`. Unset, htslib renders the leading indicator it cannot infer:
 /// `/1`.
-// r[verify vcf_record.gt_first_phase+2]
+// r[verify vcf_record.gt_first_phase+3]
 #[test]
 fn bcftools_reads_a_haploid_gt_without_a_leading_indicator() {
     if !has_bcftools() {

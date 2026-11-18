@@ -204,7 +204,7 @@ impl<'a> TypedValue<'a> {
     // r[impl vcf_values.gt]
     /// One sample's GT vector. `first_phase_is_read` is false for VCF 4.3 and
     /// earlier, whose first allele's phase bit is treated as unphased
-    /// (`r[vcf_record.gt_first_phase+2]`).
+    /// (`r[vcf_record.gt_first_phase+3]`).
     pub(crate) fn gt(self, first_phase_is_read: bool) -> Result<BcfGt<'a>, BcfValueError> {
         let alleles = self.ints()?;
         for value in alleles.clone().flatten() {

@@ -25,8 +25,8 @@ r[vcf_reader.reader]
 r[vcf_reader.reader.threads]
 The builder MUST offer `threads(n)` and `threads_in(n, pool)` for sequential reading, passed to the existing `BgzfStream` (`r[bgzf.stream.threads]`, `r[bgzf.stream.shared_pool]`), so a caller can bound total decompression threads across many readers. Region queries decompress on the calling thread.
 
-r[vcf_reader.read_into]
-`Reader::read_into(&mut self, rec: &mut F) -> Result<bool, VcfReadError>` MUST be the primitive: it fills `rec` with the next record and returns `false` at end of input. It MUST reuse `rec`'s allocations, so steady-state reading allocates nothing per record. Every other way of reading is built on it.
+r[vcf_reader.read_into+2]
+`Reader::read_into(&mut self, rec: &mut F) -> Result<bool, VcfReadError>` MUST be the primitive: it overwrites `rec` with the next record (`Fields::fill`) and returns `false` at end of input, leaving `rec` as it was. It MUST reuse `rec`'s allocations, so steady-state reading allocates nothing per record. The first record a caller owns comes from `Reader::read(&mut self) -> Result<Option<F>, VcfReadError>` (`Fields::new`); there is no empty record to read into, since a value of `F` always holds a record.
 
 r[vcf_reader.next_record]
 `Reader::next_record(&mut self) -> Result<Option<&F>, VcfReadError>` MUST read into a record the reader owns and lend it out until the next call. It is the zero-setup streaming form; the borrow stops a caller from keeping the record, and `clone()` makes an owned copy.

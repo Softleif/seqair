@@ -6,7 +6,7 @@
 
 > _[VCF43] §1.3.2 "Genotype fields" — GT allele indexing (0=REF, 1+=ALT), `/` unphased, `|` phased, `.` missing_
 
-r[vcf_record.gt_first_phase+2]
+r[vcf_record.gt_first_phase+3]
 The first allele of a `GT` carries a phase bit like any other, and from VCF 4.4
 it is read rather than ignored (4.3 and earlier "should treat the phasing of the
 first allele as missing"). The encoder MUST set it per the spec's rule for the
@@ -14,16 +14,18 @@ leading indicator: `|` when every separator in the genotype is phased, `/`
 otherwise. A haploid call has no separator, so its allele is phased: VCF 4.5's
 BCF table encodes haploid `0` as `0x03`, and htslib renders an unset bit as `/0`.
 Hardcoding it unphased makes htslib render a fully phased `0|1` as `/0|1` once
-the header declares 4.4 or later. A missing allele (`.`) is encoded as 0 and
-carries no bit. A reader MUST apply the same rule to a text GT without a leading
-indicator, so VCF and BCF read the same phase.
+the header declares 4.4 or later. A missing allele (`.`) is encoded as its
+phase bit alone (`0x00` or `0x01`), as htslib encodes it, so `.|.` stays phased;
+a missing haploid call is unphased (`0x00`), as htslib leaves it. A reader MUST
+apply the same rules to a text GT without a leading indicator, so VCF and BCF
+read the same phase.
 
 A reader MAY omit a leading indicator it can infer, so a partially phased
 genotype round-trips as `0|1/1` rather than `/0|1/1`; both spell the same
 genotype and only the fully phased case distinguishes the bit.
 
 r[vcf_record.genotype_encoding+2]
-Genotypes MUST store per-allele indices (0=REF, 1+=ALT, None=missing) and per-separator phasing (true=phased `|`, false=unphased `/`). The first allele's phase bit is not stored; it is derived from the separators (`r[vcf_record.gt_first_phase+2]`).
+Genotypes MUST store per-allele indices (0=REF, 1+=ALT, None=missing) and per-separator phasing (true=phased `|`, false=unphased `/`). The first allele's phase bit is not stored; it is derived from the separators (`r[vcf_record.gt_first_phase+3]`).
 
 ## Type-safe alleles
 

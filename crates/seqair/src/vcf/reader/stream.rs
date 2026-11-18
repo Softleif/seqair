@@ -1,5 +1,5 @@
 //! [`Reader`]: records read front to back into a [`Fields`] type
-//! (`r[vcf_reader.reader]`, `r[vcf_reader.read_into]`).
+//! (`r[vcf_reader.reader]`, `r[vcf_reader.read_into+2]`).
 
 use super::error::{RecordAt, RecordError, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, SampleSelection, Sections};
@@ -153,7 +153,7 @@ struct Core<P> {
 }
 
 impl<P> Core<P> {
-    // r[impl vcf_reader.read_into]
+    // r[impl vcf_reader.read_into+2]
     // r[impl vcf_fields.sections]
     /// Fill `rec` with the next record; `false` at the end.
     fn read_into<F: Fields<Plan = P>>(&mut self, rec: &mut F) -> Result<bool, VcfReadError> {
@@ -278,7 +278,7 @@ impl<F: Fields> Reader<F> {
         F::empty(&self.core.plan)
     }
 
-    // r[impl vcf_reader.read_into]
+    // r[impl vcf_reader.read_into+2]
     /// Fill `rec` with the next record, reusing its buffers; `false` at the
     /// end of input.
     ///
