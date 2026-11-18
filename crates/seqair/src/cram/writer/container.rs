@@ -71,9 +71,12 @@ pub(super) enum Series {
     Bb,
     /// `BB`'s lengths, in a block of their own.
     BbLen,
+    /// Read after `CF`, but last here: only a multi-reference slice has it
+    /// (`r[cram_writer.multi_ref.records]`).
+    Ri,
 }
 
-const SERIES: [Series; 27] = [
+const SERIES: [Series; 28] = [
     Series::Bf,
     Series::Cf,
     Series::Rl,
@@ -101,6 +104,7 @@ const SERIES: [Series; 27] = [
     Series::Hc,
     Series::Bb,
     Series::BbLen,
+    Series::Ri,
 ];
 
 impl Series {
@@ -165,6 +169,7 @@ impl Series {
             Self::Pd => b"PD",
             Self::Hc => b"HC",
             Self::Bb => b"BB",
+            Self::Ri => b"RI",
             Self::BbLen => return None,
         };
         out.extend_from_slice(key);
@@ -248,6 +253,9 @@ pub(super) enum SliceKind {
         tid: Tid,
         reference: bool,
     },
+    /// Records of several references the FASTA has
+    /// (`r[cram_writer.multi_ref]`).
+    Multi,
     Unplaced,
 }
 
@@ -275,6 +283,10 @@ pub(super) struct SliceBuilder {
     held: Vec<Held>,
     /// The reference the slice embeds; empty for none.
     embedded: Vec<u8>,
+    /// Each run of records on one reference id: the id, the run's first
+    /// 1-based position and furthest end, for the index of a
+    /// multi-reference slice (`r[cram_writer.crai+2]`).
+    runs: Vec<(Option<Tid>, i64, i64)>,
     n_records: u32,
     n_bases: u64,
     /// 1-based position of the first record; 0 for unplaced.
@@ -301,6 +313,11 @@ impl SliceBuilder {
 
     pub(super) fn n_records(&self) -> u32 {
         self.n_records
+    }
+
+    /// The runs of records on one reference id a multi-reference slice holds.
+    pub(super) fn reference_runs(&self) -> usize {
+        self.runs.len()
     }
 
     /// Whether the slice must be written before a record of `kind` with
@@ -341,8 +358,9 @@ impl SliceBuilder {
     pub(super) fn begin_record(&mut self, kind: SliceKind, pos1: i64, read_len: i32) {
         if self.kind.is_none() {
             self.kind = Some(kind);
-            // An unplaced slice starts at 0 whatever its records' `POS`.
-            self.start = if kind == SliceKind::Unplaced { 0 } else { pos1 };
+            // An unplaced or multi-reference slice starts at 0 whatever its
+            // records' `POS`.
+            self.start = if matches!(kind, SliceKind::Mapped { .. }) { pos1 } else { 0 };
             self.prev_ap = self.start;
         }
         let qs = self.len(Series::Qs);
@@ -357,11 +375,27 @@ impl SliceBuilder {
         self.int(Series::Ap, i32::try_from(ap).unwrap_or(i32::MAX));
     }
 
-    // r[impl cram_writer.slice_extent]
+    // r[impl cram_writer.slice_extent+2]
     /// Extend the slice to cover a record ending (0-based, exclusive) at
     /// `end`.
     pub(super) fn reach(&mut self, end: i64) {
         self.end = self.end.max(end);
+    }
+
+    // r[impl cram_writer.multi_ref.records]
+    /// A record of reference `tid` at 1-based `pos1` (0 unplaced) ending at
+    /// 1-based `aend` (inclusive, as htslib's decode sets it): its `RI` in a
+    /// multi-reference slice, and its run for the index.
+    pub(super) fn reference_id(&mut self, tid: Option<Tid>, pos1: i64, aend: i64) {
+        if self.kind != Some(SliceKind::Multi) {
+            return;
+        }
+        let ri = tid.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap_or(i32::MAX));
+        self.int(Series::Ri, ri);
+        match self.runs.last_mut() {
+            Some((run, _, end)) if *run == tid => *end = (*end).max(aend),
+            _ => self.runs.push((tid, pos1, aend)),
+        }
     }
 
     /// The byte offset the next value of `series` goes to.
@@ -457,6 +491,7 @@ impl SliceBuilder {
             line_ids,
             held,
             embedded,
+            runs,
             n_records,
             n_bases,
             start,
@@ -472,6 +507,7 @@ impl SliceBuilder {
         line_ids.clear();
         held.clear();
         embedded.clear();
+        runs.clear();
         *n_records = 0;
         *n_bases = 0;
         *start = 0;
@@ -520,8 +556,8 @@ impl SliceBuilder {
         Frame { slice_index, record_counter, length, md5 }
     }
 
-    // r[impl cram_writer.container_header]
-    // r[impl cram_writer.slice_header]
+    // r[impl cram_writer.container_header+2]
+    // r[impl cram_writer.slice_header+2]
     // r[impl cram_writer.blocks+2]
     /// The container of this slice.
     pub(super) fn assemble(
@@ -538,6 +574,7 @@ impl SliceBuilder {
         let (start, span) = self.extent(length);
         let ref_id = match kind {
             SliceKind::Mapped { tid, .. } => i32::try_from(tid.as_u32()).unwrap_or(i32::MAX),
+            SliceKind::Multi => -2,
             SliceKind::Unplaced => -1,
         };
         let start_i32 = i32::try_from(start).map_err(|_| CramWriteError::ValueTooLarge {
@@ -552,7 +589,7 @@ impl SliceBuilder {
 
         let (sm, bs) =
             substitution_matrix(self.series.get(Series::Bs as usize).map_or(&[], Vec::as_slice));
-        // r[impl cram_writer.mates]
+        // r[impl cram_writer.mates+2]
         let mates = mates::series(
             &self.mates,
             self.series.get(Series::Rn as usize).map_or(&[], Vec::as_slice),
@@ -571,6 +608,7 @@ impl SliceBuilder {
             };
             (series, data.as_slice())
         });
+        let multi = kind == SliceKind::Multi;
         // r[impl cram_writer.data_series+2]
         let constants = series_data.map(|(series, data)| series.constant(data));
         // The external blocks, series first, then tags: every series that is
@@ -578,7 +616,9 @@ impl SliceBuilder {
         let blocks: Vec<(i32, &[u8])> = series_data
             .iter()
             .zip(&constants)
-            .filter(|((_, data), constant)| constant.is_none() && !data.is_empty())
+            .filter(|((series, data), constant)| {
+                constant.is_none() && !data.is_empty() && (*series != Series::Ri || multi)
+            })
             .map(|(&(series, data), _)| (series.content_id(), data))
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
             .chain(
@@ -621,7 +661,7 @@ impl SliceBuilder {
             1,
             0,
             &self.compression_header(
-                matches!(kind, SliceKind::Mapped { reference: true, .. }),
+                matches!(kind, SliceKind::Mapped { reference: true, .. } | SliceKind::Multi),
                 sm,
                 &constants,
             ),
@@ -666,10 +706,19 @@ impl SliceBuilder {
         bytes.extend_from_slice(&compression_header);
         bytes.extend_from_slice(&slice);
 
+        // r[impl cram_writer.crai+2]
+        let spans = match kind {
+            SliceKind::Multi => self
+                .runs
+                .iter()
+                .map(|&(tid, from, end)| (tid, from, end.saturating_sub(from).saturating_add(1)))
+                .collect(),
+            SliceKind::Mapped { tid, .. } => vec![(Some(tid), start, span)],
+            SliceKind::Unplaced => vec![(None, start, span)],
+        };
         Ok(Assembled {
             bytes,
-            alignment_start: start,
-            alignment_span: span,
+            spans,
             slice_offset: compression_header.len() as u64,
             slice_size: slice.len() as u64,
         })
@@ -698,7 +747,7 @@ impl SliceBuilder {
         sm: [u8; 5],
         constants: &[Option<i32>; SERIES.len()],
     ) -> Vec<u8> {
-        // r[impl cram_writer.preservation_map]
+        // r[impl cram_writer.preservation_map+2]
         let mut map = Vec::new();
         write_itf8(&mut map, 5);
         map.extend_from_slice(b"RN\x01AP\x01RR");
@@ -720,8 +769,12 @@ impl SliceBuilder {
         let mut ds = Vec::new();
         // Every series, used or not: htslib's decoder wants an encoding for
         // one it reads nothing of (`QS` of a record without bases).
-        write_small_len(&mut ds, SERIES.len().saturating_sub(1));
-        for (series, &constant) in SERIES.into_iter().zip(constants) {
+        let multi = self.kind == Some(SliceKind::Multi);
+        // `BbLen` is `BB`'s, and `RI` only in a multi-reference slice.
+        write_small_len(&mut ds, SERIES.len().saturating_sub(if multi { 1 } else { 2 }));
+        for (series, &constant) in
+            SERIES.into_iter().zip(constants).filter(|&(s, _)| s != Series::Ri || multi)
+        {
             series.encoding(&mut ds, constant);
         }
 
@@ -824,8 +877,8 @@ pub(super) struct Frame {
 /// A written container and where its slice is in it.
 pub(super) struct Assembled {
     pub bytes: Vec<u8>,
-    pub alignment_start: i64,
-    pub alignment_span: i64,
+    /// The index entries' references, alignment starts and spans.
+    pub spans: Vec<(Option<Tid>, i64, i64)>,
     pub slice_offset: u64,
     pub slice_size: u64,
 }
