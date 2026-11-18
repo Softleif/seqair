@@ -210,10 +210,14 @@ impl<W: Write> CramWriter<W> {
     ) -> Result<Self, CramWriteError> {
         let header = CramHeader::new(header, &mut fasta)?;
         let mut out = Counting { inner, written: 0 };
-        let mut codecs = container::Codecs::new(options.level);
+        let mut codecs = container::Codecs::new(options.level, options.version);
         // r[impl cram_writer.file_definition]
         let mut def = Vec::with_capacity(26);
-        def.extend_from_slice(b"CRAM\x03\x00");
+        def.extend_from_slice(b"CRAM\x03");
+        def.push(match options.version {
+            CramVersion::V3_0 => 0,
+            CramVersion::V3_1 => 1,
+        });
         def.extend_from_slice(&file_id);
         out.write_all(&def)?;
         out.write_all(&container::header_container(header.text(), &mut codecs)?)?;
@@ -228,7 +232,7 @@ impl<W: Write> CramWriter<W> {
             index: options.write_index.then(Vec::new),
             codecs,
             pool: (options.threads > 0)
-                .then(|| Pool::new(options.threads, options.level))
+                .then(|| Pool::new(options.threads, options.level, options.version))
                 .transpose()?,
             spare: Vec::new(),
             records_per_slice: options.records_per_slice,
@@ -475,6 +479,20 @@ struct Options {
     level: CompressionLevel,
     threads: usize,
     records_per_slice: u32,
+    version: CramVersion,
+}
+
+// r[impl cram_writer.version]
+/// The CRAM version a writer writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CramVersion {
+    /// gzip and rANS 4×8 only, for readers without CRAM 3.1 (htsjdk before
+    /// 4.x, older tools).
+    V3_0,
+    /// htslib's default: rANS Nx16 and the name tokeniser as well.
+    #[default]
+    V3_1,
 }
 
 impl<'a> CramWriterBuilder<'a, ToPath<'a>> {
@@ -526,6 +544,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
                 level: CompressionLevel::default(),
                 threads: 0,
                 records_per_slice: container::MAX_RECORDS,
+                version: CramVersion::default(),
             },
         }
     }
@@ -554,6 +573,14 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     #[must_use]
     pub fn compression_threads(mut self, threads: usize) -> Self {
         self.options.threads = threads;
+        self
+    }
+
+    /// The CRAM version to write. Defaults to [`CramVersion::V3_1`], as
+    /// htslib does.
+    #[must_use]
+    pub fn version(mut self, version: CramVersion) -> Self {
+        self.options.version = version;
         self
     }
 

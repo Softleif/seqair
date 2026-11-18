@@ -12,6 +12,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::mate::MateFields;
 use seqair::bam::owned_record::OwnedBamRecord;
+use seqair::cram::writer::CramVersion;
 use seqair_fuzz::cram_roundtrip;
 use seqair_types::{BamFlags, BaseQuality, IupacBase, MappingQuality, Pos0};
 use std::num::NonZeroI32;
@@ -219,5 +220,6 @@ fuzz_target!(|input: Input| {
     let contigs = [("c0".to_string(), refs[0].clone()), ("c1".to_string(), refs[1].clone())];
     let fasta = cram_roundtrip::write_fasta(dir.path(), &contigs);
     let rps = u32::from(input.records_per_slice % 8).max(1) * if input.records_per_slice > 128 { 10_000 } else { 1 };
-    cram_roundtrip::check(&header, &fasta, &records, usize::from(input.threads % 3), rps);
+    let version = if input.threads & 0x80 == 0 { CramVersion::V3_1 } else { CramVersion::V3_0 };
+    cram_roundtrip::check(&header, &fasta, &records, usize::from(input.threads % 3), rps, version);
 });

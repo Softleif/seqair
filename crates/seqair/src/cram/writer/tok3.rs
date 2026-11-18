@@ -10,11 +10,6 @@
 
 // r[impl cram_writer.tok3]
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the RN block takes `encode` once the writer writes CRAM 3.1")
-)]
-
 use rustc_hash::FxHashMap;
 
 // Token types, as the decoder numbers them.
@@ -50,9 +45,6 @@ const COPY: u8 = 0x40;
 /// adaptive arithmetic coder instead, as one block uses one coder.
 const USE_ARITH: u8 = 0;
 
-/// rANS Nx16 flags: CAT, the bytes stored as they are.
-const NX16_CAT: u8 = 0x20;
-
 /// The names of an `RN` block, each followed by a NUL, as a tok3 block; or
 /// `None` for input the format cannot hold: empty (htscodecs' decoder
 /// refuses a block of no names), without a NUL after its last name, or
@@ -74,17 +66,26 @@ pub(super) fn encode(names: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// SEAM: the entropy coder of every token stream, returning an rANS Nx16
-/// stream (flags byte first). Until the writer has an rANS Nx16 encoder it
-/// stores the bytes (`CAT`); point this at the encoder then, choosing the
-/// order/PACK/RLE/STRIPE flags per `token_type` as htscodecs' `compress()`
-/// does (it tries several per type and keeps the smallest).
-fn compress_stream(_token_type: u8, data: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len().saturating_add(6));
-    out.push(NX16_CAT);
-    put_uint7(&mut out, u32::try_from(data.len()).ok()?);
-    out.extend_from_slice(data);
-    Some(out)
+/// A token stream as an rANS Nx16 stream: the smallest of the flag bytes
+/// htscodecs' `compress()` tries for its token type at the level htslib
+/// asks for (3; `R[1]` in `tokenise_name3.c`). A STRIPE combination needs
+/// a length divisible by four.
+fn compress_stream(token_type: u8, data: &[u8]) -> Option<Vec<u8>> {
+    let methods: &[u8] = match token_type {
+        TYPE => &[192, 0],
+        ALPHA => &[129, 1],
+        DIGITS0 => &[136, 0],
+        DUP | DIGITS => &[200],
+        DIFF => &[136],
+        DELTA0 => &[128],
+        _ => &[0],
+    };
+    methods
+        .iter()
+        .filter(|&&m| m & 8 == 0 || data.len().is_multiple_of(4))
+        .filter_map(|&m| super::rans_nx16::encode(data, super::rans_nx16::Nx16Flags::from_byte(m)))
+        .min_by_key(Vec::len)
+        .or_else(|| super::rans_nx16::encode_cat(data))
 }
 
 /// `v` as a uint7: 7 bits a byte, most significant first, the high bit

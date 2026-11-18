@@ -1,10 +1,6 @@
 //! rANS Nx16 encoder (CRAM 3.1, method 5): the inverse of
 //! [`crate::cram::rans_nx16`], laid out as htscodecs'
 //! `rans_compress_to_4x16` (`rANS_static4x16pr.c`) writes it.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the CRAM 3.1 integration wires it into `Codecs::block`")
-)]
 
 use super::rans::Order;
 
@@ -47,6 +43,18 @@ pub(super) struct Nx16Flags {
 impl Nx16Flags {
     const fn new(order: Order, stripe: bool, rle: bool, pack: bool) -> Self {
         Self { order, n32: false, stripe, rle, pack }
+    }
+
+    /// The combination a flag byte names, as htscodecs' method numbers do;
+    /// its CAT and NOSZ bits are the encoder's to set.
+    pub(super) const fn from_byte(byte: u8) -> Self {
+        Self {
+            order: if byte & FLAG_ORDER == 0 { Order::Zero } else { Order::One },
+            n32: byte & FLAG_N32 != 0,
+            stripe: byte & FLAG_STRIPE != 0,
+            rle: byte & FLAG_RLE != 0,
+            pack: byte & FLAG_PACK != 0,
+        }
     }
 }
 
