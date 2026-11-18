@@ -844,6 +844,19 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
         }
     });
     assert!(write(0, &raw_of(true)) == stored, "write_store_record and write_raw differ");
+    // r[verify cram_writer.store]
+    let one_by_one = |w: &mut Writer| {
+        for &idx in &placed {
+            w.write_store_record(&store, idx).unwrap();
+        }
+    };
+    let whole = |w: &mut Writer| w.write_store(&store).unwrap();
+    assert!(write(3, &whole) == stored, "write_store and write_store_record differ");
+    let level = CompressionLevel::default();
+    assert!(
+        write_at(level, 2, &whole) == write_at(level, 0, &one_by_one),
+        "write_store and write_store_record differ, compressed"
+    );
     let (cram, index) = write_at(CompressionLevel::default(), 0, &raw_of(false));
     let path = dir.join("ours.cram");
     std::fs::write(&path, cram).unwrap();
@@ -1369,5 +1382,149 @@ fn mate_pairs_attach_where_every_decoder_rebuilds_them() {
         assert_eq!(read, records, "{what}");
         assert_eq!(seqair_lines(&ours, &fasta).len(), records.len());
         assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    }
+}
+
+// r[verify cram_writer.store]
+/// `write_store` writes the bytes and index `write_store_record` writes one
+/// record at a time: whatever the threads, slice size, version and profile,
+/// whether the FASTA lacks a contig (embedded references, held records),
+/// and when the records come in two stores, the first leaving a slice open
+/// that the second completes.
+// Each case writes the file twice: slow by hegel's measure, on purpose.
+#[hegel::test(
+    test_cases = pinned::cases(8),
+    suppress_health_check = [hegel::HealthCheck::TooSlow]
+)]
+fn write_store_writes_what_write_store_record_writes(tc: TestCase) {
+    use seqair::bam::RecordStore;
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = if tc.draw(gs::booleans()) {
+        data("test.fasta.gz")
+    } else {
+        let fasta = dir.path().join("no_lambda.fa");
+        let all = data("test.fasta.gz");
+        let text = samtools(&["faidx", all.to_str().unwrap(), "chr19", "2kb_3_Unmodified"]);
+        std::fs::write(&fasta, text).unwrap();
+        samtools(&["faidx", fasta.to_str().unwrap()]);
+        fasta
+    };
+    let (header, records) = stream_bam(&data("test.bam"));
+    // Every 13th record, so a debug build writes quickly; small slices make
+    // trial slices, many slices and multi-reference ones.
+    let step = 13;
+    let records: Vec<_> = records.into_iter().step_by(step).collect();
+    let mut stores = [RecordStore::new(), RecordStore::new()];
+    let split = tc.draw(gs::integers::<usize>().max_value(records.len()));
+    for (i, r) in records.iter().enumerate() {
+        let store = &mut stores[usize::from(i >= split)];
+        store.push_raw(r.as_payload(), &header, &mut ()).unwrap();
+    }
+    let options = (
+        tc.draw(gs::sampled_from(vec![1_u32, 7, 15, 10_000])),
+        tc.draw(gs::sampled_from(vec![1_usize, 3])),
+        tc.draw(gs::sampled_from(vec![
+            CramVersion::V3_0,
+            CramVersion::V3_1(CramProfile::Normal),
+            CramVersion::V3_1(CramProfile::Archive),
+        ])),
+    );
+    let (records_per_slice, threads, version) = options;
+    let write = |by_store: bool, threads: usize| {
+        let reference = IndexedFastaReader::open(&fasta).unwrap();
+        let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
+            .write_index(true)
+            .records_per_slice(records_per_slice)
+            .compression_threads(threads)
+            .version(version)
+            .build()
+            .unwrap();
+        for store in &stores {
+            if by_store {
+                writer.write_store(store).unwrap();
+            } else {
+                for idx in store.indices() {
+                    writer.write_store_record(store, idx).unwrap();
+                }
+            }
+        }
+        let (bytes, index) = writer.finish().unwrap();
+        let mut crai = Vec::new();
+        index.unwrap().write_crai(&mut crai).unwrap();
+        (bytes, crai)
+    };
+    let expected = write(false, 0);
+    assert!(write(true, threads) == expected, "{options:?}, split {split}");
+}
+
+// r[verify cram_writer.store]
+/// A record `write_store` refuses ends the call: the records before it are
+/// written as `write_store_record` writes them, it and the later ones not.
+#[test]
+fn write_store_stops_at_a_refused_record() {
+    use seqair::bam::RecordStore;
+    use seqair::cram::writer::CramWriteError;
+    let (header, records) = stream_bam(&data("test.bam"));
+    let fasta = data("test.fasta.gz");
+    let placed: Vec<_> = records.iter().filter(|r| r.tid().is_some()).collect();
+    let store_of = |records: &mut dyn Iterator<Item = &&RawBamRecord>| {
+        let mut store = RecordStore::new();
+        for r in records {
+            store.push_raw(r.as_payload(), &header, &mut ()).unwrap();
+        }
+        store
+    };
+    let write = |header: &seqair::bam::BamHeader,
+                 threads: usize,
+                 by_store: bool,
+                 stores: &[RecordStore],
+                 errors: &mut Vec<CramWriteError>| {
+        let reference = IndexedFastaReader::open(&fasta).unwrap();
+        let mut writer = CramWriterBuilder::to_writer(Vec::new(), header, reference)
+            .records_per_slice(7)
+            .compression_threads(threads)
+            .write_index(true)
+            .build()
+            .unwrap();
+        for store in stores {
+            let result = if by_store {
+                writer.write_store(store)
+            } else {
+                // One by one up to the first refusal, as `write_store` stops.
+                store.indices().try_for_each(|idx| writer.write_store_record(store, idx))
+            };
+            errors.extend(result.err());
+        }
+        let (bytes, index) = writer.finish().unwrap();
+        let mut crai = Vec::new();
+        index.unwrap().write_crai(&mut crai).unwrap();
+        (bytes, crai)
+    };
+    // Records 1..301 in order, then record 0: unsorted; then a store after.
+    let unsorted = [
+        store_of(&mut placed.iter().skip(1).take(300).chain([&placed[0]])),
+        store_of(&mut placed.iter().skip(400).take(50)),
+    ];
+    // A wrong `M5` for the second reference: its first record is refused,
+    // after the slice before it was handed out; and so are the later ones.
+    let text = header.header_text().replacen(
+        "SN:2kb_3_Unmodified\tLN:2018",
+        "SN:2kb_3_Unmodified\tLN:2018\tM5:00000000000000000000000000000000",
+        1,
+    );
+    let wrong_m5 = seqair::bam::BamHeader::from_sam_text(&text).unwrap();
+    let all = [store_of(&mut placed.iter())];
+    for threads in [1, 3] {
+        for (header, stores, refused) in
+            [(&header, &unsorted[..], "Unsorted"), (&wrong_m5, &all[..], "ReferenceMd5Mismatch")]
+        {
+            let (mut ours, mut theirs) = (Vec::new(), Vec::new());
+            let by_store = write(header, threads, true, stores, &mut ours);
+            assert_eq!(ours.len(), 1, "{ours:?}");
+            assert!(format!("{:?}", ours[0]).starts_with(refused), "{ours:?}");
+            let one_by_one = write(header, 0, false, stores, &mut theirs);
+            assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+            assert!(by_store == one_by_one, "{refused}, {threads} threads");
+        }
     }
 }
