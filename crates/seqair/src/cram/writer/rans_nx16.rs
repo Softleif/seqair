@@ -608,14 +608,20 @@ fn normalize(counts: &[u32; 256], total: u32) -> [u32; 256] {
 /// [`normalize`] of any number of counts, into `freq` (as long).
 #[allow(
     clippy::arithmetic_side_effects,
-    reason = "each subtraction is guarded by the comparison before it"
+    reason = "each subtraction is guarded by the comparison before it; c > 0, so sum > 0; \
+              c·total + sum/2 < sum·(total + 1), which the narrow path checks fits a u32"
 )]
 fn normalize_into(counts: &[u32], total: u32, freq: &mut [u32]) {
     debug_assert_eq!(counts.len(), freq.len());
     let sum: u64 = counts.iter().map(|&c| u64::from(c)).sum();
+    // A u32 division where the scaled counts fit one: it is the faster.
+    let narrow =
+        u32::try_from(sum).ok().filter(|s| s.checked_mul(total.saturating_add(1)).is_some());
     for (f, &c) in freq.iter_mut().zip(counts) {
         *f = if c == 0 {
             0
+        } else if let Some(sum) = narrow {
+            ((c * total + sum / 2) / sum).max(1)
         } else {
             let scaled = u64::from(c)
                 .saturating_mul(u64::from(total))
