@@ -26,8 +26,7 @@ use seqair::vcf::record_encoder::{
     InfoFloats, InfoInt, InfoInts,
 };
 use seqair::vcf::{
-    Alleles, ContigDef, FilterId, Genotype, Number, OutputFormat, Ready, ValueType, VcfHeader,
-    Writer,
+    Alleles, ContigDef, FilterId, Genotype, Number, OutputFormat, Ready, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::io::Cursor;
@@ -56,70 +55,28 @@ fn make_setup() -> RoundtripSetup {
     let q20_filter =
         builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Total Depth",
-        ))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::new(
-            "AD",
-            Number::ReferenceAlternateBases,
-            ValueType::Integer,
-            "Allele Depth",
-        ))
+        .register_info(&InfoFieldDef::new("AD", Number::ReferenceAlternateBases, "Allele Depth"))
         .unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::new(
-            "AF",
-            Number::AlternateBases,
-            ValueType::Float,
-            "Allele Frequency",
-        ))
+        .register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "Allele Frequency"))
         .unwrap();
     let db_flag = builder
-        .register_info(&InfoFieldDef::new(
-            "DB",
-            Number::Count(0),
-            ValueType::Flag,
-            "dbSNP membership",
-        ))
+        .register_info(&InfoFieldDef::new("DB", Number::Count(0), "dbSNP membership"))
         .unwrap();
     let mq_info = builder
-        .register_info(&InfoFieldDef::new(
-            "MQ",
-            Number::Count(1),
-            ValueType::Float,
-            "Mapping Quality",
-        ))
+        .register_info(&InfoFieldDef::new("MQ", Number::Count(1), "Mapping Quality"))
         .unwrap();
     let mut builder = builder.formats();
-    let gt_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt =
+        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let dp_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Read Depth",
-        ))
+        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
         .unwrap();
     let gq_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GQ",
-            Number::Count(1),
-            ValueType::Integer,
-            "Genotype Quality",
-        ))
+        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype Quality"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();

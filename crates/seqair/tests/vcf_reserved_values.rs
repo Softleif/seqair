@@ -27,8 +27,8 @@ use seqair::vcf::record_encoder::{
     InfoFieldDef, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, OptArr, Scalar,
 };
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, ReservedMarker, ValueType,
-    VcfEncodeError, VcfError, VcfHeader, Writer,
+    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, ReservedMarker, VcfEncodeError,
+    VcfError, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::process::Command;
@@ -63,54 +63,30 @@ fn setup() -> Setup {
     let contig = builder.register_contig("chr1", ContigDef { length: Some(100_000) }).unwrap();
     let mut builder = builder.infos();
     let info_int = builder
-        .register_info(&InfoFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Scalar integer",
-        ))
+        .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Scalar integer"))
         .unwrap();
     let info_ints = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
-            "AD",
-            Number::Unknown,
-            ValueType::Integer,
-            "Integer list",
-        ))
+        .register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "Integer list"))
         .unwrap();
     let info_int_opts = builder
         .register_info(&InfoFieldDef::<OptArr<i32>>::new(
             "OD",
             Number::Unknown,
-            ValueType::Integer,
             "Integer list with missing elements",
         ))
         .unwrap();
     let info_float = builder
-        .register_info(&InfoFieldDef::<Scalar<f32>>::new(
-            "MQ",
-            Number::Count(1),
-            ValueType::Float,
-            "Scalar float",
-        ))
+        .register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", Number::Count(1), "Scalar float"))
         .unwrap();
     let info_floats = builder
-        .register_info(&InfoFieldDef::<Arr<f32>>::new(
-            "AF",
-            Number::Unknown,
-            ValueType::Float,
-            "Float list",
-        ))
+        .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::Unknown, "Float list"))
         .unwrap();
     let mut builder = builder.formats();
-    let gt = builder
-        .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
-        .unwrap();
+    let gt = builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
     let fmt_int = builder
         .register_format(&FormatFieldDef::<Scalar<i32>>::new(
             "FD",
             Number::Count(1),
-            ValueType::Integer,
             "Per-sample integer",
         ))
         .unwrap();
@@ -118,7 +94,6 @@ fn setup() -> Setup {
         .register_format(&FormatFieldDef::<Arr<i32>>::new(
             "FA",
             Number::Unknown,
-            ValueType::Integer,
             "Per-sample integer list",
         ))
         .unwrap();
@@ -126,7 +101,6 @@ fn setup() -> Setup {
         .register_format(&FormatFieldDef::<Scalar<f32>>::new(
             "FQ",
             Number::Count(1),
-            ValueType::Float,
             "Per-sample float",
         ))
         .unwrap();
@@ -134,7 +108,6 @@ fn setup() -> Setup {
         .register_format(&FormatFieldDef::<Arr<f32>>::new(
             "FL",
             Number::Unknown,
-            ValueType::Float,
             "Per-sample float list",
         ))
         .unwrap();

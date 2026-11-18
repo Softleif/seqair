@@ -27,8 +27,7 @@ use seqair::io::CompressionLevel;
 use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
-    Alleles, ContigDef, FormatInt, Genotype, InfoInts, Number, OutputFormat, ValueType, VcfHeader,
-    Writer,
+    Alleles, ContigDef, FormatInt, Genotype, InfoInts, Number, OutputFormat, VcfHeader, Writer,
 };
 use seqair::vcf::{FormatGt, InfoFloat};
 use seqair_types::MappingQuality;
@@ -211,20 +210,13 @@ fn vcf_setup() -> VcfSetup {
         .register_info(&InfoFieldDef::new(
             "AD",
             Number::ReferenceAlternateBases,
-            ValueType::Integer,
             "Depth per allele",
         ))
         .unwrap();
-    let mq = b
-        .register_info(&InfoFieldDef::new("MQ", Number::Count(1), ValueType::Float, "RMS MAPQ"))
-        .unwrap();
+    let mq = b.register_info(&InfoFieldDef::new("MQ", Number::Count(1), "RMS MAPQ")).unwrap();
     let mut b = b.formats();
-    let gt = b
-        .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
-        .unwrap();
-    let dp = b
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), ValueType::Integer, "DP"))
-        .unwrap();
+    let gt = b.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
+    let dp = b.register_format(&FormatFieldDef::new("DP", Number::Count(1), "DP")).unwrap();
     let mut b = b.samples();
     b.add_sample("sample").unwrap();
     VcfSetup { header: b.build().unwrap(), contig, ad, mq, gt, dp }

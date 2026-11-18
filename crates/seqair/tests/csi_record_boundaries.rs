@@ -27,7 +27,7 @@
 use seqair::bam::bgzf::VirtualOffset;
 use seqair::bam::{CsiIndex, Pos0};
 use seqair::vcf::record_encoder::{InfoFieldDef, InfoString, Str};
-use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, ValueType, VcfHeader, Writer};
+use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -56,14 +56,8 @@ fn write_bcf(pad: usize) -> Written {
     let contig =
         builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN.into()) }).unwrap();
     let mut infos = builder.infos();
-    let sc: InfoString = infos
-        .register_info(&InfoFieldDef::<Str>::new(
-            "SC",
-            Number::Count(1),
-            ValueType::String,
-            "padding",
-        ))
-        .unwrap();
+    let sc: InfoString =
+        infos.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "padding")).unwrap();
     let header = Arc::new(infos.build().unwrap());
 
     let padding = "A".repeat(pad);

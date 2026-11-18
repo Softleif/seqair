@@ -23,9 +23,7 @@ use hegel::prelude::*;
 use seqair::vcf::record_encoder::{
     InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString,
 };
-use seqair::vcf::{
-    Alleles, ContigDef, ContigId, Number, OutputFormat, ValueType, VcfHeader, Writer,
-};
+use seqair::vcf::{Alleles, ContigDef, ContigId, Number, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::process::Command;
 use std::sync::Arc;
@@ -58,59 +56,22 @@ fn setup() -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN) }).unwrap();
     let mut b = builder.infos();
-    let int1 = b
-        .register_info(&InfoFieldDef::new("II", Number::Count(1), ValueType::Integer, "int"))
-        .unwrap();
-    let float1 = b
-        .register_info(&InfoFieldDef::new("FF", Number::Count(1), ValueType::Float, "float"))
-        .unwrap();
-    let flag = b
-        .register_info(&InfoFieldDef::new("FG", Number::Count(0), ValueType::Flag, "flag"))
-        .unwrap();
-    let char1 = b
-        .register_info(&InfoFieldDef::new("CH", Number::Count(1), ValueType::Character, "char"))
-        .unwrap();
-    let string1 = b
-        .register_info(&InfoFieldDef::new("ST", Number::Count(1), ValueType::String, "string"))
-        .unwrap();
-    let fixed3 = b
-        .register_info(&InfoFieldDef::new("P3", Number::Count(3), ValueType::Integer, "three"))
-        .unwrap();
-    let per_alt = b
-        .register_info(&InfoFieldDef::new(
-            "AI",
-            Number::AlternateBases,
-            ValueType::Integer,
-            "one per ALT",
-        ))
-        .unwrap();
+    let int1 = b.register_info(&InfoFieldDef::new("II", Number::Count(1), "int")).unwrap();
+    let float1 = b.register_info(&InfoFieldDef::new("FF", Number::Count(1), "float")).unwrap();
+    let flag = b.register_info(&InfoFieldDef::new("FG", Number::Count(0), "flag")).unwrap();
+    let char1 = b.register_info(&InfoFieldDef::new("CH", Number::Count(1), "char")).unwrap();
+    let string1 = b.register_info(&InfoFieldDef::new("ST", Number::Count(1), "string")).unwrap();
+    let fixed3 = b.register_info(&InfoFieldDef::new("P3", Number::Count(3), "three")).unwrap();
+    let per_alt =
+        b.register_info(&InfoFieldDef::new("AI", Number::AlternateBases, "one per ALT")).unwrap();
     let per_allele = b
-        .register_info(&InfoFieldDef::new(
-            "RI",
-            Number::ReferenceAlternateBases,
-            ValueType::Integer,
-            "one per allele",
-        ))
+        .register_info(&InfoFieldDef::new("RI", Number::ReferenceAlternateBases, "one per allele"))
         .unwrap();
-    let per_genotype = b
-        .register_info(&InfoFieldDef::new(
-            "GI",
-            Number::Genotypes,
-            ValueType::Integer,
-            "one per genotype",
-        ))
-        .unwrap();
-    let unknown = b
-        .register_info(&InfoFieldDef::new("UI", Number::Unknown, ValueType::Integer, "any count"))
-        .unwrap();
-    let per_alt_float = b
-        .register_info(&InfoFieldDef::new(
-            "AF",
-            Number::AlternateBases,
-            ValueType::Float,
-            "one per ALT",
-        ))
-        .unwrap();
+    let per_genotype =
+        b.register_info(&InfoFieldDef::new("GI", Number::Genotypes, "one per genotype")).unwrap();
+    let unknown = b.register_info(&InfoFieldDef::new("UI", Number::Unknown, "any count")).unwrap();
+    let per_alt_float =
+        b.register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "one per ALT")).unwrap();
     let header = Arc::new(b.samples().build().unwrap());
     Setup {
         header,
@@ -575,12 +536,7 @@ fn opt_setup() -> OptSetup {
     let contig = builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN) }).unwrap();
     let mut b = builder.infos();
     let opts = b
-        .register_info(&InfoFieldDef::new(
-            "OI",
-            Number::Unknown,
-            ValueType::Integer,
-            "integers, some missing",
-        ))
+        .register_info(&InfoFieldDef::new("OI", Number::Unknown, "integers, some missing"))
         .unwrap();
     OptSetup { header: Arc::new(b.samples().build().unwrap()), contig, opts }
 }

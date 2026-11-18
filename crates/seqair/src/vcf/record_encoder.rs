@@ -7,11 +7,13 @@
 //! # Field definitions
 //!
 //! [`InfoFieldDef`] and [`FormatFieldDef`] combine header metadata with
-//! type-safe key resolution. Register them on [`VcfHeaderBuilder`](super::header::VcfHeaderBuilder)
+//! type-safe key resolution. The `Type` a definition declares comes from its
+//! marker ([`FieldKind::VALUE_TYPE`]), so it cannot disagree with the values
+//! the key encodes. Register them on [`VcfHeaderBuilder`](super::header::VcfHeaderBuilder)
 //! to build the header and resolve keys in one step:
 //!
 //! ```rust
-//! use seqair::vcf::{Number, ValueType, VcfHeader, InfoInt, FormatGt};
+//! use seqair::vcf::{Number, VcfHeader, InfoInt, FormatGt};
 //! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +23,7 @@
 //!
 //! // Returns InfoKey<Scalar<i32>> (aliased InfoInt) — can only encode i32 values
 //! let dp_key: InfoInt = builder.register_info(
-//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth")
 //! )?;
 //!
 //! // advance to the formats phase
@@ -29,7 +31,7 @@
 //!
 //! // Returns FormatKey<Gt> (aliased FormatGt) — can only encode Genotype slices
 //! let gt_key: FormatGt = builder.register_format(
-//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype")
 //! )?;
 //!
 //! assert_eq!(dp_key.id().name(), "DP");
@@ -38,7 +40,7 @@
 //! # }
 //! ```
 
-use super::error::VcfError;
+use super::error::{KeyError, VcfError};
 use super::header::{Number, ValueType};
 use super::record::Genotype;
 use seqair_types::SmolStr;
@@ -49,39 +51,135 @@ use std::marker::PhantomData;
 // r[impl record_encoder.typed_keys]
 
 /// Marker for a single scalar value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scalar<T> {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible, PhantomData<T>),
 }
 
 /// Marker for a variable-length array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arr<T> {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible, PhantomData<T>),
 }
 
 /// Marker for an array with optional (missing) elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptArr<T> {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible, PhantomData<T>),
 }
 
 /// Marker for a flag field (no value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flag {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible),
 }
 
 /// Marker for a string field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Str {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible),
 }
 
 /// Marker for genotype (GT) format field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gt {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible),
+}
+
+// ── Field kinds ────────────────────────────────────────────────────────
+
+/// The element types a numeric marker ([`Scalar`], [`Arr`], [`OptArr`]) holds.
+pub trait Numeric {
+    /// `Integer` for `i32`, `Float` for `f32`.
+    const VALUE_TYPE: ValueType;
+}
+
+impl Numeric for i32 {
+    const VALUE_TYPE: ValueType = ValueType::Integer;
+}
+
+impl Numeric for f32 {
+    const VALUE_TYPE: ValueType = ValueType::Float;
+}
+
+// r[impl vcf_values.field_kind]
+/// What a marker declares and what declarations it can read: the single
+/// source of a marker's `Type` and accepted `Number`s, for the writer's
+/// [`InfoFieldDef`]/[`FormatFieldDef`] and for resolving keys from a parsed
+/// header ([`VcfHeader::info_key`](super::VcfHeader::info_key)).
+pub trait FieldKind {
+    /// The `Type` a definition with this marker declares.
+    const VALUE_TYPE: ValueType;
+
+    /// True for [`Gt`]: the marker names only the FORMAT `GT` field.
+    const GENOTYPE: bool = false;
+
+    /// Whether a field declared with this `Type` can be read through the marker.
+    fn reads_type(declared: ValueType) -> bool {
+        declared == Self::VALUE_TYPE
+    }
+
+    /// Whether a field declared with this `Number` fits the marker's values.
+    fn holds_number(_declared: Number) -> bool {
+        true
+    }
+}
+
+/// `Number=1`.
+impl<T: Numeric> FieldKind for Scalar<T> {
+    const VALUE_TYPE: ValueType = T::VALUE_TYPE;
+
+    fn holds_number(declared: Number) -> bool {
+        declared == Number::Count(1)
+    }
+}
+
+impl<T: Numeric> FieldKind for Arr<T> {
+    const VALUE_TYPE: ValueType = T::VALUE_TYPE;
+}
+
+impl<T: Numeric> FieldKind for OptArr<T> {
+    const VALUE_TYPE: ValueType = T::VALUE_TYPE;
+}
+
+impl FieldKind for Flag {
+    const VALUE_TYPE: ValueType = ValueType::Flag;
+}
+
+/// Writes `String`; reads `String` and `Character` (both are text on disk).
+impl FieldKind for Str {
+    const VALUE_TYPE: ValueType = ValueType::String;
+
+    fn reads_type(declared: ValueType) -> bool {
+        matches!(declared, ValueType::String | ValueType::Character)
+    }
+}
+
+impl FieldKind for Gt {
+    const VALUE_TYPE: ValueType = ValueType::String;
+    const GENOTYPE: bool = true;
+}
+
+/// Which section a key names a field of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Section {
+    Info,
+    Format,
+}
+
+/// Check that marker `V` may name the field `name` of `section` at all: [`Gt`]
+/// names only the FORMAT `GT` field.
+pub(crate) fn check_genotype<V: FieldKind>(section: Section, name: &str) -> Result<(), KeyError> {
+    if V::GENOTYPE && (section != Section::Format || name != "GT") {
+        return Err(KeyError::NotGenotype { name: SmolStr::from(name) });
+    }
+    Ok(())
 }
 
 // ── Field identifiers ──────────────────────────────────────────────────
@@ -524,45 +622,35 @@ impl FormatKey<Str> {
 
 // ── Field definitions ──────────────────────────────────────────────────
 
-// r[impl record_encoder.field_def]
+// r[impl record_encoder.field_def+2]
 // r[impl record_encoder.field_def_types]
 
+/// An INFO field definition; its `Type` is the marker's ([`FieldKind::VALUE_TYPE`]).
 pub struct InfoFieldDef<V> {
     pub name: &'static str,
     pub number: Number,
-    pub value_type: ValueType,
     pub description: &'static str,
     _marker: PhantomData<V>,
 }
 
 // r[impl record_encoder.field_def_const]
-impl<V> InfoFieldDef<V> {
-    pub const fn new(
-        name: &'static str,
-        number: Number,
-        value_type: ValueType,
-        description: &'static str,
-    ) -> Self {
-        Self { name, number, value_type, description, _marker: PhantomData }
+impl<V: FieldKind> InfoFieldDef<V> {
+    pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
+        Self { name, number, description, _marker: PhantomData }
     }
 }
 
+/// A FORMAT field definition; its `Type` is the marker's ([`FieldKind::VALUE_TYPE`]).
 pub struct FormatFieldDef<V> {
     pub name: &'static str,
     pub number: Number,
-    pub value_type: ValueType,
     pub description: &'static str,
     _marker: PhantomData<V>,
 }
 
-impl<V> FormatFieldDef<V> {
-    pub const fn new(
-        name: &'static str,
-        number: Number,
-        value_type: ValueType,
-        description: &'static str,
-    ) -> Self {
-        Self { name, number, value_type, description, _marker: PhantomData }
+impl<V: FieldKind> FormatFieldDef<V> {
+    pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
+        Self { name, number, description, _marker: PhantomData }
     }
 }
 
@@ -587,7 +675,7 @@ pub trait FieldDescription {
     fn description(&self) -> &str;
 }
 
-impl<V> FieldDescription for InfoFieldDef<V> {
+impl<V: FieldKind> FieldDescription for InfoFieldDef<V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -595,14 +683,14 @@ impl<V> FieldDescription for InfoFieldDef<V> {
         self.number
     }
     fn value_type(&self) -> ValueType {
-        self.value_type
+        V::VALUE_TYPE
     }
     fn description(&self) -> &str {
         self.description
     }
 }
 
-impl<V> FieldDescription for FormatFieldDef<V> {
+impl<V: FieldKind> FieldDescription for FormatFieldDef<V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -610,7 +698,7 @@ impl<V> FieldDescription for FormatFieldDef<V> {
         self.number
     }
     fn value_type(&self) -> ValueType {
-        self.value_type
+        V::VALUE_TYPE
     }
     fn description(&self) -> &str {
         self.description
@@ -632,9 +720,8 @@ mod tests {
     #[test]
     fn field_defs_are_const() {
         const DP: InfoFieldDef<Scalar<i32>> =
-            InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Combined depth");
-        const GT: FormatFieldDef<Gt> =
-            FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "Genotype");
+            InfoFieldDef::new("DP", Number::Count(1), "Combined depth");
+        const GT: FormatFieldDef<Gt> = FormatFieldDef::new("GT", Number::Count(1), "Genotype");
         const LOW_DP: FilterFieldDef = FilterFieldDef::new("lowDp", "Low read depth");
 
         assert_eq!(DP.name, "DP");
@@ -645,17 +732,79 @@ mod tests {
     // r[verify record_encoder.field_description]
     #[test]
     fn field_description_trait() {
-        let dp = InfoFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Combined depth",
-        );
+        let dp = InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Combined depth");
         let desc: &dyn FieldDescription = &dp;
         assert_eq!(desc.name(), "DP");
         assert_eq!(desc.number(), Number::Count(1));
         assert_eq!(desc.value_type(), ValueType::Integer);
         assert_eq!(desc.description(), "Combined depth");
+    }
+
+    // r[verify record_encoder.field_def+2]
+    // r[verify vcf_values.field_kind]
+    /// The declared `Type` is the marker's, read through every path a
+    /// definition reaches the header by: the def, the trait, the header line.
+    #[test]
+    fn a_definition_declares_its_markers_type() {
+        assert_eq!(
+            InfoFieldDef::<Scalar<i32>>::new("A", Number::Count(1), "").value_type(),
+            ValueType::Integer
+        );
+        assert_eq!(
+            InfoFieldDef::<Scalar<f32>>::new("A", Number::Count(1), "").value_type(),
+            ValueType::Float
+        );
+        assert_eq!(
+            InfoFieldDef::<Arr<i32>>::new("A", Number::Unknown, "").value_type(),
+            ValueType::Integer
+        );
+        assert_eq!(
+            InfoFieldDef::<OptArr<f32>>::new("A", Number::Unknown, "").value_type(),
+            ValueType::Float
+        );
+        assert_eq!(
+            InfoFieldDef::<Flag>::new("A", Number::Count(0), "").value_type(),
+            ValueType::Flag
+        );
+        assert_eq!(
+            InfoFieldDef::<Str>::new("A", Number::Count(1), "").value_type(),
+            ValueType::String
+        );
+        assert_eq!(
+            FormatFieldDef::<Gt>::new("GT", Number::Count(1), "").value_type(),
+            ValueType::String
+        );
+
+        let mut builder = crate::vcf::header::VcfHeader::builder().infos();
+        builder
+            .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "x"))
+            .unwrap();
+        let header = builder.build().unwrap();
+        assert!(header.to_vcf_text().contains("##INFO=<ID=AF,Number=A,Type=Float,"));
+    }
+
+    // r[verify record_encoder.field_def+2]
+    #[test]
+    fn a_genotype_definition_names_only_format_gt() {
+        let mut builder = crate::vcf::header::VcfHeader::builder().infos();
+        let err = builder
+            .register_info(&InfoFieldDef::<Gt>::new("GT", Number::Count(1), ""))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::vcf::VcfHeaderError::Key(KeyError::NotGenotype { ref name }) if name == "GT"),
+            "{err:?}"
+        );
+        assert!(builder.build().unwrap().infos().is_empty(), "a refused definition is not added");
+
+        let mut builder = crate::vcf::header::VcfHeader::builder().formats();
+        let err = builder
+            .register_format(&FormatFieldDef::<Gt>::new("GQ", Number::Count(1), ""))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::vcf::VcfHeaderError::Key(KeyError::NotGenotype { ref name }) if name == "GQ"),
+            "{err:?}"
+        );
+        builder.register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "")).unwrap();
     }
 
     // r[verify record_encoder.filter_id]
@@ -693,49 +842,26 @@ mod tests {
             let mut builder = crate::vcf::header::VcfHeader::builder();
             let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
             let mut builder = builder.infos();
-            let dp_info = builder
-                .register_info(&InfoFieldDef::new(
-                    "DP",
-                    Number::Count(1),
-                    ValueType::Integer,
-                    "Depth",
-                ))
-                .unwrap();
+            let dp_info =
+                builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
             let bq_info = builder
-                .register_info(&InfoFieldDef::new(
-                    "BQ",
-                    Number::Count(1),
-                    ValueType::Float,
-                    "Base quality",
-                ))
+                .register_info(&InfoFieldDef::new("BQ", Number::Count(1), "Base quality"))
                 .unwrap();
-            let db_flag = builder
-                .register_info(&InfoFieldDef::new("DB", Number::Count(0), ValueType::Flag, "dbSNP"))
-                .unwrap();
+            let db_flag =
+                builder.register_info(&InfoFieldDef::new("DB", Number::Count(0), "dbSNP")).unwrap();
             let ad_info = builder
                 .register_info(&InfoFieldDef::new(
                     "AD",
                     Number::ReferenceAlternateBases,
-                    ValueType::Integer,
                     "Allele depth",
                 ))
                 .unwrap();
             let mut builder = builder.formats();
             let gt_fmt = builder
-                .register_format(&FormatFieldDef::new(
-                    "GT",
-                    Number::Count(1),
-                    ValueType::String,
-                    "Genotype",
-                ))
+                .register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype"))
                 .unwrap();
             let dp_fmt = builder
-                .register_format(&FormatFieldDef::new(
-                    "DP",
-                    Number::Count(1),
-                    ValueType::Integer,
-                    "Read depth",
-                ))
+                .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read depth"))
                 .unwrap();
             let mut builder = builder.samples();
             builder.add_sample("S1").unwrap();
@@ -761,7 +887,7 @@ mod tests {
         assert_eq!(map.get("GT").unwrap(), setup.gt_fmt.id().dict_idx() as usize, "FORMAT GT");
     }
 
-    // r[verify record_encoder.field_def]
+    // r[verify record_encoder.field_def+2]
     // r[verify record_encoder.field_def_types]
     #[test]
     fn field_def_generic_keys_encode() {
@@ -950,25 +1076,14 @@ mod tests {
         let mut builder = crate::vcf::header::VcfHeader::builder();
         let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
         let mut builder = builder.infos();
-        let dp_info = builder
-            .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-            .unwrap();
+        let dp_info =
+            builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
         let mut builder = builder.formats();
         let gt_fmt = builder
-            .register_format(&FormatFieldDef::new(
-                "GT",
-                Number::Count(1),
-                ValueType::String,
-                "Genotype",
-            ))
+            .register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype"))
             .unwrap();
         let dp_fmt = builder
-            .register_format(&FormatFieldDef::new(
-                "DP",
-                Number::Count(1),
-                ValueType::Integer,
-                "Read depth",
-            ))
+            .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read depth"))
             .unwrap();
         let mut builder = builder.samples();
         builder.add_sample("S1").unwrap();
@@ -1071,12 +1186,7 @@ mod tests {
         let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
         let mut builder = builder.formats();
         let pl_fmt: FormatInts = builder
-            .register_format(&FormatFieldDef::new(
-                "PL",
-                Number::Genotypes,
-                ValueType::Integer,
-                "Phred likelihoods",
-            ))
+            .register_format(&FormatFieldDef::new("PL", Number::Genotypes, "Phred likelihoods"))
             .unwrap();
         let mut builder = builder.samples();
         builder.add_sample("S1").unwrap();
@@ -1107,14 +1217,8 @@ mod tests {
         let mut hb = crate::vcf::header::VcfHeader::builder();
         let contig = hb.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
         let mut hb = hb.formats();
-        let af: FormatFloats = hb
-            .register_format(&FormatFieldDef::new(
-                "AF",
-                Number::Unknown,
-                ValueType::Float,
-                "Allele freq",
-            ))
-            .unwrap();
+        let af: FormatFloats =
+            hb.register_format(&FormatFieldDef::new("AF", Number::Unknown, "Allele freq")).unwrap();
         let mut hb = hb.samples();
         hb.add_sample("A").unwrap();
         hb.add_sample("B").unwrap();

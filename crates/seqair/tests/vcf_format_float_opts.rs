@@ -10,8 +10,7 @@
 
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatFloatOpts, OptArr};
 use seqair::vcf::{
-    Alleles, ContigDef, Number, OutputFormat, ValueType, VcfEncodeError, VcfError, VcfHeader,
-    Writer,
+    Alleles, ContigDef, Number, OutputFormat, VcfEncodeError, VcfError, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
@@ -24,7 +23,6 @@ fn write(format: OutputFormat, values: &[Option<f32>]) -> (Vec<u8>, Result<(), V
         .register_format(&FormatFieldDef::<OptArr<f32>>::new(
             "ML",
             Number::AlternateBases,
-            ValueType::Float,
             "ML per alt",
         ))
         .unwrap();

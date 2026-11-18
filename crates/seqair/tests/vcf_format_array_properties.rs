@@ -25,7 +25,7 @@ use seqair::vcf::record_encoder::{
     FormatFieldDef, FormatFloats, FormatGt, FormatInts, FormatString,
 };
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::process::Command;
@@ -46,32 +46,15 @@ fn setup(n_samples: usize) -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(100_000) }).unwrap();
     let mut builder = builder.formats();
-    let gt = builder
-        .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
-        .unwrap();
+    let gt = builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
     let ints = builder
-        .register_format(&FormatFieldDef::new(
-            "AD",
-            Number::Unknown,
-            ValueType::Integer,
-            "Per-sample integer list",
-        ))
+        .register_format(&FormatFieldDef::new("AD", Number::Unknown, "Per-sample integer list"))
         .unwrap();
     let floats = builder
-        .register_format(&FormatFieldDef::new(
-            "VL",
-            Number::Unknown,
-            ValueType::Float,
-            "Per-sample float list",
-        ))
+        .register_format(&FormatFieldDef::new("VL", Number::Unknown, "Per-sample float list"))
         .unwrap();
     let text = builder
-        .register_format(&FormatFieldDef::new(
-            "BC",
-            Number::Count(1),
-            ValueType::String,
-            "Per-sample string",
-        ))
+        .register_format(&FormatFieldDef::new("BC", Number::Count(1), "Per-sample string"))
         .unwrap();
     let mut builder = builder.samples();
     for i in 0..n_samples {

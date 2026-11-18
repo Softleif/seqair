@@ -16,7 +16,7 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
-use seqair::vcf::header::{ContigDef, Number, ValueType};
+use seqair::vcf::header::{ContigDef, Number};
 use seqair::vcf::record::Genotype;
 use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 use seqair::vcf::{ContigId, FormatGt, FormatInt, InfoInt, OutputFormat, VcfHeader, Writer};
@@ -35,30 +35,14 @@ fn shared_setup() -> TestSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Total Depth",
-        ))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
     let mut builder = builder.formats();
     let gt_fmt = builder
-        .register_format(&FormatFieldDef::<Gt>::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
+        .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
         .unwrap();
     let dp_fmt = builder
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Read Depth",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Read Depth"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();

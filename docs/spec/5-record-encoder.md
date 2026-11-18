@@ -27,8 +27,8 @@ r[record_encoder.finish]
 
 ## Field Definitions
 
-r[record_encoder.field_def]
-Field definitions MUST carry all metadata needed for header construction, key resolution, and documentation: name (`&'static str`), Number, ValueType, and description (`&'static str`). Field definitions MUST be parameterized by a value type marker to enable type-safe key resolution.
+r[record_encoder.field_def+2]
+Field definitions MUST carry all metadata needed for header construction, key resolution, and documentation: name (`&'static str`), Number, and description (`&'static str`). Field definitions MUST be parameterized by a value type marker to enable type-safe key resolution, and their ValueType MUST come from that marker (`FieldKind::VALUE_TYPE`, `r[vcf_values.field_kind]`), never from a separate argument that could disagree with it. Registering a `Gt` definition under any name but FORMAT `GT` MUST fail with `KeyError::NotGenotype`. The writer does not restrict `Number` by marker: a `Scalar` declared `Number=A` is how a biallelic caller writes one value per ALT.
 
 > r[record_encoder.field_def_types]
 > Three definition types MUST be provided:

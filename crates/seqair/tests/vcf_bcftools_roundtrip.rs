@@ -18,9 +18,7 @@
 use seqair::vcf::record_encoder::{
     FilterFieldDef, FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoFloat, InfoInt, InfoInts,
 };
-use seqair::vcf::{
-    Alleles, ContigDef, Genotype, Number, OutputFormat, Ready, ValueType, VcfHeader, Writer,
-};
+use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, Ready, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::process::Command;
 use std::sync::Arc;
@@ -42,49 +40,22 @@ fn make_setup() -> Setup {
     let mut builder = builder.filters();
     let _pass = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::new(
-            "AF",
-            Number::AlternateBases,
-            ValueType::Float,
-            "Allele Frequency",
-        ))
+        .register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "Allele Frequency"))
         .unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::new(
-            "AD",
-            Number::ReferenceAlternateBases,
-            ValueType::Integer,
-            "Allele Depth",
-        ))
+        .register_info(&InfoFieldDef::new("AD", Number::ReferenceAlternateBases, "Allele Depth"))
         .unwrap();
     let mut builder = builder.formats();
-    let gt_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt =
+        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let dp_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Read Depth",
-        ))
+        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
         .unwrap();
     let gq_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GQ",
-            Number::Count(1),
-            ValueType::Integer,
-            "Genotype Quality",
-        ))
+        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype Quality"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();

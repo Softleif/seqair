@@ -1,6 +1,7 @@
 //! VCF header model with builder, field definitions, and BCF string map.
 
 use super::error::VcfHeaderError;
+use super::record_encoder::{FieldKind, Section, check_genotype};
 use crate::bam::header::BamHeader;
 use indexmap::{IndexMap, IndexSet};
 use seqair_types::SmolStr;
@@ -55,6 +56,21 @@ pub enum ValueType {
     Flag,
     Character,
     String,
+}
+
+impl std::fmt::Display for Number {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Count(n) => write!(f, "{n}"),
+            _ => f.write_str(&self.as_str()),
+        }
+    }
+}
+
+impl std::fmt::Display for ValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl ValueType {
@@ -398,7 +414,7 @@ pub struct Samples;
 /// let builder = VcfHeader::builder();
 /// let mut builder = builder.infos();
 /// let _dp: seqair::vcf::InfoInt = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
-///     "DP", Number::Count(1), ValueType::Integer, "Depth",
+///     "DP", Number::Count(1), "Depth",
 /// ))?;
 /// # Ok(())
 /// # }
@@ -414,7 +430,7 @@ pub struct Samples;
 /// let mut builder = VcfHeader::builder();
 /// // ERROR: register_info is not available in the Contigs phase
 /// builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
-///     "DP", Number::Count(1), ValueType::Integer, "Depth",
+///     "DP", Number::Count(1), "Depth",
 /// ))?;
 /// # Ok(())
 /// # }
@@ -680,16 +696,19 @@ impl VcfHeaderBuilder<Infos> {
 
     // r[impl record_encoder.register]
     /// Register an INFO field: adds the header entry and returns a resolved typed key.
-    pub fn register_info<V>(
+    pub fn register_info<V: FieldKind>(
         &mut self,
         def: &super::record_encoder::InfoFieldDef<V>,
     ) -> Result<super::record_encoder::InfoKey<V>, VcfHeaderError> {
+        // The writer takes any `Number`: a `Scalar` under `Number=A` is how a
+        // biallelic caller writes one value per ALT.
+        check_genotype::<V>(Section::Info, def.name)?;
         let id = SmolStr::from(def.name);
         let dict_idx = self.insert_info(
             id.clone(),
             InfoDef {
                 number: def.number,
-                typ: def.value_type,
+                typ: V::VALUE_TYPE,
                 description: SmolStr::from(def.description),
             },
         )?;
@@ -737,16 +756,17 @@ impl VcfHeaderBuilder<Formats> {
 
     // r[impl record_encoder.register]
     /// Register a FORMAT field: adds the header entry and returns a resolved typed key.
-    pub fn register_format<V>(
+    pub fn register_format<V: FieldKind>(
         &mut self,
         def: &super::record_encoder::FormatFieldDef<V>,
     ) -> Result<super::record_encoder::FormatKey<V>, VcfHeaderError> {
+        check_genotype::<V>(Section::Format, def.name)?;
         let id = SmolStr::from(def.name);
         let dict_idx = self.insert_format(
             id.clone(),
             FormatDef {
                 number: def.number,
-                typ: def.value_type,
+                typ: V::VALUE_TYPE,
                 description: SmolStr::from(def.description),
             },
         )?;
@@ -1050,21 +1070,11 @@ mod tests {
         builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let mut builder = builder.infos();
         builder
-            .register_info(&InfoFieldDef::<Scalar<i32>>::new(
-                "DP",
-                Number::Count(1),
-                ValueType::Integer,
-                "Depth",
-            ))
+            .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth"))
             .unwrap();
         let mut builder = builder.formats();
         builder
-            .register_format(&FormatFieldDef::<Gt>::new(
-                "GT",
-                Number::Count(1),
-                ValueType::String,
-                "Genotype",
-            ))
+            .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
             .unwrap();
         let mut builder = builder.samples();
         builder.add_sample("S1").unwrap();

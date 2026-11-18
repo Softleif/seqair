@@ -1,6 +1,10 @@
 //! VCF/BCF error types. Typed fields only, no `String` payloads.
 
-use crate::{io::BgzfError, vcf::writer::WriteError};
+use crate::{
+    io::BgzfError,
+    vcf::header::{Number, ValueType},
+    vcf::writer::WriteError,
+};
 use seqair_types::SmolStr;
 use std::path::PathBuf;
 
@@ -58,6 +62,36 @@ pub enum VcfHeaderError {
          entries"
     )]
     TooManyFields { max: usize },
+
+    #[error(transparent)]
+    Key(#[from] KeyError),
+}
+
+// r[impl vcf_values.keys]
+/// Why a key could not be resolved from a header.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KeyError {
+    #[error("field {name} is not declared in the header")]
+    UnknownField { name: SmolStr },
+
+    #[error("FILTER {name} is not declared in the header")]
+    UnknownFilter { name: SmolStr },
+
+    #[error("contig {name} is not declared in the header")]
+    UnknownContig { name: SmolStr },
+
+    #[error("sample {name} is not in the header")]
+    UnknownSample { name: SmolStr },
+
+    #[error("field {name} is declared Type={declared}, not {requested}")]
+    TypeMismatch { name: SmolStr, declared: ValueType, requested: ValueType },
+
+    #[error("field {name} is declared Number={declared}, which the requested key cannot hold")]
+    NumberMismatch { name: SmolStr, declared: Number },
+
+    #[error("field {name} is not the FORMAT GT field, the only one a genotype key names")]
+    NotGenotype { name: SmolStr },
 }
 
 // r[impl vcf_record.alleles_typed]

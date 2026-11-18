@@ -34,9 +34,9 @@
 use core::range::RangeInclusive;
 use seqair::vcf::record_encoder::{Arr, FilterFieldDef, FormatFieldDef, InfoFieldDef, Scalar, Str};
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, FilterId, FormatFloat, FormatFloats, FormatGt, FormatInt,
-    FormatInts, Genotype, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoInts, InfoString, Number,
-    OutputFormat, Ready, ValueType, VcfHeader, Writer,
+    Alleles, ContigDef, ContigId, FilterId, FormatFloats, FormatGt, FormatInt, FormatInts,
+    Genotype, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoInts, InfoString, Number, OutputFormat,
+    Ready, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::io::Write;
@@ -164,8 +164,8 @@ struct Schema {
     cpg: InfoFlag,
     cpgnovo: InfoFlag,
     gt: FormatGt,
-    gl: FormatFloat,
-    gc: FormatFloat,
+    gl: FormatFloats,
+    gc: FormatFloats,
     fdp: FormatInt,
     m5mc: FormatFloats,
     dpm5mc: FormatInts,
@@ -208,49 +208,48 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
     let mut b = b.infos();
     let r = Number::ReferenceAlternateBases;
     let one = Number::Count(1);
-    let (int, float) = (ValueType::Integer, ValueType::Float);
     macro_rules! info {
-        ($kind:ty, $name:expr, $num:expr, $ty:expr) => {
-            b.register_info(&InfoFieldDef::<$kind>::new($name, $num, $ty, "d")).unwrap()
+        ($kind:ty, $name:expr, $num:expr) => {
+            b.register_info(&InfoFieldDef::<$kind>::new($name, $num, "d")).unwrap()
         };
     }
-    let ad = info!(Arr<i32>, "AD", r, int);
-    let bq = info!(Scalar<f32>, "BQ", one, float);
-    let dp = info!(Scalar<i32>, "DP", one, int);
-    let mq = info!(Scalar<f32>, "MQ", one, float);
-    let mq0 = info!(Scalar<i32>, "MQ0", one, int);
-    let ns = info!(Scalar<i32>, "NS", one, int);
-    let as_sb_ot = info!(Arr<i32>, "AS_SB_OT", r, int);
-    let as_sb_ob = info!(Arr<i32>, "AS_SB_OB", r, int);
-    let sc5 = info!(Str, "SC5", one, ValueType::String);
-    let af = info!(Arr<f32>, "AF", Number::AlternateBases, float);
-    let abq = info!(Arr<f32>, "ABQ", r, float);
-    let amq = info!(Arr<f32>, "AMQ", r, float);
-    let as_ss_bq_ot = info!(Arr<f32>, "AS_SS_BQ_OT", r, float);
-    let as_ss_bq_ob = info!(Arr<f32>, "AS_SS_BQ_OB", r, float);
-    let as_ss_mq_ot = info!(Arr<f32>, "AS_SS_MQ_OT", r, float);
-    let as_ss_mq_ob = info!(Arr<f32>, "AS_SS_MQ_OB", r, float);
-    let pir = info!(Arr<f32>, "PIR", r, float);
-    let ent100 = info!(Scalar<f32>, "ENT100", one, float);
-    let nab = info!(Arr<f32>, "NAB", r, float);
-    let noi = info!(Arr<f32>, "NOI", r, float);
-    let m5mc_strands = info!(Arr<i32>, "M5mC_Strands", Number::Count(4), int);
-    let cpg = info!(seqair::vcf::Flag, "CPG", Number::Count(0), ValueType::Flag);
-    let cpgnovo = info!(seqair::vcf::Flag, "CPGnovo", Number::Count(0), ValueType::Flag);
+    let ad = info!(Arr<i32>, "AD", r);
+    let bq = info!(Scalar<f32>, "BQ", one);
+    let dp = info!(Scalar<i32>, "DP", one);
+    let mq = info!(Scalar<f32>, "MQ", one);
+    let mq0 = info!(Scalar<i32>, "MQ0", one);
+    let ns = info!(Scalar<i32>, "NS", one);
+    let as_sb_ot = info!(Arr<i32>, "AS_SB_OT", r);
+    let as_sb_ob = info!(Arr<i32>, "AS_SB_OB", r);
+    let sc5 = info!(Str, "SC5", one);
+    let af = info!(Arr<f32>, "AF", Number::AlternateBases);
+    let abq = info!(Arr<f32>, "ABQ", r);
+    let amq = info!(Arr<f32>, "AMQ", r);
+    let as_ss_bq_ot = info!(Arr<f32>, "AS_SS_BQ_OT", r);
+    let as_ss_bq_ob = info!(Arr<f32>, "AS_SS_BQ_OB", r);
+    let as_ss_mq_ot = info!(Arr<f32>, "AS_SS_MQ_OT", r);
+    let as_ss_mq_ob = info!(Arr<f32>, "AS_SS_MQ_OB", r);
+    let pir = info!(Arr<f32>, "PIR", r);
+    let ent100 = info!(Scalar<f32>, "ENT100", one);
+    let nab = info!(Arr<f32>, "NAB", r);
+    let noi = info!(Arr<f32>, "NOI", r);
+    let m5mc_strands = info!(Arr<i32>, "M5mC_Strands", Number::Count(4));
+    let cpg = info!(seqair::vcf::Flag, "CPG", Number::Count(0));
+    let cpgnovo = info!(seqair::vcf::Flag, "CPGnovo", Number::Count(0));
     let mut b = b.formats();
     macro_rules! format {
-        ($kind:ty, $name:expr, $num:expr, $ty:expr) => {
-            b.register_format(&FormatFieldDef::<$kind>::new($name, $num, $ty, "d")).unwrap()
+        ($kind:ty, $name:expr, $num:expr) => {
+            b.register_format(&FormatFieldDef::<$kind>::new($name, $num, "d")).unwrap()
         };
     }
-    let gt = format!(seqair::vcf::Gt, "GT", one, ValueType::String);
-    let gl = format!(Scalar<f32>, "GL", Number::Genotypes, float);
-    let gc = format!(Scalar<f32>, "GC", Number::Genotypes, float);
-    let fdp = format!(Scalar<i32>, "DP", one, int);
-    let m5mc = format!(Arr<f32>, "M5mC", Number::Unknown, float);
-    let dpm5mc = format!(Arr<i32>, "DPM5mC", Number::Unknown, int);
-    let adm5mc = format!(Arr<i32>, "ADM5mC", Number::Unknown, int);
-    let ml = format!(Arr<f32>, "ML", Number::AlternateBases, float);
+    let gt = format!(seqair::vcf::Gt, "GT", one);
+    let gl = format!(Arr<f32>, "GL", Number::Genotypes);
+    let gc = format!(Arr<f32>, "GC", Number::Genotypes);
+    let fdp = format!(Scalar<i32>, "DP", one);
+    let m5mc = format!(Arr<f32>, "M5mC", Number::Unknown);
+    let dpm5mc = format!(Arr<i32>, "DPM5mC", Number::Unknown);
+    let adm5mc = format!(Arr<i32>, "ADM5mC", Number::Unknown);
+    let ml = format!(Arr<f32>, "ML", Number::AlternateBases);
     let mut b = b.samples();
     b.add_sample("sample").unwrap();
     let header = b.build().unwrap();
@@ -499,8 +498,8 @@ fn encode_rec<W: Write>(w: &mut Writer<W, Ready>, s: &Schema, r: &Rec) {
         let e = &mut enc;
         match (*idx, v) {
             (0, Val::Gt(g)) => s.gt.encode(e, std::slice::from_ref(g)),
-            (1, Val::Float(f)) => s.gl.encode(e, &[*f]),
-            (2, Val::Float(f)) => s.gc.encode(e, &[*f]),
+            (1, Val::Float(f)) => s.gl.encode(e, &[&[*f]]),
+            (2, Val::Float(f)) => s.gc.encode(e, &[&[*f]]),
             (3, Val::Int(n)) => s.fdp.encode(e, &[*n]),
             (4, Val::Floats(a)) => s.m5mc.encode_single_sample(e, a),
             (5, Val::Ints(a)) => s.dpm5mc.encode_single_sample(e, a),

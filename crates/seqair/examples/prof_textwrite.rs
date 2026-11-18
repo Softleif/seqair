@@ -17,7 +17,7 @@ use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FilterFieldDef, FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, FilterId, FormatGt, FormatInt, Genotype, InfoFloat, InfoFloats,
-    InfoInt, InfoInts, Number, OutputFormat, Ready, ValueType, VcfHeader, Writer,
+    InfoInt, InfoInts, Number, OutputFormat, Ready, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos0, Pos1};
 use std::fs::File;
@@ -54,19 +54,12 @@ fn seqair_setup() -> SeqairSetup {
     let lowqual_filter = b.register_filter(&FilterFieldDef::new("LowQual", "Low quality")).unwrap();
 
     let mut b = b.infos();
-    let dp_info = b
-        .register_info(&InfoFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Total read depth",
-        ))
-        .unwrap();
+    let dp_info =
+        b.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total read depth")).unwrap();
     let an_info = b
         .register_info(&InfoFieldDef::new(
             "AN",
             Number::Count(1),
-            ValueType::Integer,
             "Total allele count in genotypes",
         ))
         .unwrap();
@@ -74,7 +67,6 @@ fn seqair_setup() -> SeqairSetup {
         .register_info(&InfoFieldDef::new(
             "AC",
             Number::AlternateBases,
-            ValueType::Integer,
             "Allele count in genotypes, for each ALT",
         ))
         .unwrap();
@@ -82,23 +74,15 @@ fn seqair_setup() -> SeqairSetup {
         .register_info(&InfoFieldDef::new(
             "AF",
             Number::AlternateBases,
-            ValueType::Float,
             "Allele frequency from GT counts, for each ALT",
         ))
         .unwrap();
-    let mq_info = b
-        .register_info(&InfoFieldDef::new(
-            "MQ",
-            Number::Count(1),
-            ValueType::Float,
-            "RMS mapping quality",
-        ))
-        .unwrap();
+    let mq_info =
+        b.register_info(&InfoFieldDef::new("MQ", Number::Count(1), "RMS mapping quality")).unwrap();
     let qd_info = b
         .register_info(&InfoFieldDef::new(
             "QD",
             Number::Count(1),
-            ValueType::Float,
             "Variant confidence divided by unfiltered depth",
         ))
         .unwrap();
@@ -106,35 +90,18 @@ fn seqair_setup() -> SeqairSetup {
         .register_info(&InfoFieldDef::new(
             "FS",
             Number::Count(1),
-            ValueType::Float,
             "Phred-scaled p-value using Fisher's exact test for strand bias",
         ))
         .unwrap();
 
     let mut b = b.formats();
-    let gt_fmt = b
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt =
+        b.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let dp_fmt = b
-        .register_format(&FormatFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Approximate read depth",
-        ))
+        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Approximate read depth"))
         .unwrap();
     let gq_fmt = b
-        .register_format(&FormatFieldDef::new(
-            "GQ",
-            Number::Count(1),
-            ValueType::Integer,
-            "Genotype quality",
-        ))
+        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype quality"))
         .unwrap();
 
     let mut b = b.samples();

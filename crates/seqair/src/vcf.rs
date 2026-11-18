@@ -34,14 +34,14 @@
 //! let chr1 = builder.register_contig("chr1", ContigDef { length: Some(248_956_422) })?;
 //! let mut builder = builder.infos();
 //! let dp_info: InfoInt = builder.register_info(
-//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Total read depth")
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Total read depth")
 //! )?;
 //! let mut builder = builder.formats();
 //! let gt_fmt: FormatGt = builder.register_format(
-//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype")
 //! )?;
 //! let dp_fmt: FormatInt = builder.register_format(
-//!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Sample depth")
+//!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Sample depth")
 //! )?;
 //! let mut builder = builder.samples();
 //! builder.add_sample("sample1")?;
@@ -88,11 +88,11 @@
 //! let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
 //! let mut builder = builder.infos();
 //! let dp: InfoInt = builder.register_info(
-//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth")
 //! )?;
 //! let mut builder = builder.formats();
 //! let gt: FormatGt = builder.register_format(
-//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype")
 //! )?;
 //! let mut builder = builder.samples();
 //! builder.add_sample("sample1")?;
@@ -135,7 +135,7 @@
 //!
 //! // header metadata for the field, defined once
 //! const DP_DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::new(
-//!     "DP", vcf::Number::Count(1), vcf::ValueType::Integer, "Combined depth"
+//!     "DP", vcf::Number::Count(1), "Combined depth"
 //! );
 //!
 //! // all resolved keys your app will encode through
@@ -189,17 +189,17 @@ pub mod unified;
 pub(crate) mod writer;
 
 pub use alleles::Alleles;
-pub use error::{AllelesError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
+pub use error::{AllelesError, KeyError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
     ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef, Infos,
     Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
 };
 pub use record::Genotype;
 pub use record_encoder::{
-    Arr, ContigId, FieldDescription, FieldId, FilterFieldDef, FilterId, Flag, FormatEncoder,
-    FormatFieldDef, FormatFloat, FormatFloatOpts, FormatFloats, FormatGt, FormatInt, FormatInts,
-    FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats,
-    InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
+    Arr, ContigId, FieldDescription, FieldId, FieldKind, FilterFieldDef, FilterId, Flag,
+    FormatEncoder, FormatFieldDef, FormatFloat, FormatFloatOpts, FormatFloats, FormatGt, FormatInt,
+    FormatInts, FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat,
+    InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, Numeric, OptArr, Scalar, Str,
 };
 pub use unified::{
     Begun, CoordinateIndex, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer,

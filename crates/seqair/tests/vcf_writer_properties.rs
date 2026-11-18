@@ -13,7 +13,7 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, InfoFieldDef, InfoInt};
-use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, ValueType, VcfHeader, Writer};
+use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -53,9 +53,8 @@ fn make_simple_setup() -> SimpleSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let header = Arc::new(builder.build().unwrap());
     SimpleSetup { header, contig, dp_info }
 }
@@ -187,9 +186,8 @@ fn filter_serialization_correct(tc: TestCase) {
     let mut builder = builder.filters();
     let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
-    let _dp: InfoInt = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let _dp: InfoInt =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let header = Arc::new(builder.build().unwrap());
 
     let pos_typed = Pos1::new(pos).unwrap();

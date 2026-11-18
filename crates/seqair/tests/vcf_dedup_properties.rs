@@ -26,7 +26,7 @@ use hegel::prelude::*;
 use seqair::vcf::record_encoder::{Arr, Scalar, Str};
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, FormatFloats, FormatInt, InfoFieldDef, InfoFlag, InfoFloat,
-    InfoInt, InfoInts, InfoString, Number, OutputFormat, ValueType, VcfHeader, Writer,
+    InfoInt, InfoInts, InfoString, Number, OutputFormat, VcfHeader, Writer,
     record_encoder::{Flag, FormatFieldDef},
 };
 use seqair_types::{Base, Pos1};
@@ -67,36 +67,13 @@ fn info_header() -> (Arc<VcfHeader>, ContigId, InfoKeys) {
     let mut b = VcfHeader::builder();
     let contig = b.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
     let mut b = b.infos();
-    let dp = b
-        .register_info(&InfoFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "d",
-        ))
-        .unwrap();
-    let bq = b
-        .register_info(&InfoFieldDef::<Scalar<f32>>::new(
-            "BQ",
-            Number::Count(1),
-            ValueType::Float,
-            "q",
-        ))
-        .unwrap();
-    let ad = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
-            "AD",
-            Number::Unknown,
-            ValueType::Integer,
-            "a",
-        ))
-        .unwrap();
-    let sc = b
-        .register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), ValueType::String, "s"))
-        .unwrap();
-    let flag = b
-        .register_info(&InfoFieldDef::<Flag>::new("FL", Number::Count(0), ValueType::Flag, "f"))
-        .unwrap();
+    let dp =
+        b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d")).unwrap();
+    let bq =
+        b.register_info(&InfoFieldDef::<Scalar<f32>>::new("BQ", Number::Count(1), "q")).unwrap();
+    let ad = b.register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "a")).unwrap();
+    let sc = b.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "s")).unwrap();
+    let flag = b.register_info(&InfoFieldDef::<Flag>::new("FL", Number::Count(0), "f")).unwrap();
     let header = Arc::new(b.build().unwrap());
     (header, contig, InfoKeys { dp, bq, ad, sc, flag })
 }
@@ -201,29 +178,13 @@ fn fmt_header() -> (Arc<VcfHeader>, ContigId, FmtKeys) {
     let contig = b.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
     let mut b = b.formats();
     let dp = b
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "d",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d"))
         .unwrap();
     let q = b
-        .register_format(&FormatFieldDef::<Scalar<f32>>::new(
-            "GQ",
-            Number::Count(1),
-            ValueType::Float,
-            "q",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<f32>>::new("GQ", Number::Count(1), "q"))
         .unwrap();
-    let pl = b
-        .register_format(&FormatFieldDef::<Arr<f32>>::new(
-            "PL",
-            Number::Unknown,
-            ValueType::Float,
-            "p",
-        ))
-        .unwrap();
+    let pl =
+        b.register_format(&FormatFieldDef::<Arr<f32>>::new("PL", Number::Unknown, "p")).unwrap();
     let mut b = b.samples();
     b.add_sample("s0").unwrap();
     b.add_sample("s1").unwrap();

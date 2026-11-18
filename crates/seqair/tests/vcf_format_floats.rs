@@ -10,9 +10,7 @@
 )]
 
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatFloats, FormatGt, InfoFieldDef, InfoInt};
-use seqair::vcf::{
-    Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
-};
+use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -28,23 +26,15 @@ fn make_setup() -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt =
+        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let ml_fmt = builder
         .register_format(&FormatFieldDef::new(
             "ML",
             Number::AlternateBases,
-            ValueType::Float,
             "ML prediction per alt",
         ))
         .unwrap();
@@ -127,19 +117,12 @@ fn make_multi_setup(samples: &[&str]) -> MultiSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt = builder
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt =
+        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let vl_fmt = builder
         .register_format(&FormatFieldDef::new(
             "VL",
             Number::Unknown,
-            ValueType::Float,
             "Variable-length float list per sample",
         ))
         .unwrap();

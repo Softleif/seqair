@@ -19,9 +19,7 @@
 #[path = "../src/pinned.rs"]
 mod pinned;
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, Gt, InfoFieldDef, InfoInt, Scalar};
-use seqair::vcf::{
-    Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
-};
+use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -43,21 +41,11 @@ fn make_index_setup() -> IndexSetup {
     let chr2 = builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
     let mut builder = builder.infos();
     let dp_info: InfoInt = builder
-        .register_info(&InfoFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Depth",
-        ))
+        .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth"))
         .unwrap();
     let mut builder = builder.formats();
     let gt_fmt: FormatGt = builder
-        .register_format(&FormatFieldDef::<Gt>::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
+        .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();
@@ -337,18 +325,11 @@ fn write_generated_vcf(
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info: InfoInt = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp_info: InfoInt =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt: FormatGt = builder
-        .register_format(&FormatFieldDef::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
-        .unwrap();
+    let gt_fmt: FormatGt =
+        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
     let mut builder = builder.samples();
     builder.add_sample("s1").unwrap();
     let header = Arc::new(builder.build().unwrap());
@@ -605,9 +586,8 @@ fn write_large_vcf(
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef { length: Some(100_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp: InfoInt = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp: InfoInt =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let header = Arc::new(builder.formats().samples().build().unwrap());
     let vcf_path = dir.join(if format == OutputFormat::Bcf { "large.bcf" } else { "large.vcf.gz" });
     let mut writer = Writer::new(std::fs::File::create(&vcf_path).unwrap(), format)

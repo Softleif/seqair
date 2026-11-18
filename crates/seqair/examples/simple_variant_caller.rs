@@ -31,8 +31,8 @@ use clap::Parser as _;
 use seqair::bam::pileup::PileupOp;
 use seqair::reader::{Readers, ResolveTid, SegmentOptions};
 use seqair::vcf::{
-    Alleles, FormatGt, FormatInt, Genotype, InfoInt, Number, OutputFormat, ValueType,
-    VcfHeaderBuilder, Writer,
+    Alleles, FormatGt, FormatInt, Genotype, InfoInt, Number, OutputFormat, VcfHeaderBuilder,
+    Writer,
     record_encoder::{Arr, FormatFieldDef, Gt, InfoFieldDef, Scalar},
 };
 use seqair_types::{Base, RegionString};
@@ -165,29 +165,19 @@ fn main() -> anyhow::Result<()> {
     let dp_info: InfoInt = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
         "DP",
         Number::Count(1),
-        ValueType::Integer,
         "Total depth",
     ))?;
-    let af_info: seqair::vcf::InfoFloats =
-        builder.register_info(&InfoFieldDef::<Arr<f32>>::new(
-            "AF",
-            Number::AlternateBases,
-            ValueType::Float,
-            "Allele frequency",
-        ))?;
+    let af_info: seqair::vcf::InfoFloats = builder.register_info(
+        &InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "Allele frequency"),
+    )?;
 
     // FORMAT fields: GT (genotype), DP (sample depth), AD (allelic depths)
     let mut builder = builder.formats();
-    let gt_fmt: FormatGt = builder.register_format(&FormatFieldDef::<Gt>::new(
-        "GT",
-        Number::Count(1),
-        ValueType::String,
-        "Genotype",
-    ))?;
+    let gt_fmt: FormatGt =
+        builder.register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))?;
     let dp_fmt: FormatInt = builder.register_format(&FormatFieldDef::<Scalar<i32>>::new(
         "DP",
         Number::Count(1),
-        ValueType::Integer,
         "Sample depth",
     ))?;
 

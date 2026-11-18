@@ -17,7 +17,7 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
-use seqair::vcf::header::{ContigDef, Number, ValueType};
+use seqair::vcf::header::{ContigDef, Number};
 use seqair::vcf::record::Genotype;
 use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 use seqair::vcf::{
@@ -42,60 +42,28 @@ fn rich_setup() -> RichSetup {
         builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Total Depth",
-        ))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
     let _af_info: InfoFloat = builder
-        .register_info(&InfoFieldDef::new(
-            "AF",
-            Number::AlternateBases,
-            ValueType::Float,
-            "Allele Frequency",
-        ))
+        .register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "Allele Frequency"))
         .unwrap();
     let _ad_info: InfoInts = builder
-        .register_info(&InfoFieldDef::new(
-            "AD",
-            Number::ReferenceAlternateBases,
-            ValueType::Integer,
-            "Allele Depth",
-        ))
+        .register_info(&InfoFieldDef::new("AD", Number::ReferenceAlternateBases, "Allele Depth"))
         .unwrap();
     let _db_flag: InfoFlag = builder
-        .register_info(&InfoFieldDef::new(
-            "DB",
-            Number::Count(0),
-            ValueType::Flag,
-            "dbSNP membership",
-        ))
+        .register_info(&InfoFieldDef::new("DB", Number::Count(0), "dbSNP membership"))
         .unwrap();
     let mut builder = builder.formats();
     let gt_fmt = builder
-        .register_format(&FormatFieldDef::<Gt>::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
+        .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
         .unwrap();
     let dp_fmt = builder
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Read Depth",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Read Depth"))
         .unwrap();
     let _gq_fmt: FormatInt = builder
         .register_format(&FormatFieldDef::<Scalar<i32>>::new(
             "GQ",
             Number::Count(1),
-            ValueType::Integer,
             "Genotype Quality",
         ))
         .unwrap();
@@ -320,9 +288,8 @@ fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info: InfoInt = builder
-        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-        .unwrap();
+    let dp_info: InfoInt =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
     let header = Arc::new(builder.build().unwrap());
 
     let pos = Pos1::new(pos).unwrap();
@@ -361,30 +328,14 @@ fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatI
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     let mut builder = builder.infos();
-    let dp_info = builder
-        .register_info(&InfoFieldDef::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Total Depth",
-        ))
-        .unwrap();
+    let dp_info =
+        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
     let mut builder = builder.formats();
     let gt_fmt = builder
-        .register_format(&FormatFieldDef::<Gt>::new(
-            "GT",
-            Number::Count(1),
-            ValueType::String,
-            "Genotype",
-        ))
+        .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
         .unwrap();
     let dp_fmt = builder
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
-            "DP",
-            Number::Count(1),
-            ValueType::Integer,
-            "Read Depth",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Read Depth"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("S1").unwrap();
