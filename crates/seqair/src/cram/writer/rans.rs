@@ -308,7 +308,7 @@ fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
         return None;
     }
     with_scratch(&ORDER_1, |o1| {
-        let table = order_1_tables(o1, data);
+        let table = order_1_tables(o1, data, level);
         let enc = &*o1.enc;
         with_scratch(&WORDS, |scratch| {
             let mut words = Words::new(scratch, data.len())?;
@@ -326,7 +326,7 @@ fn fast_order_1(data: &[u8], raw_len: u32, level: Level) -> Option<Vec<u8>> {
     clippy::arithmetic_side_effects,
     reason = "counts ≤ data.len() < 2^32; each quarter start was counted once as a pair"
 )]
-fn order_1_tables(o1: &mut Order1Scratch, data: &[u8]) -> Vec<u8> {
+fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], level: Level) -> Vec<u8> {
     for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
         for c in &mut o1.counts {
             c[ctx << 8..][..256].fill(0);
@@ -337,9 +337,7 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8]) -> Vec<u8> {
     // Every context is a byte of `data`, or 0 at a quarter's start.
     let mut contexts = [false; 256];
     contexts[0] = true;
-    for &b in data {
-        contexts[usize::from(b)] = true;
-    }
+    simd::mark_present(level, data, &mut contexts);
     o1.dirty = contexts;
 
     let Some((&first, rest)) = data.split_first() else {
@@ -571,6 +569,26 @@ mod tests {
             data.extend(std::iter::repeat_n(b, run.min(len - data.len())));
         }
         data
+    }
+
+    // r[verify cram_writer.rans4x8.simd]
+    /// The byte marking finds every value a block holds and no other,
+    /// keeping the ones marked before.
+    #[hegel::test]
+    fn marking_finds_every_byte_value(tc: TestCase) {
+        let data = tc.draw(arb_block());
+        let preset: u8 = tc.draw(gs::integers::<u8>());
+        let mut expected = [false; 256];
+        expected[usize::from(preset)] = true;
+        for &b in &data {
+            expected[usize::from(b)] = true;
+        }
+        for level in crate::simd_levels::levels() {
+            let mut present = [false; 256];
+            present[usize::from(preset)] = true;
+            simd::mark_present(level, &data, &mut present);
+            assert_eq!(present, expected, "{level:?}");
+        }
     }
 
     // r[verify cram_writer.rans4x8.fast]
