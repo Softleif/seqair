@@ -10,6 +10,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use std::str::Utf8Error;
 
+use super::values::GtAllele;
 use crate::io::text_scan::find_byte;
 use crate::vcf::bcf_encoding::{
     BCF_BT_CHAR, BCF_BT_FLOAT, BCF_BT_INT8, BCF_BT_INT16, BCF_BT_INT32, BCF_BT_NULL,
@@ -50,6 +51,9 @@ pub enum BcfValueError {
 
     #[error("BCF string is not UTF-8")]
     Utf8(#[from] Utf8Error),
+
+    #[error("BCF genotype value {value} is negative or names an allele above 65535")]
+    InvalidGenotype { value: i32 },
 }
 
 /// The type of a BCF typed value.
@@ -194,6 +198,18 @@ impl<'a> TypedValue<'a> {
     /// The elements as floats.
     pub(crate) fn floats(self) -> Result<BcfVec<'a, f32>, BcfValueError> {
         BcfVec::new(self)
+    }
+
+    // r[impl vcf_values.gt]
+    /// One sample's GT vector. `first_phase_is_read` is false for VCF 4.3 and
+    /// earlier, whose first allele's phase bit is treated as unphased
+    /// (`r[vcf_record.gt_first_phase]`).
+    pub(crate) fn gt(self, first_phase_is_read: bool) -> Result<BcfGt<'a>, BcfValueError> {
+        let alleles = self.ints()?;
+        for value in alleles.clone().flatten() {
+            gt_allele(value)?;
+        }
+        Ok(BcfGt { alleles, first: true, first_phase_is_read })
     }
 
     // r[impl vcf_values.text_strings]
@@ -386,6 +402,52 @@ impl<T: BcfNumber> Iterator for BcfVec<'_, T> {
 }
 
 impl<T: BcfNumber> ExactSizeIterator for BcfVec<'_, T> {}
+
+/// The allele of a GT element `(allele + 1) << 1 | phased`: `None` for `.`.
+fn gt_allele(value: i32) -> Result<Option<u16>, BcfValueError> {
+    if value < 0 {
+        return Err(BcfValueError::InvalidGenotype { value });
+    }
+    match value >> 1 {
+        0 => Ok(None),
+        n => u16::try_from(n.saturating_sub(1))
+            .map(Some)
+            .map_err(|_| BcfValueError::InvalidGenotype { value }),
+    }
+}
+
+// r[impl vcf_values.gt]
+/// One sample's GT alleles, each with its phase bit; a ploidy below the
+/// field's is padded with end-of-vector, which ends it. The int missing value
+/// (htslib's fill for a sample without GT) is a missing, unphased allele.
+#[derive(Debug, Clone)]
+pub(crate) struct BcfGt<'a> {
+    alleles: BcfVec<'a, i32>,
+    first: bool,
+    first_phase_is_read: bool,
+}
+
+impl Iterator for BcfGt<'_> {
+    type Item = GtAllele;
+
+    fn next(&mut self) -> Option<GtAllele> {
+        let element = self.alleles.next()?;
+        let first = core::mem::replace(&mut self.first, false);
+        let Some(value) = element else {
+            return Some(GtAllele { allele: None, phased: false });
+        };
+        let allele = gt_allele(value);
+        debug_assert!(allele.is_ok(), "gt() checked every element");
+        let phased = value & 1 == 1 && (self.first_phase_is_read || !first);
+        Some(GtAllele { allele: allele.unwrap_or(None), phased })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.alleles.size_hint()
+    }
+}
+
+impl ExactSizeIterator for BcfGt<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -652,5 +714,24 @@ mod tests {
             assert_eq!(read_typed_int(&buf).unwrap(), (i32::try_from(key).unwrap(), buf.len()));
         }
         assert!(matches!(read_typed_int(&[0x13, 1]), Err(BcfValueError::Truncated { .. })));
+    }
+
+    // r[verify vcf_values.gt]
+    #[test]
+    fn malformed_bcf_genotypes_are_typed_errors() {
+        fn gt(bytes: &[u8]) -> Result<BcfGt<'_>, BcfValueError> {
+            TypedValue::parse(bytes)?.0.gt(true)
+        }
+        assert!(matches!(
+            gt(&[0x21, 0x02, 0xFB]),
+            Err(BcfValueError::InvalidGenotype { value: -5 })
+        ));
+        let mut too_big = vec![0x13];
+        too_big.extend_from_slice(&((65537i32 << 1) | 1).to_le_bytes());
+        assert!(matches!(gt(&too_big), Err(BcfValueError::InvalidGenotype { value: 131_075 })));
+        assert!(matches!(gt(&[0x15, 0, 0, 0, 0]), Err(BcfValueError::NotInteger { .. })));
+        // An empty GT has no alleles.
+        assert_eq!(gt(&[0x01]).unwrap().len(), 0);
+        assert_eq!(gt(&[0x11, 0x81]).unwrap().len(), 0);
     }
 }

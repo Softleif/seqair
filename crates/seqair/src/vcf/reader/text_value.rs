@@ -5,6 +5,7 @@ use core::marker::PhantomData;
 use core::num::IntErrorKind;
 use std::str::Utf8Error;
 
+use super::values::GtAllele;
 use crate::io::text_scan::find_byte;
 
 /// Malformed VCF text values.
@@ -22,6 +23,12 @@ pub enum TextValueError {
 
     #[error("string value is not UTF-8")]
     Utf8(#[from] Utf8Error),
+
+    #[error("not a genotype (alleles as digits or `.`, separated by `/` or `|`)")]
+    InvalidGenotype,
+
+    #[error("genotype allele index above 65535")]
+    GenotypeAlleleOutOfRange,
 }
 
 /// A number VCF text holds, `.` being missing.
@@ -137,6 +144,98 @@ impl<T: TextNumber> Iterator for TextVec<'_, T> {
 
 impl<T: TextNumber> ExactSizeIterator for TextVec<'_, T> {}
 
+/// The allele before the first `/` or `|` of `rest`, whether that separator
+/// is `|`, and what follows it. Genotypes are a few bytes, so this is scalar.
+#[inline]
+fn split_allele(rest: &[u8]) -> (&[u8], Option<(bool, &[u8])>) {
+    match rest.iter().position(|&b| b == b'/' || b == b'|') {
+        Some(i) => (
+            rest.get(..i).unwrap_or_default(),
+            rest.get(i..).and_then(|sep| Some((*sep.first()? == b'|', sep.get(1..)?))),
+        ),
+        None => (rest, None),
+    }
+}
+
+/// One allele: decimal digits, or `.` for missing.
+fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
+    if token == b"." {
+        return Ok(None);
+    }
+    if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
+        return Err(TextValueError::InvalidGenotype);
+    }
+    let s = std::str::from_utf8(token).map_err(|_| TextValueError::InvalidGenotype)?;
+    s.parse().map(Some).map_err(|_| TextValueError::GenotypeAlleleOutOfRange)
+}
+
+// r[impl vcf_values.gt]
+/// A text GT (`0/1`, `0|1`, `.`, `./.`, `1`, `0/1|2`, VCF 4.4's `|0|1`),
+/// allele by allele, checked once by [`TextGt::new`].
+#[derive(Debug, Clone)]
+pub(crate) struct TextGt<'a> {
+    /// The alleles not yet yielded; `None` once all are.
+    rest: Option<&'a [u8]>,
+    len: usize,
+    /// The phase of the next allele.
+    phased: bool,
+}
+
+impl<'a> TextGt<'a> {
+    // r[impl vcf_record.gt_first_phase]
+    /// `gt` checked and its first allele's phase settled: with
+    /// `first_phase_is_read` (VCF 4.4 and later) a leading `|` or `/` gives
+    /// it; without one, htslib's rule infers it — a haploid allele is phased
+    /// unless it is `.`, a longer genotype is phased iff every separator is
+    /// `|` — so text and htslib-written BCF agree. Before 4.4 it is unphased.
+    pub(crate) fn new(gt: &'a [u8], first_phase_is_read: bool) -> Result<Self, TextValueError> {
+        let (prefix, body) = match gt.split_first() {
+            Some((&b'|', body)) => (Some(true), body),
+            Some((&b'/', body)) => (Some(false), body),
+            _ => (None, gt),
+        };
+        let mut len = 0usize;
+        let mut all_phased = true;
+        let mut first_missing = false;
+        let mut rest = Some(body);
+        while let Some(r) = rest {
+            let (token, sep) = split_allele(r);
+            let allele = parse_allele(token)?;
+            if len == 0 {
+                first_missing = allele.is_none();
+            }
+            len = len.saturating_add(1);
+            rest = sep.map(|(phased, tail)| {
+                all_phased &= phased;
+                tail
+            });
+        }
+        let phased = first_phase_is_read
+            && prefix.unwrap_or(if len == 1 { !first_missing } else { all_phased });
+        Ok(Self { rest: Some(body), len, phased })
+    }
+}
+
+impl Iterator for TextGt<'_> {
+    type Item = GtAllele;
+
+    fn next(&mut self) -> Option<GtAllele> {
+        let (token, sep) = split_allele(self.rest?);
+        let phased = self.phased;
+        (self.phased, self.rest) = sep.map_or((false, None), |(p, tail)| (p, Some(tail)));
+        self.len = self.len.saturating_sub(1);
+        let allele = parse_allele(token);
+        debug_assert!(allele.is_ok(), "new() checked every allele");
+        Some(GtAllele { allele: allele.unwrap_or(None), phased })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl ExactSizeIterator for TextGt<'_> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +346,24 @@ mod tests {
         assert!(matches!(TextVec::<f32>::new(b"0.5,abc"), Err(TextValueError::InvalidFloat)));
         let v = TextVec::<f32>::new(b".,0.5,Inf").unwrap();
         assert_eq!(v.collect::<Vec<_>>(), [None, Some(0.5), Some(f32::INFINITY)]);
+    }
+
+    // r[verify vcf_values.gt]
+    #[test]
+    fn malformed_text_genotypes_are_typed_errors() {
+        for bad in
+            ["", "/", "|", "0/", "0//1", "/|0", "a", "-1", "+1", "0/1 ", "0\\1", "0,1", "0:1"]
+        {
+            assert!(
+                matches!(TextGt::new(bad.as_bytes(), true), Err(TextValueError::InvalidGenotype)),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            TextGt::new(b"0/65536", true),
+            Err(TextValueError::GenotypeAlleleOutOfRange)
+        ));
+        let gt: Vec<_> = TextGt::new(b"65535|00", true).unwrap().map(|a| a.allele).collect();
+        assert_eq!(gt, [Some(65535), Some(0)]);
     }
 }
