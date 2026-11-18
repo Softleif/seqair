@@ -141,7 +141,8 @@ fn check_against_bcftools(name: &str) {
     let Some(text) = bcftools(&["view", "-H", path_str]) else { return };
     let Some(ends) = bcftools(&["query", "-f", "%END\n", path_str]) else { return };
     let file = VcfFile::open(&path).unwrap();
-    assert!(file.has_index());
+    // A tabix index is not read yet (the region query phase reads it).
+    assert_eq!(file.has_index(), name.ends_with(".bcf"));
     let header = file.header();
     let samples: Vec<_> = header.sample_indices().collect();
     let mut reader = file.reader::<FullRecord>().open().unwrap();
@@ -230,6 +231,16 @@ fn rastair_bcf_reads_as_bcftools_prints_it() {
 #[test]
 fn panel_bcf_reads_as_bcftools_prints_it() {
     check_against_bcftools("panel.bcf");
+}
+
+#[test]
+fn rastair_vcf_gz_reads_as_bcftools_prints_it() {
+    check_against_bcftools("rastair.vcf.gz");
+}
+
+#[test]
+fn truth_vcf_gz_reads_as_bcftools_prints_it() {
+    check_against_bcftools("truth.vcf.gz");
 }
 
 // ── Fixtures through every way of reading ──────────────────────────────
@@ -741,10 +752,16 @@ fn formats_are_detected_and_refused_by_content() {
     w.write_all(b"BCF\x02\x01").unwrap();
     bcf21.clone_from(&w.finish().unwrap());
     assert!(matches!(VcfFile::from_bytes(bcf21, None), Err(VcfReadError::Bcf21)));
-    assert!(matches!(
-        VcfFile::from_bytes(HEADER.as_bytes().to_vec(), None),
-        Err(VcfReadError::Unsupported { .. })
-    ));
+    let plain = VcfFile::from_bytes(HEADER.as_bytes().to_vec(), None).unwrap();
+    assert_eq!(plain.format(), seqair::vcf::reader::VcfFormat::Vcf);
+    let mut w = BgzfWriter::new(Vec::new());
+    w.write_all(HEADER.as_bytes()).unwrap();
+    let gz = VcfFile::from_bytes(w.finish().unwrap(), None).unwrap();
+    assert_eq!(gz.format(), seqair::vcf::reader::VcfFormat::VcfGz);
+    assert_eq!(
+        VcfFile::from_bytes(bcf(&[]), None).unwrap().format(),
+        seqair::vcf::reader::VcfFormat::Bcf
+    );
     assert!(matches!(
         VcfFile::from_bytes(b"hello".to_vec(), None),
         Err(VcfReadError::UnknownFormat)

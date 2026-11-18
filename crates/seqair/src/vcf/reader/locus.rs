@@ -43,8 +43,19 @@ pub struct Locus {
 impl Locus {
     /// A record's locus from its 0-based BCF position and reference length.
     pub(crate) fn from_bcf(contig: ContigId, pos: i32, rlen: i32) -> Result<Self, RecordError> {
-        let start = i64::from(pos).saturating_add(1);
-        let end = start.saturating_add(i64::from(rlen)).saturating_sub(1);
+        Self::from_zero_based(contig, i64::from(pos), i64::from(rlen))
+    }
+
+    // r[impl vcf_values.rlen]
+    /// A record's locus from its 0-based position (−1 for the telomere) and
+    /// reference length: the end is `start + rlen − 1`.
+    pub(crate) fn from_zero_based(
+        contig: ContigId,
+        pos: i64,
+        rlen: i64,
+    ) -> Result<Self, RecordError> {
+        let start = pos.saturating_add(1);
+        let end = start.saturating_add(rlen).saturating_sub(1);
         let start = VcfPos::from_one_based(start).ok_or(RecordError::InvalidPosition { pos })?;
         let end = VcfPos::from_one_based(end).ok_or(RecordError::InvalidSpan { pos, rlen })?;
         Ok(Self { contig, start, end })
@@ -80,14 +91,8 @@ impl Fields for Locus {
     }
 
     fn fill(&mut self, _: &HeaderId, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        let (start, end) = raw.span()?;
-        let contig = raw.contig();
-        // Sorted files change contig rarely: compare before cloning.
-        if self.contig != *contig {
-            self.contig = contig.clone();
-        }
-        self.start = start;
-        self.end = end;
+        // `locus` clones the contig: a `SmolStr` of a name is inline.
+        *self = raw.locus()?;
         Ok(())
     }
 }

@@ -40,7 +40,6 @@ impl<'a, T: Number> OptValues<'a, T> {
         Self(Repr::Bcf(v))
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
     pub(crate) fn text(v: TextVec<'a, T>) -> Self {
         Self(Repr::Text(v))
     }
@@ -176,7 +175,6 @@ pub struct GtAllele {
 #[derive(Debug, Clone)]
 pub(crate) enum GtAlleles<'a> {
     Bcf(BcfGt<'a>),
-    #[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
     Text(TextGt<'a>),
 }
 

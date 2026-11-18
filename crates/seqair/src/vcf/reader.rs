@@ -24,12 +24,11 @@ mod index;
 mod info;
 mod locus;
 mod raw;
+mod rlen;
 mod samples;
 mod site;
 mod stream;
-#[cfg_attr(not(test), expect(dead_code, reason = "the VCF text reader (next commit)"))]
 mod text_keys;
-#[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
 pub(crate) mod text_value;
 pub(crate) mod values;
 
@@ -46,6 +45,6 @@ pub use locus::{Locus, VcfPos};
 pub use raw::RawRecord;
 pub use samples::{Column, OnlySample, Sample, SampleRef, Samples, SamplesRef};
 pub use site::{Allele, AllelesRef, FailedFilters, FilterStatus, FiltersRef, Site, SiteRef};
-pub use stream::{IntoRecords, MAX_RECORD_BYTES, Reader, ReaderBuilder, Records};
+pub use stream::{IntoRecords, MAX_LINE_BYTES, MAX_RECORD_BYTES, Reader, ReaderBuilder, Records};
 pub use text_value::TextValueError;
 pub use values::{GenotypeRef, GtAllele, MissingElement, OptValues, Values};

@@ -1,9 +1,12 @@
 //! [`VcfFile`]: a VCF/BCF file opened once — format, header, index and the
 //! tables every reader of it shares (`r[vcf_reader.file]`).
 
+use super::error::KeyKind;
 use super::error::{VcfFormat, VcfReadError};
 use super::fields::Fields;
+use super::rlen::RlenKeys;
 use super::stream::ReaderBuilder;
+use super::text_keys::TextKeys;
 use crate::bam::bgzf::{BgzfStream, VirtualOffset, find_bsize};
 use crate::bam::csi_index::CsiIndex;
 use crate::vcf::field_set::FieldSet;
@@ -11,7 +14,7 @@ use crate::vcf::header::{MAX_HEADER_TEXT, VcfHeader, VcfVersion};
 use crate::vcf::record_encoder::{ContigId, FilterId};
 use seqair_types::SmolStr;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -59,6 +62,22 @@ impl Read for Input {
     }
 }
 
+impl BufRead for Input {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        match self {
+            Self::File(f) => f.fill_buf(),
+            Self::Bytes(b) => b.fill_buf(),
+        }
+    }
+
+    fn consume(&mut self, n: usize) {
+        match self {
+            Self::File(f) => f.consume(n),
+            Self::Bytes(b) => b.consume(n),
+        }
+    }
+}
+
 impl Seek for Input {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         match self {
@@ -73,8 +92,8 @@ impl Seek for Input {
 pub(crate) enum DataStart {
     /// At this virtual offset.
     At(VirtualOffset),
-    /// This many decompressed bytes from the start (an offset the stream
-    /// could not name).
+    /// This many (decompressed) bytes from the start: in a plain file, or
+    /// at an offset the stream could not name.
     After(u64),
 }
 
@@ -82,6 +101,7 @@ pub(crate) enum DataStart {
 #[derive(Debug)]
 pub(crate) struct FileShared {
     source: Source,
+    pub(crate) format: VcfFormat,
     pub(crate) header: VcfHeader,
     pub(crate) data_start: DataStart,
     index: Option<CsiIndex>,
@@ -93,7 +113,12 @@ pub(crate) struct FileShared {
     pub(crate) format_ids: FieldSet,
     /// Whether a GT's first phase bit is read (VCF 4.4 and later).
     pub(crate) first_phase_is_read: bool,
+    /// VCF text: FILTER/INFO/FORMAT names to dictionary ids.
+    pub(crate) keys: TextKeys,
+    /// VCF text: which of END, SVLEN and LEN set the reference length.
+    pub(crate) rlen_keys: RlenKeys,
     warned_duplicate: AtomicBool,
+    warned_undeclared: AtomicBool,
 }
 
 impl Source {
@@ -111,6 +136,25 @@ impl FileShared {
     /// A fresh handle on the file's bytes, at their start.
     pub(crate) fn open_input(&self) -> Result<Input, VcfReadError> {
         self.source.open()
+    }
+
+    /// Whether records are VCF text (plain or BGZF).
+    pub(crate) fn is_text(&self) -> bool {
+        self.format != VcfFormat::Bcf
+    }
+
+    // r[impl vcf_reader.undeclared]
+    /// Log, once per file, that a record uses `key`, which the header does
+    /// not declare as a `kind` field.
+    pub(crate) fn warn_undeclared(&self, kind: KeyKind, key: &[u8]) {
+        if !self.warned_undeclared.swap(true, Ordering::Relaxed) {
+            warn!(
+                %kind,
+                key = std::str::from_utf8(key).ok(),
+                "a record uses a key the header does not declare; it is ignored \
+                 (further undeclared keys in this file are ignored too, unreported)"
+            );
+        }
     }
 
     // r[impl vcf_values.duplicates]
@@ -155,14 +199,18 @@ impl VcfFile {
     }
 
     fn new(source: Source, index: Option<CsiIndex>) -> Result<Self, VcfReadError> {
-        let (header, data_start) = read_header(source.open()?)?;
+        let (format, header, data_start) = read_header(source.open()?)?;
         let shared = FileShared {
             info_ids: declared(&header, header.infos().keys()),
             format_ids: declared(&header, header.formats().keys()),
             contigs: ContigTable::new(&header),
             filters: filter_table(&header),
             first_phase_is_read: header.version() >= VcfVersion::V4_4,
+            keys: TextKeys::new(header.string_map().iter()),
+            rlen_keys: RlenKeys::new(&header),
             warned_duplicate: AtomicBool::new(false),
+            warned_undeclared: AtomicBool::new(false),
+            format,
             source,
             header,
             data_start,
@@ -175,6 +223,11 @@ impl VcfFile {
     /// The file's header, as [`Writer::write_header`](crate::vcf::Writer::write_header) takes it.
     pub fn header(&self) -> &VcfHeader {
         &self.0.header
+    }
+
+    /// The file's format, as detected from its content.
+    pub fn format(&self) -> VcfFormat {
+        self.0.format
     }
 
     /// Whether an index was found (or given) and parsed.
@@ -248,27 +301,40 @@ fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> 
         return Err(VcfReadError::Bcf21);
     }
     if start.starts_with(VCF_MAGIC) {
-        let format = if compressed { VcfFormat::VcfGz } else { VcfFormat::Vcf };
-        return Err(VcfReadError::Unsupported { format });
+        return Ok(if compressed { VcfFormat::VcfGz } else { VcfFormat::Vcf });
     }
     Err(VcfReadError::UnknownFormat)
 }
 
 /// Detect the format, read the header, and find where records start.
-fn read_header(mut input: Input) -> Result<(VcfHeader, DataStart), VcfReadError> {
+fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart), VcfReadError> {
     let mut prefix = Vec::with_capacity(64);
     (&mut input).take(64).read_to_end(&mut prefix).map_err(read_failed)?;
     input.seek(SeekFrom::Start(0)).map_err(read_failed)?;
     match container(&prefix) {
-        Container::Gzip => return Err(VcfReadError::NotBgzf),
+        Container::Gzip => Err(VcfReadError::NotBgzf),
         Container::Plain => {
-            format_of(&prefix, false)?;
-            return Err(VcfReadError::UnknownFormat);
+            let format = format_of(&prefix, false)?;
+            let (header, len) = read_text_header(&mut input)?;
+            Ok((format, header, DataStart::After(len)))
         }
-        Container::Bgzf => {}
+        Container::Bgzf => {
+            let mut stream = BgzfStream::new(input);
+            let format = format_of(stream.fill()?, true)?;
+            let (header, len) = if format == VcfFormat::Bcf {
+                read_bcf_header(&mut stream)?
+            } else {
+                read_text_header(&mut stream)?
+            };
+            stream.fill()?;
+            let start = stream.virtual_offset().map_or(DataStart::After(len), DataStart::At);
+            Ok((format, header, start))
+        }
     }
-    let mut stream = BgzfStream::new(input);
-    format_of(stream.fill()?, true)?;
+}
+
+/// A BCF header after its magic, and the bytes it took.
+fn read_bcf_header(stream: &mut BgzfStream<Input>) -> Result<(VcfHeader, u64), VcfReadError> {
     stream.advance(BCF_MAGIC.len());
     let mut l_text = [0u8; 4];
     stream.read_exact_into(&mut l_text)?;
@@ -284,10 +350,38 @@ fn read_header(mut input: Input) -> Result<(VcfHeader, DataStart), VcfReadError>
     let text =
         std::str::from_utf8(&text).map_err(|source| VcfReadError::HeaderNotUtf8 { source })?;
     let header = VcfHeader::parse(text)?;
-    stream.fill()?;
-    let header_len = (BCF_MAGIC.len() as u64).saturating_add(4).saturating_add(l_text as u64);
-    let start = stream.virtual_offset().map_or(DataStart::After(header_len), DataStart::At);
-    Ok((header, start))
+    let len = (BCF_MAGIC.len() as u64).saturating_add(4).saturating_add(l_text as u64);
+    Ok((header, len))
+}
+
+/// A VCF text header: the `##` lines through the `#CHROM` line, and the
+/// bytes they took. A line that is not a header line ends it, and
+/// [`VcfHeader::parse`] says what is missing.
+fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64), VcfReadError> {
+    let mut text = Vec::new();
+    loop {
+        let start = text.len();
+        // r[impl vcf_reader.limits]
+        let room = (MAX_HEADER_TEXT.saturating_sub(start) as u64).saturating_add(1);
+        let peek = input.fill_buf().map_err(read_failed)?;
+        if peek.first().is_some_and(|&b| b != b'#') {
+            break;
+        }
+        let n = (&mut *input).take(room).read_until(b'\n', &mut text).map_err(read_failed)?;
+        if text.len() > MAX_HEADER_TEXT {
+            let len = text.len();
+            return Err(
+                crate::vcf::VcfHeaderError::TextTooLarge { len, max: MAX_HEADER_TEXT }.into()
+            );
+        }
+        if n == 0 || text.get(start..).is_some_and(|line| line.starts_with(b"#CHROM")) {
+            break;
+        }
+    }
+    let len = text.len() as u64;
+    let text =
+        std::str::from_utf8(&text).map_err(|source| VcfReadError::HeaderNotUtf8 { source })?;
+    Ok((VcfHeader::parse(text)?, len))
 }
 
 fn read_failed(source: std::io::Error) -> VcfReadError {
@@ -328,7 +422,6 @@ impl ContigTable {
 
     /// The contig a VCF text record's `CHROM` names, added (with one `warn!`
     /// per file) if neither the header nor the index declares it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "VCF text records (next phase)"))]
     pub(crate) fn by_name(&self, header: &VcfHeader, name: &str) -> ContigId {
         if let Some(id) =
             header.contig_map().get(name).and_then(|rid| self.by_rid.get(rid)?.clone())
@@ -388,10 +481,8 @@ mod tests {
         assert!(matches!(container(b"BCF\x02\x02"), Container::Plain));
         assert!(matches!(format_of(b"BCF\x02\x02", false), Err(VcfReadError::UncompressedBcf)));
         assert!(matches!(format_of(b"BCF\x02\x01", true), Err(VcfReadError::Bcf21)));
-        assert!(matches!(
-            format_of(b"##fileformat=VCFv4.2", false),
-            Err(VcfReadError::Unsupported { format: VcfFormat::Vcf })
-        ));
+        assert!(matches!(format_of(b"##fileformat=VCFv4.2", false), Ok(VcfFormat::Vcf)));
+        assert!(matches!(format_of(b"##fileformat=VCFv4.2", true), Ok(VcfFormat::VcfGz)));
         assert!(matches!(format_of(b"BCF\x02\x02", true), Ok(VcfFormat::Bcf)));
         assert!(matches!(format_of(b"hello", true), Err(VcfReadError::UnknownFormat)));
         // A gzip member without BGZF's extra field.

@@ -25,7 +25,7 @@ pub enum VcfReadError {
     #[error(transparent)]
     Header(#[from] VcfHeaderError),
 
-    #[error("the BCF header text is not UTF-8")]
+    #[error("the header text is not UTF-8")]
     HeaderNotUtf8 { source: Utf8Error },
 
     #[error(transparent)]
@@ -46,9 +46,6 @@ pub enum VcfReadError {
 
     #[error("the input is neither VCF nor BCF")]
     UnknownFormat,
-
-    #[error("reading {format} is not supported yet")]
-    Unsupported { format: VcfFormat },
 
     /// A record is malformed: `ordinal` counts records from 0, `offset` is
     /// where it starts in a BGZF file.
@@ -112,11 +109,14 @@ impl std::fmt::Display for RecordSection {
     }
 }
 
-/// A part of a BCF record, to say where a value was malformed.
+/// A part of a record, to say where a value was malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordPart {
+    Chrom,
+    Pos,
     Id,
     Alleles,
+    Qual,
     Filter,
     Info,
     Format,
@@ -125,8 +125,11 @@ pub enum RecordPart {
 impl std::fmt::Display for RecordPart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Chrom => "CHROM",
+            Self::Pos => "POS",
             Self::Id => "ID",
             Self::Alleles => "alleles",
+            Self::Qual => "QUAL",
             Self::Filter => "FILTER",
             Self::Info => "INFO",
             Self::Format => "FORMAT",
@@ -170,14 +173,31 @@ pub enum RecordError {
     #[error("contig index {index} is not in the header's contig dictionary")]
     UnknownContig { index: i32 },
 
-    #[error("POS {pos} (0-based) is before the telomere")]
-    InvalidPosition { pos: i32 },
+    #[error("POS {pos} (0-based) is before the telomere or past 2^31-2")]
+    InvalidPosition { pos: i64 },
 
-    #[error("POS {pos} (0-based) with rlen {rlen} ends outside 1..=2^31-1")]
-    InvalidSpan { pos: i32, rlen: i32 },
+    #[error("POS {pos} (0-based) with rlen {rlen} ends outside 0..=2^31-1")]
+    InvalidSpan { pos: i64, rlen: i64 },
 
     #[error("the record has {found} samples, the header {expected}")]
     SampleCount { found: u32, expected: usize },
+
+    // r[impl vcf_reader.limits]
+    #[error("the line is {len} bytes or more, more than the {max} a line may hold")]
+    LineTooLong { len: u64, max: u64 },
+
+    #[error("the line has {found} TAB-separated columns, fewer than VCF's 8")]
+    TooFewColumns { found: usize },
+
+    // r[impl vcf_reader.limits]
+    #[error("the record has {n} alleles, more than BCF's 16-bit count holds")]
+    TooManyAlleles { n: usize },
+
+    #[error("sample {sample} has {found} fields or more; FORMAT names {keys}")]
+    SampleFields { sample: usize, found: usize, keys: usize },
+
+    #[error("malformed {part}")]
+    Text { part: RecordPart, source: TextValueError },
 
     // r[impl vcf_reader.undeclared]
     #[error("dictionary index {index} names no {kind} field of the header")]

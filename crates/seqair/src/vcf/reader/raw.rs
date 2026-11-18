@@ -2,16 +2,21 @@
 //! a [`Fields`](super::Fields) type decodes it through
 //! (`r[vcf_fields.user_types]`).
 
-use super::error::{RecordAt, RecordError, RecordSection, VcfReadError};
+use super::entries::{FormatIndex, LazyIndex};
+use super::error::{RecordAt, RecordError, RecordPart, RecordSection, VcfReadError};
 use super::fields::{SampleSelection, Sections};
 use super::file::FileShared;
 use super::info::InfoRef;
-use super::locus::{Locus, VcfPos};
-use super::samples::{SampleRef, SamplesRef};
-use super::site::{SiteParts, SiteRef};
+use super::locus::Locus;
+use super::rlen::{RlenColumns, text_rlen};
+use super::samples::{FormatSource, FormatView, SampleRef, SamplesRef};
+use super::site::{SiteParts, SiteRef, span};
+use super::text_value::TextValueError;
+use crate::io::text_scan::{find_byte, for_each_byte};
 use crate::vcf::header::{SampleIdx, VcfHeader};
 use crate::vcf::record_encoder::ContigId;
 use seqair_types::SmolStr;
+use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
 
 /// The 24 fixed bytes at the start of a BCF record's shared section.
@@ -82,19 +87,103 @@ pub(crate) struct BcfRecord<'a> {
     pub(crate) info_start: usize,
 }
 
-/// How a record is stored. VCF text records are the next phase: a variant
-/// holding the line and its column offsets.
+/// Where the columns of a VCF text line are.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TextCols {
+    /// CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO.
+    fixed: [Range<u32>; 8],
+    /// Where FORMAT starts, if the line has more than 8 columns.
+    format: Option<u32>,
+}
+
+/// The fixed columns of a VCF text line, by position.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Col {
+    Chrom = 0,
+    Pos = 1,
+    Id = 2,
+    Ref = 3,
+    Alt = 4,
+    Qual = 5,
+    Filter = 6,
+    Info = 7,
+}
+
+impl TextCols {
+    // r[impl vcf_reader.text_scan]
+    /// Find the columns of `line` with one vectorised TAB scan that stops
+    /// at FORMAT.
+    pub(crate) fn find(&mut self, line: &[u8]) -> Result<(), RecordError> {
+        let mut n = 0usize;
+        let mut start = 0usize;
+        self.format = None;
+        let fixed = &mut self.fixed;
+        let flow = for_each_byte(line, b'\t', |tab| {
+            match (fixed.get_mut(n), span(start, tab.saturating_sub(start))) {
+                (Some(col), Ok(r)) => *col = r,
+                (_, Err(e)) => return ControlFlow::Break(Err(e)),
+                (None, Ok(_)) => return ControlFlow::Break(Ok(())),
+            }
+            n = n.saturating_add(1);
+            start = tab.saturating_add(1);
+            if n == 8 { ControlFlow::Break(Ok(())) } else { ControlFlow::Continue(()) }
+        });
+        if let ControlFlow::Break(Err(e)) = flow {
+            return Err(e);
+        }
+        if n < 7 {
+            return Err(RecordError::TooFewColumns { found: n.saturating_add(1) });
+        }
+        if n == 7 {
+            let info = span(start, line.len().saturating_sub(start))?;
+            if let Some(col) = self.fixed.get_mut(7) {
+                *col = info;
+            }
+        } else {
+            self.format = Some(span(start, 0)?.start);
+        }
+        debug_assert!(n <= 8, "the scan stops at FORMAT");
+        Ok(())
+    }
+
+    pub(crate) fn col<'a>(&self, line: &'a [u8], col: Col) -> &'a [u8] {
+        self.fixed
+            .get(col as usize)
+            .and_then(|r| line.get(r.start as usize..r.end as usize))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn range(&self, col: Col) -> Range<u32> {
+        self.fixed.get(col as usize).cloned().unwrap_or_default()
+    }
+
+    /// FORMAT and the sample columns after it; empty without them.
+    pub(crate) fn rest<'a>(&self, line: &'a [u8]) -> &'a [u8] {
+        self.format.and_then(|f| line.get(f as usize..)).unwrap_or_default()
+    }
+}
+
+/// A VCF text record: its line (without the newline) and columns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextRecord<'a> {
+    pub(crate) line: &'a [u8],
+    pub(crate) cols: &'a TextCols,
+}
+
+/// How a record is stored.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Repr<'a> {
     Bcf(BcfRecord<'a>),
+    Text(TextRecord<'a>),
 }
 
 // r[impl vcf_fields.user_types]
 /// One record as the reader found it, not yet decoded: what a
-/// [`Fields::new`](super::Fields::new) or `fill` reads, through the views it hands
-/// out. Only the [`Sections`] the type's `needs` named can be viewed; the
-/// others fail with [`VcfReadError::NotRequested`], as their bytes may have
-/// been skipped.
+/// [`Fields::new`](super::Fields::new) or `fill` reads, through the views
+/// it hands out. Only the [`Sections`] the type's `needs` named can be
+/// viewed; the others fail with [`VcfReadError::NotRequested`], as their
+/// bytes may have been skipped. The INFO and FORMAT views index their
+/// section on first access, once per record.
 #[derive(Debug, Clone, Copy)]
 pub struct RawRecord<'a> {
     pub(crate) file: &'a Arc<FileShared>,
@@ -103,16 +192,14 @@ pub struct RawRecord<'a> {
     pub(crate) sections: Sections,
     /// The site columns, decoded when [`Sections::SITE`] is read.
     pub(crate) site: Option<&'a SiteParts>,
+    /// The reader's indexes of this record's INFO and FORMAT data, for the
+    /// views; reset for every record.
+    pub(crate) info_index: &'a LazyIndex,
+    pub(crate) format_index: &'a LazyIndex<FormatIndex>,
     pub(crate) repr: Repr<'a>,
 }
 
 impl<'a> RawRecord<'a> {
-    fn bcf(&self) -> &BcfRecord<'a> {
-        match &self.repr {
-            Repr::Bcf(record) => record,
-        }
-    }
-
     fn error(&self, source: RecordError) -> VcfReadError {
         self.at.error(source)
     }
@@ -131,39 +218,52 @@ impl<'a> RawRecord<'a> {
         self.contig
     }
 
-    /// The record's start and inclusive end.
-    pub(crate) fn span(&self) -> Result<(VcfPos, VcfPos), VcfReadError> {
-        let l = self.locus()?;
-        Ok((l.start(), l.end()))
-    }
-
     /// The record's contig, start and end.
     ///
     /// # Errors
-    /// [`VcfReadError::Record`] for a position or span outside VCF's range.
+    /// [`VcfReadError::Record`] for a position or span outside VCF's range,
+    /// or a VCF text POS that is not a number.
     pub fn locus(&self) -> Result<Locus, VcfReadError> {
-        let f = self.bcf().fixed;
-        Locus::from_bcf(self.contig.clone(), f.pos, f.rlen).map_err(|e| self.error(e))
+        let contig = self.contig.clone();
+        match self.repr {
+            Repr::Bcf(r) => Locus::from_bcf(contig, r.fixed.pos, r.fixed.rlen),
+            Repr::Text(TextRecord { line, cols }) => {
+                let pos = cols.col(line, Col::Pos);
+                let pos1 = parse_pos(pos).ok_or(RecordError::Text {
+                    part: RecordPart::Pos,
+                    source: TextValueError::InvalidInteger,
+                });
+                pos1.and_then(|pos1| {
+                    let pos0 = pos1.saturating_sub(1);
+                    let rlen = RlenColumns {
+                        reference: cols.col(line, Col::Ref),
+                        alt: cols.col(line, Col::Alt),
+                        info: cols.col(line, Col::Info),
+                        format: cols.rest(line),
+                    };
+                    Locus::from_zero_based(contig, pos0, text_rlen(&rlen, self.file, pos0))
+                })
+            }
+        }
+        .map_err(|e| self.error(e))
     }
 
     /// The ID, REF, ALT, QUAL and FILTER columns; needs [`Sections::SITE`].
     ///
     /// # Errors
-    /// [`VcfReadError::NotRequested`], or [`VcfReadError::Record`] if a
-    /// column is malformed.
+    /// [`VcfReadError::NotRequested`].
     pub fn site(&self) -> Result<SiteRef<'a>, VcfReadError> {
         let (bytes, parts) = self.site_parts()?;
         Ok(SiteRef::new(bytes, parts, self.file))
     }
 
-    /// The INFO column; needs [`Sections::INFO`]. Each `get` walks the
-    /// column: a type that reads many fields should keep an [`Info`](super::Info).
+    /// The INFO column; needs [`Sections::INFO`].
     ///
     /// # Errors
     /// [`VcfReadError::NotRequested`].
     pub fn info(&self) -> Result<InfoRef<'a>, VcfReadError> {
-        let (bytes, n) = self.bcf_info()?;
-        Ok(InfoRef::scan(bytes, n, self.file, self.at))
+        let (bytes, n) = self.info_bytes()?;
+        Ok(InfoRef::new(bytes, n, self.info_index, self.file, self.at))
     }
 
     /// One sample's FORMAT values; needs that sample or all of them.
@@ -177,8 +277,16 @@ impl<'a> RawRecord<'a> {
             let name = SmolStr::from(format!("sample {}", sample.index()));
             return Err(VcfReadError::ForeignKey { name });
         }
-        let (bytes, n_fmt, n_samples) = self.bcf_samples(Some(sample))?;
-        Ok(SamplesRef::scan(bytes, n_fmt, n_samples, self.file, self.at).sample(sample))
+        let all = self.sections.samples() == SampleSelection::All;
+        // The view holds what the reader read: every sample, or (VCF text)
+        // the one column `needs` asked for.
+        let source = self.format_source(if all { None } else { Some(sample) })?;
+        let column = match source {
+            FormatSource::Text { .. } if !all => 0,
+            _ => sample.index(),
+        };
+        let view = FormatView::new(source, self.format_index, self.file, self.at);
+        Ok(SampleRef::new(view, column, Some(sample)))
     }
 
     /// Every sample's FORMAT values; needs [`Sections::SAMPLES`].
@@ -186,8 +294,8 @@ impl<'a> RawRecord<'a> {
     /// # Errors
     /// As [`Self::sample`].
     pub fn samples(&self) -> Result<SamplesRef<'a>, VcfReadError> {
-        let (bytes, n_fmt, n_samples) = self.bcf_samples(None)?;
-        Ok(SamplesRef::scan(bytes, n_fmt, n_samples, self.file, self.at))
+        let source = self.format_source(None)?;
+        Ok(SamplesRef::new(FormatView::new(source, self.format_index, self.file, self.at)))
     }
 
     pub(crate) fn at(&self) -> RecordAt {
@@ -202,30 +310,42 @@ impl<'a> RawRecord<'a> {
         }
     }
 
-    /// The whole record as stored.
+    /// The whole record as stored: a BCF record's bytes, or a VCF line.
     pub(crate) fn bytes(&self) -> &'a [u8] {
-        self.bcf().bytes
+        match self.repr {
+            Repr::Bcf(r) => r.bytes,
+            Repr::Text(t) => t.line,
+        }
     }
 
     /// The bytes the site columns were decoded from, and their parts.
     pub(crate) fn site_parts(&self) -> Result<(&'a [u8], &'a SiteParts), VcfReadError> {
         let parts = self.site.ok_or(VcfReadError::NotRequested { section: RecordSection::Site })?;
-        Ok((self.bcf().shared, parts))
+        let bytes = match self.repr {
+            Repr::Bcf(r) => r.shared,
+            Repr::Text(t) => t.line,
+        };
+        Ok((bytes, parts))
     }
 
-    /// The INFO entries and their count.
-    pub(crate) fn bcf_info(&self) -> Result<(&'a [u8], usize), VcfReadError> {
+    /// The INFO bytes and (BCF) their entry count.
+    pub(crate) fn info_bytes(&self) -> Result<(&'a [u8], usize), VcfReadError> {
         self.require(self.sections.info(), RecordSection::Info)?;
-        let r = self.bcf();
-        Ok((r.shared.get(r.info_start..).unwrap_or_default(), usize::from(r.fixed.n_info)))
+        Ok(match self.repr {
+            Repr::Bcf(r) => {
+                (r.shared.get(r.info_start..).unwrap_or_default(), usize::from(r.fixed.n_info))
+            }
+            Repr::Text(t) => (t.cols.col(t.line, Col::Info), 0),
+        })
     }
 
-    /// The individual section, `n_fmt` and the sample count, for `sample`
-    /// (`None`: all samples).
-    pub(crate) fn bcf_samples(
+    /// The FORMAT data of `sample` (`None`: of all samples). BCF gives the
+    /// whole individual section either way; VCF text only that sample's
+    /// column, found by scanning no further.
+    pub(crate) fn format_source(
         &self,
         sample: Option<SampleIdx>,
-    ) -> Result<(&'a [u8], usize, usize), VcfReadError> {
+    ) -> Result<FormatSource<'a>, VcfReadError> {
         match sample {
             Some(s) => self.require(
                 self.sections.has_sample(s.index()),
@@ -234,11 +354,65 @@ impl<'a> RawRecord<'a> {
             None => self
                 .require(self.sections.samples() == SampleSelection::All, RecordSection::Samples)?,
         }
-        let r = self.bcf();
         let expected = self.file.header.samples().len();
-        if r.fixed.n_fmt > 0 && r.fixed.n_sample as usize != expected {
-            return Err(self.error(RecordError::SampleCount { found: r.fixed.n_sample, expected }));
+        match self.repr {
+            Repr::Bcf(r) => {
+                if r.fixed.n_fmt > 0 && r.fixed.n_sample as usize != expected {
+                    let found = r.fixed.n_sample;
+                    return Err(self.error(RecordError::SampleCount { found, expected }));
+                }
+                let n_fmt = usize::from(r.fixed.n_fmt);
+                Ok(FormatSource::Bcf { indiv: r.indiv, n_fmt, n_samples: expected })
+            }
+            Repr::Text(t) => {
+                let rest = t.cols.rest(t.line);
+                let (keys, samples) = match find_byte(rest, b'\t') {
+                    Some(tab) => (
+                        rest.get(..tab).unwrap_or_default(),
+                        rest.get(tab.saturating_add(1)..).unwrap_or_default(),
+                    ),
+                    None => (rest, &[][..]),
+                };
+                let Some(s) = sample else {
+                    return Ok(FormatSource::Text { keys, samples, n_samples: expected });
+                };
+                if keys.is_empty() || keys == b"." {
+                    return Ok(FormatSource::Text { keys: b"", samples: b"", n_samples: 1 });
+                }
+                let column = nth_column(samples, s.index()).ok_or_else(|| {
+                    let found = samples.iter().filter(|&&b| b == b'\t').count().saturating_add(1);
+                    let found = u32::try_from(found).unwrap_or(u32::MAX);
+                    self.error(RecordError::SampleCount { found, expected })
+                })?;
+                Ok(FormatSource::Text { keys, samples: column, n_samples: 1 })
+            }
         }
-        Ok((r.indiv, usize::from(r.fixed.n_fmt), expected))
     }
+}
+
+/// Column `n` of the TAB-separated `columns`, scanning no further.
+fn nth_column(columns: &[u8], n: usize) -> Option<&[u8]> {
+    let mut start = 0usize;
+    let mut seen = 0usize;
+    let flow = for_each_byte(columns, b'\t', |tab| {
+        if seen == n {
+            return ControlFlow::Break(start..tab);
+        }
+        seen = seen.saturating_add(1);
+        start = tab.saturating_add(1);
+        ControlFlow::Continue(())
+    });
+    match flow {
+        ControlFlow::Break(r) => columns.get(r),
+        ControlFlow::Continue(()) if seen == n => columns.get(start..),
+        ControlFlow::Continue(()) => None,
+    }
+}
+
+/// A VCF text POS: decimal digits only.
+fn parse_pos(pos: &[u8]) -> Option<i64> {
+    if pos.is_empty() || pos.len() > 18 || !pos.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(pos).ok()?.parse().ok()
 }

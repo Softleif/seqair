@@ -2,14 +2,14 @@
 //! ([`Samples`]), by sample or by column (`r[vcf_fields.only_sample]`,
 //! `r[vcf_fields.sample]`, `r[vcf_fields.samples]`).
 
-use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
-use super::bcf_value::{FormatColumn, TypedValue, read_typed_int};
-use super::entries::{BcfEntries, LazyIndex, index_bcf, scan};
+use super::access::{DynValue, ReadKind, Stored, StoredRepr};
+use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
+use super::entries::{BcfEntries, FormatIndex, LazyIndex, index_bcf, index_text_format};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::file::FileShared;
-use super::index::{DictId, Entry, FieldIndex};
-use super::info::check_brand;
+use super::index::{DictId, Entry};
+use super::info::{check_brand, decode, dyn_decode};
 use super::raw::RawRecord;
 use crate::vcf::header::{FormatDef, SampleIdx, VcfHeader};
 use crate::vcf::record_encoder::{FieldId, FormatKey};
@@ -18,16 +18,30 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// FORMAT values of some samples in BCF's layout: per field, its key, its
-/// type descriptor, then each sample's elements.
+/// Where a record's FORMAT data comes from, as the reader found it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FormatSource<'a> {
+    /// The individual section: per field, its key, its type descriptor,
+    /// then each sample's elements.
+    Bcf { indiv: &'a [u8], n_fmt: usize, n_samples: usize },
+    /// The FORMAT column and the TAB-separated columns of the samples read.
+    Text { keys: &'a [u8], samples: &'a [u8], n_samples: usize },
+}
+
+/// FORMAT data, owned: BCF's individual section (all samples, or one
+/// sample's elements of each field), or VCF text's FORMAT column, a TAB,
+/// and the sample columns read.
 #[derive(Debug, Clone)]
 struct FormatData {
     bytes: Vec<u8>,
+    /// BCF: the number of fields.
     n_fmt: usize,
+    /// VCF text: the FORMAT column's length.
+    keys_len: usize,
     n_samples: usize,
     file: Arc<FileShared>,
     at: RecordAt,
-    index: LazyIndex,
+    index: LazyIndex<FormatIndex>,
 }
 
 impl FormatData {
@@ -35,6 +49,7 @@ impl FormatData {
         Self {
             bytes: Vec::new(),
             n_fmt: 0,
+            keys_len: 0,
             n_samples: 0,
             file: Arc::clone(raw.file),
             at: raw.at(),
@@ -42,154 +57,187 @@ impl FormatData {
         }
     }
 
-    fn begin(&mut self, raw: &RawRecord<'_>, n_fmt: usize, n_samples: usize) {
+    fn begin(&mut self, raw: &RawRecord<'_>, n_samples: usize) {
         self.bytes.clear();
-        self.n_fmt = n_fmt;
+        self.n_fmt = 0;
+        self.keys_len = 0;
         self.n_samples = n_samples;
         self.at = raw.at();
         self.index.reset();
         raw.keep_file(&mut self.file);
     }
 
-    fn fill_all(&mut self, raw: &RawRecord<'_>) -> Result<(), VcfReadError> {
-        let (indiv, n_fmt, n_samples) = raw.bcf_samples(None)?;
-        self.begin(raw, n_fmt, n_samples);
-        self.bytes.extend_from_slice(indiv);
-        Ok(())
-    }
-
-    /// Copy only sample `sample`'s values: each field's key and descriptor,
-    /// then that sample's elements.
-    fn fill_one(&mut self, raw: &RawRecord<'_>, sample: SampleIdx) -> Result<(), VcfReadError> {
-        let (indiv, n_fmt, n_samples) = raw.bcf_samples(Some(sample))?;
-        self.begin(raw, n_fmt, 1);
-        let malformed =
-            |source| raw.at().error(RecordError::Value { part: RecordPart::Format, source });
-        let mut at = 0usize;
-        for _ in 0..n_fmt {
-            let rest = indiv.get(at..).unwrap_or_default();
-            let (_, key_len) = read_typed_int(rest).map_err(malformed)?;
-            let (column, len) =
-                FormatColumn::parse(rest.get(key_len..).unwrap_or_default(), n_samples)
-                    .map_err(malformed)?;
-            let head = key_len.saturating_add(column.header_len());
-            self.bytes.extend_from_slice(rest.get(..head).unwrap_or_default());
-            self.bytes.extend_from_slice(column.sample_bytes(sample.index()).unwrap_or_default());
-            at = at.saturating_add(key_len).saturating_add(len);
-        }
-        let len = indiv.len().saturating_sub(at);
-        if len > 0 {
-            return Err(raw
-                .at()
-                .error(RecordError::TrailingBytes { part: RecordPart::Format, len }));
+    /// Copy the FORMAT data of `sample`, or of every sample.
+    fn fill(&mut self, raw: &RawRecord<'_>, sample: Option<SampleIdx>) -> Result<(), VcfReadError> {
+        match raw.format_source(sample)? {
+            FormatSource::Bcf { indiv, n_fmt, n_samples } => match sample {
+                None => {
+                    self.begin(raw, n_samples);
+                    self.bytes.extend_from_slice(indiv);
+                    self.n_fmt = n_fmt;
+                }
+                Some(sample) => {
+                    self.begin(raw, 1);
+                    self.n_fmt = n_fmt;
+                    copy_one_sample(&mut self.bytes, indiv, n_fmt, n_samples, sample.index())
+                        .map_err(|e| raw.at().error(e))?;
+                }
+            },
+            FormatSource::Text { keys, samples, n_samples } => {
+                self.begin(raw, n_samples);
+                self.keys_len = keys.len();
+                self.bytes.extend_from_slice(keys);
+                if !keys.is_empty() {
+                    self.bytes.push(b'\t');
+                    self.bytes.extend_from_slice(samples);
+                }
+            }
         }
         Ok(())
     }
 
-    fn index(&self, file: &FileShared) -> Result<&FieldIndex, VcfReadError> {
-        let entries = BcfEntries::new(&self.bytes, self.n_fmt, Some(self.n_samples));
-        self.index
-            .get(|index| index_bcf(index, entries, KeyKind::Format, file))
-            .map_err(|e| self.at.error(e.clone()))
-    }
-
-    fn source(&self) -> Source<'_> {
-        Source::Indexed(self)
+    fn view(&self) -> FormatView<'_> {
+        let (keys, samples) = if self.file.is_text() {
+            let samples = self.bytes.get(self.keys_len.saturating_add(1)..).unwrap_or_default();
+            (self.bytes.get(..self.keys_len).unwrap_or_default(), samples)
+        } else {
+            (&[][..], &self.bytes[..])
+        };
+        FormatView {
+            keys,
+            samples,
+            n_fmt: self.n_fmt,
+            n_samples: self.n_samples,
+            index: &self.index,
+            file: &self.file,
+            at: self.at,
+        }
     }
 }
 
-/// Where a FORMAT view finds a field.
+/// Copy only sample `sample`'s values from a BCF individual section: each
+/// field's key and descriptor, then that sample's elements.
+fn copy_one_sample(
+    out: &mut Vec<u8>,
+    indiv: &[u8],
+    n_fmt: usize,
+    n_samples: usize,
+    sample: usize,
+) -> Result<(), RecordError> {
+    let malformed = |source| RecordError::Value { part: RecordPart::Format, source };
+    let mut at = 0usize;
+    for _ in 0..n_fmt {
+        let rest = indiv.get(at..).unwrap_or_default();
+        let (_, key_len) = read_typed_int(rest).map_err(malformed)?;
+        let (column, len) = FormatColumn::parse(rest.get(key_len..).unwrap_or_default(), n_samples)
+            .map_err(malformed)?;
+        let head = key_len.saturating_add(column.header_len());
+        out.extend_from_slice(rest.get(..head).unwrap_or_default());
+        out.extend_from_slice(column.sample_bytes(sample).unwrap_or_default());
+        at = at.saturating_add(key_len).saturating_add(len);
+    }
+    let len = indiv.len().saturating_sub(at);
+    if len > 0 {
+        return Err(RecordError::TrailingBytes { part: RecordPart::Format, len });
+    }
+    Ok(())
+}
+
+/// FORMAT data as a view reads it, indexed on first access.
 #[derive(Debug, Clone, Copy)]
-enum Source<'a> {
-    Indexed(&'a FormatData),
-    Scan { bytes: &'a [u8], n_fmt: usize, n_samples: usize, file: &'a FileShared, at: RecordAt },
-}
-
-impl<'a> Source<'a> {
-    fn bytes(&self) -> &'a [u8] {
-        match *self {
-            Self::Indexed(data) => &data.bytes,
-            Self::Scan { bytes, .. } => bytes,
-        }
-    }
-
-    fn n_samples(&self) -> usize {
-        match *self {
-            Self::Indexed(data) => data.n_samples,
-            Self::Scan { n_samples, .. } => n_samples,
-        }
-    }
-
-    fn file(&self) -> Option<&'a FileShared> {
-        match *self {
-            Self::Indexed(data) => Some(&*data.file),
-            Self::Scan { file, .. } => Some(file),
-        }
-    }
-
-    fn at(&self) -> RecordAt {
-        match *self {
-            Self::Indexed(data) => data.at,
-            Self::Scan { at, .. } => at,
-        }
-    }
-
-    fn malformed(&self, source: super::bcf_value::BcfValueError) -> VcfReadError {
-        self.at().error(RecordError::Value { part: RecordPart::Format, source })
-    }
-
-    /// The span of field `id`'s column, if the record has it.
-    fn span(&self, file: &FileShared, id: &FieldId) -> Result<Option<Range<usize>>, VcfReadError> {
-        let Some(id) = DictId::new(id.dict_idx) else { return Ok(None) };
-        match *self {
-            Self::Indexed(data) => Ok(data.index(file)?.get(id).map(Entry::span)),
-            Self::Scan { bytes, n_fmt, n_samples, .. } => {
-                scan(BcfEntries::new(bytes, n_fmt, Some(n_samples)), id)
-                    .map_err(|e| self.malformed(e))
-            }
-        }
-    }
-
-    /// Field `key`'s column, if the record has it.
-    fn column(
-        &self,
-        file: &FileShared,
-        key: &FieldId,
-    ) -> Result<Option<FormatColumn<'a>>, VcfReadError> {
-        check_brand(key, file)?;
-        let Some(span) = self.span(file, key)? else { return Ok(None) };
-        let bytes = self.bytes().get(span).unwrap_or_default();
-        let (column, _) =
-            FormatColumn::parse(bytes, self.n_samples()).map_err(|e| self.malformed(e))?;
-        Ok(Some(column))
-    }
-
-    /// The fields present, each as its id and column span.
-    fn entries(&self, file: &'a FileShared) -> Result<Entries<'a>, VcfReadError> {
-        Ok(match *self {
-            Self::Indexed(data) => Entries::Indexed(data.index(file)?.entries().iter()),
-            Self::Scan { bytes, n_fmt, n_samples, .. } => {
-                Entries::Scan(BcfEntries::new(bytes, n_fmt, Some(n_samples)))
-            }
-        })
-    }
-}
-
-enum Entries<'a> {
-    Indexed(std::slice::Iter<'a, Entry>),
-    Scan(BcfEntries<'a>),
-}
-
-/// Decode one sample's elements as `V`.
-fn decode<'a, V: ReadKind>(
-    value: TypedValue<'a>,
-    name: &SmolStr,
-    file: &FileShared,
+pub(crate) struct FormatView<'a> {
+    /// VCF text: the FORMAT column.
+    keys: &'a [u8],
+    /// BCF: the individual section. VCF text: the sample columns.
+    samples: &'a [u8],
+    n_fmt: usize,
+    n_samples: usize,
+    index: &'a LazyIndex<FormatIndex>,
+    file: &'a FileShared,
     at: RecordAt,
-) -> Result<V::Out<'a>, VcfReadError> {
-    let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
-    V::decode(Stored(StoredRepr::Bcf(value)), cx)
-        .map_err(|source| at.error(RecordError::Field { name: name.clone(), source }))
+}
+
+impl<'a> FormatView<'a> {
+    /// The view of a record's FORMAT data straight from the reader.
+    pub(crate) fn new(
+        source: FormatSource<'a>,
+        index: &'a LazyIndex<FormatIndex>,
+        file: &'a FileShared,
+        at: RecordAt,
+    ) -> Self {
+        let (keys, samples, n_fmt, n_samples) = match source {
+            FormatSource::Bcf { indiv, n_fmt, n_samples } => (&[][..], indiv, n_fmt, n_samples),
+            FormatSource::Text { keys, samples, n_samples } => (keys, samples, 0, n_samples),
+        };
+        Self { keys, samples, n_fmt, n_samples, index, file, at }
+    }
+
+    fn index(&self) -> Result<&'a FormatIndex, VcfReadError> {
+        let Self { keys, samples, n_fmt, n_samples, file, at, .. } = *self;
+        self.index
+            .get(|index| {
+                if file.is_text() {
+                    index_text_format(index, keys, samples, n_samples, file)
+                } else {
+                    let entries = BcfEntries::new(samples, n_fmt, Some(n_samples));
+                    index_bcf(&mut index.keys, entries, KeyKind::Format, file)
+                }
+            })
+            .map_err(|e| at.error(e.clone()))
+    }
+
+    fn malformed(&self, source: BcfValueError) -> VcfReadError {
+        self.at.error(RecordError::Value { part: RecordPart::Format, source })
+    }
+
+    /// The values of the field an index entry names.
+    fn field_at(&self, index: &'a FormatIndex, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
+        if self.file.is_text() {
+            return Ok(FieldAt::Text {
+                values: &index.values,
+                samples: self.samples,
+                n_keys: index.n_keys,
+                k: entry.start as usize,
+                n_samples: self.n_samples,
+            });
+        }
+        let bytes = self.samples.get(entry.span()).unwrap_or_default();
+        let (column, _) =
+            FormatColumn::parse(bytes, self.n_samples).map_err(|e| self.malformed(e))?;
+        Ok(FieldAt::Bcf(column))
+    }
+
+    /// Field `key`'s values, if the record has it.
+    fn field(&self, key: &FieldId) -> Result<Option<FieldAt<'a>>, VcfReadError> {
+        check_brand(key, self.file)?;
+        let Some(id) = DictId::new(key.dict_idx) else { return Ok(None) };
+        let index = self.index()?;
+        index.keys.get(id).map(|e| self.field_at(index, e)).transpose()
+    }
+}
+
+/// One FORMAT field's values, sample by sample.
+#[derive(Debug, Clone, Copy)]
+enum FieldAt<'a> {
+    Bcf(FormatColumn<'a>),
+    Text { values: &'a [Range<u32>], samples: &'a [u8], n_keys: usize, k: usize, n_samples: usize },
+}
+
+impl<'a> FieldAt<'a> {
+    /// Sample `i`'s value, `None` past the last sample.
+    fn sample(&self, i: usize) -> Option<Stored<'a>> {
+        match *self {
+            Self::Bcf(column) => column.sample(i).map(|v| Stored(StoredRepr::Bcf(v))),
+            Self::Text { values, samples, n_keys, k, n_samples } => {
+                if i >= n_samples {
+                    return None;
+                }
+                let r = values.get(i.checked_mul(n_keys)?.checked_add(k)?)?;
+                let value = samples.get(r.start as usize..r.end as usize).unwrap_or_default();
+                Some(Stored(StoredRepr::Text(Some(value))))
+            }
+        }
+    }
 }
 
 // r[impl vcf_fields.sample_idx]
@@ -206,13 +254,17 @@ fn check_sample(sample: Option<SampleIdx>, file: &FileShared) -> Result<(), VcfR
 /// One sample's FORMAT values.
 #[derive(Debug, Clone, Copy)]
 pub struct SampleRef<'a> {
-    source: Source<'a>,
+    view: FormatView<'a>,
     column: usize,
     /// The handle it was asked for by, checked against the record's header.
     sample: Option<SampleIdx>,
 }
 
 impl<'a> SampleRef<'a> {
+    pub(crate) fn new(view: FormatView<'a>, column: usize, sample: Option<SampleIdx>) -> Self {
+        Self { view, column, sample }
+    }
+
     // r[impl vcf_values.access]
     /// The sample's value of the field `key` names, decoded as its marker
     /// says; absent or `.` is the marker's absent value.
@@ -221,19 +273,18 @@ impl<'a> SampleRef<'a> {
     /// [`VcfReadError::ForeignKey`] for a key or sample of another header,
     /// and [`VcfReadError::Record`] for malformed data.
     pub fn get<V: ReadKind>(&self, key: &FormatKey<V>) -> Result<V::Out<'a>, VcfReadError> {
-        let Some(file) = self.source.file() else { return Ok(V::absent()) };
+        let file = self.view.file;
         check_sample(self.sample, file)?;
-        let Some(column) = self.source.column(file, &key.0)? else { return Ok(V::absent()) };
-        match column.sample(self.column) {
-            Some(value) => decode::<V>(value, &key.0.name, file, self.source.at()),
+        let Some(field) = self.view.field(&key.0)? else { return Ok(V::absent()) };
+        match field.sample(self.column) {
+            Some(value) => decode::<V>(value, &key.0.name, file, self.view.at),
             None => Ok(V::absent()),
         }
     }
 
     // r[impl vcf_values.dynamic]
-    /// Every declared FORMAT field present, in record order (from an owned
-    /// component, a repeated key once), with its declaration and this
-    /// sample's value read as declared.
+    /// Every declared FORMAT field present, in record order (a repeated key
+    /// once), with its declaration and this sample's value read as declared.
     ///
     /// # Errors
     /// [`VcfReadError::Record`] if the FORMAT data is malformed; each item,
@@ -244,52 +295,24 @@ impl<'a> SampleRef<'a> {
         impl Iterator<Item = Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError>> + use<'a>,
         VcfReadError,
     > {
-        let file = self.source.file();
-        if let Some(file) = file {
-            check_sample(self.sample, file)?;
-        }
-        let entries = match file {
-            Some(file) => Some(self.source.entries(file)?),
-            None => None,
-        };
+        check_sample(self.sample, self.view.file)?;
+        let index = self.view.index()?;
         let this = *self;
-        let mut entries = entries;
-        Ok(std::iter::from_fn(move || {
-            let file = file?;
-            let (index, span) = match entries.as_mut()? {
-                Entries::Indexed(it) => {
-                    let e = it.next()?;
-                    (i32::try_from(e.id.get()).unwrap_or(i32::MAX), e.span())
-                }
-                Entries::Scan(it) => match it.next()? {
-                    Ok(entry) => entry,
-                    Err(e) => return Some(Err(this.source.malformed(e))),
-                },
-            };
-            Some(this.dyn_entry(file, index, span))
-        }))
+        Ok(index.keys.entries().iter().map(move |&e| this.dyn_entry(index, e)))
     }
 
     fn dyn_entry(
         &self,
-        file: &'a FileShared,
-        index: i32,
-        span: Range<usize>,
+        index: &'a FormatIndex,
+        entry: Entry,
     ) -> Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError> {
-        let at = self.source.at();
-        let unknown = || at.error(RecordError::UnknownKey { index, kind: KeyKind::Format });
-        let name = usize::try_from(index)
-            .ok()
-            .and_then(|i| file.header.string_map().name(i))
-            .ok_or_else(unknown)?;
+        let (file, at) = (self.view.file, self.view.at);
+        let id = i32::try_from(entry.id.get()).unwrap_or(i32::MAX);
+        let unknown = || at.error(RecordError::UnknownKey { index: id, kind: KeyKind::Format });
+        let name = file.header.string_map().name(entry.id.get() as usize).ok_or_else(unknown)?;
         let (name, def) = file.header.formats().get_key_value(name).ok_or_else(unknown)?;
-        let bytes = self.source.bytes().get(span).unwrap_or_default();
-        let (column, _) = FormatColumn::parse(bytes, self.source.n_samples())
-            .map_err(|e| self.source.malformed(e))?;
-        let value = column.sample(self.column).ok_or_else(unknown)?;
-        let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
-        let value = DynValue::decode(Stored(StoredRepr::Bcf(value)), def.typ, name == "GT", cx)
-            .map_err(|source| at.error(RecordError::Field { name: name.clone(), source }))?;
+        let value = self.view.field_at(index, entry)?.sample(self.column).ok_or_else(unknown)?;
+        let value = dyn_decode(value, name, def.typ, name == "GT", file, at)?;
         Ok((name.as_str(), def, value))
     }
 }
@@ -297,25 +320,18 @@ impl<'a> SampleRef<'a> {
 /// Every sample's FORMAT values, borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct SamplesRef<'a> {
-    source: Source<'a>,
+    view: FormatView<'a>,
 }
 
 impl<'a> SamplesRef<'a> {
-    /// The samples of a BCF record, walking its FORMAT entries on each access.
-    pub(crate) fn scan(
-        bytes: &'a [u8],
-        n_fmt: usize,
-        n_samples: usize,
-        file: &'a FileShared,
-        at: RecordAt,
-    ) -> Self {
-        Self { source: Source::Scan { bytes, n_fmt, n_samples, file, at } }
+    pub(crate) fn new(view: FormatView<'a>) -> Self {
+        Self { view }
     }
 
     /// One sample's view. A sample of another header fails on access with
     /// [`VcfReadError::ForeignKey`].
     pub fn sample(&self, sample: SampleIdx) -> SampleRef<'a> {
-        SampleRef { source: self.source, column: sample.index(), sample: Some(sample) }
+        SampleRef { view: self.view, column: sample.index(), sample: Some(sample) }
     }
 
     // r[impl vcf_fields.samples]
@@ -330,22 +346,20 @@ impl<'a> SamplesRef<'a> {
         &self,
         key: &FormatKey<V>,
     ) -> Result<Option<Column<'a, V>>, VcfReadError> {
-        let Some(file) = self.source.file() else { return Ok(None) };
-        let Some(column) = self.source.column(file, &key.0)? else { return Ok(None) };
-        let at = self.source.at();
-        let n = self.source.n_samples();
+        let Some(field) = self.view.field(&key.0)? else { return Ok(None) };
+        let (file, at, n) = (self.view.file, self.view.at, self.view.n_samples);
         for i in 0..n {
-            if let Some(value) = column.sample(i) {
+            if let Some(value) = field.sample(i) {
                 decode::<V>(value, &key.0.name, file, at)?;
             }
         }
         let name = key.0.name.clone();
-        Ok(Some(Column { column, next: 0, end: n, name, file, at, _v: PhantomData }))
+        Ok(Some(Column { field, next: 0, end: n, name, file, at, _v: PhantomData }))
     }
 
     /// How many samples there are.
     pub fn len(&self) -> usize {
-        self.source.n_samples()
+        self.view.n_samples
     }
 
     pub fn is_empty(&self) -> bool {
@@ -356,7 +370,7 @@ impl<'a> SamplesRef<'a> {
 /// One FORMAT field across all samples, in sample order.
 #[derive(Debug)]
 pub struct Column<'a, V> {
-    column: FormatColumn<'a>,
+    field: FieldAt<'a>,
     next: usize,
     end: usize,
     name: SmolStr,
@@ -378,7 +392,7 @@ impl<'a, V: ReadKind> Column<'a, V> {
     /// [`VcfReadError::ForeignKey`] for a sample of another header.
     pub fn get(&self, sample: SampleIdx) -> Result<V::Out<'a>, VcfReadError> {
         check_sample(Some(sample), self.file)?;
-        match self.column.sample(sample.index()) {
+        match self.field.sample(sample.index()) {
             Some(value) => decode::<V>(value, &self.name, self.file, self.at),
             None => Ok(V::absent()),
         }
@@ -392,7 +406,7 @@ impl<'a, V: ReadKind> Iterator for Column<'a, V> {
         if self.next >= self.end {
             return None;
         }
-        let value = self.column.sample(self.next)?;
+        let value = self.field.sample(self.next)?;
         self.next = self.next.saturating_add(1);
         let decoded = decode::<V>(value, &self.name, self.file, self.at);
         debug_assert!(decoded.is_ok(), "column() checked every sample");
@@ -416,7 +430,7 @@ pub struct OnlySample(FormatData);
 
 impl OnlySample {
     fn view(&self) -> SampleRef<'_> {
-        SampleRef { source: self.0.source(), column: 0, sample: None }
+        SampleRef { view: self.0.view(), column: 0, sample: None }
     }
 
     /// The sample's value of the field `key` names (see [`SampleRef::get`]).
@@ -458,12 +472,12 @@ impl Fields for OnlySample {
 
     fn new(sample: &SampleIdx, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let mut data = FormatData::new(&raw);
-        data.fill_one(&raw, *sample)?;
+        data.fill(&raw, Some(*sample))?;
         Ok(Self(data))
     }
 
     fn fill(&mut self, sample: &SampleIdx, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        self.0.fill_one(&raw, *sample)
+        self.0.fill(&raw, Some(*sample))
     }
 }
 
@@ -478,7 +492,7 @@ pub struct Sample {
 
 impl Sample {
     fn view(&self) -> SampleRef<'_> {
-        SampleRef { source: self.data.source(), column: 0, sample: None }
+        SampleRef { view: self.data.view(), column: 0, sample: None }
     }
 
     /// The sample's name.
@@ -534,12 +548,12 @@ impl Fields for Sample {
 
     fn new((sample, name): &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let mut data = FormatData::new(&raw);
-        data.fill_one(&raw, *sample)?;
+        data.fill(&raw, Some(*sample))?;
         Ok(Self { data, name: name.clone() })
     }
 
     fn fill(&mut self, (sample, _): &Self::Plan, raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        self.data.fill_one(&raw, *sample)
+        self.data.fill(&raw, Some(*sample))
     }
 }
 
@@ -550,7 +564,7 @@ pub struct Samples(FormatData);
 
 impl Samples {
     fn view(&self) -> SamplesRef<'_> {
-        SamplesRef { source: self.0.source() }
+        SamplesRef { view: self.0.view() }
     }
 
     /// One sample's view (see [`SamplesRef::sample`]).
@@ -592,11 +606,11 @@ impl Fields for Samples {
 
     fn new(_: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let mut data = FormatData::new(&raw);
-        data.fill_all(&raw)?;
+        data.fill(&raw, None)?;
         Ok(Self(data))
     }
 
     fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        self.0.fill_all(&raw)
+        self.0.fill(&raw, None)
     }
 }

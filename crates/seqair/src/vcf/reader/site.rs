@@ -5,7 +5,8 @@ use super::error::{KeyKind, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::file::FileShared;
 use super::index::DictId;
-use super::raw::RawRecord;
+use super::raw::{Col, RawRecord, TextCols};
+use super::text_value::parse_f32;
 use crate::vcf::alleles::Alleles;
 use crate::vcf::bcf_encoding::FLOAT_MISSING;
 use crate::vcf::error::AllelesError;
@@ -83,10 +84,9 @@ impl SiteParts {
 
     /// `other`, its spans moved `shift` bytes towards the start.
     fn rebased_from(&mut self, other: &Self, shift: u32) {
-        let back = |r: &Range<u32>| r.start.saturating_sub(shift)..r.end.saturating_sub(shift);
-        self.id = back(&other.id);
+        self.id = shifted(&other.id, shift);
         self.alleles.clear();
-        self.alleles.extend(other.alleles.iter().map(back));
+        self.alleles.extend(other.alleles.iter().map(|r| shifted(r, shift)));
         self.filter = other.filter;
         self.filter_ids.clone_from(&other.filter_ids);
         self.qual = other.qual;
@@ -138,6 +138,73 @@ impl SiteParts {
         self.qual = (qual != FLOAT_MISSING).then(|| f32::from_bits(qual));
         Ok(at.saturating_add(len))
     }
+}
+
+impl SiteParts {
+    // r[impl vcf_fields.site]
+    /// Decode the site columns of a VCF text line: IDs and alleles UTF-8,
+    /// QUAL a float or `.`, FILTER names looked up in the header. A FILTER
+    /// name the header does not declare still fails the record (htslib
+    /// adds it to its header); like an undeclared INFO key it is logged
+    /// once per file, and no `FilterId` can name it.
+    pub(crate) fn decode_text(
+        &mut self,
+        line: &[u8],
+        cols: &TextCols,
+        file: &FileShared,
+    ) -> Result<(), RecordError> {
+        self.begin();
+        let utf8 = |col: Col, part: RecordPart| -> Result<Range<u32>, RecordError> {
+            std::str::from_utf8(cols.col(line, col))
+                .map_err(|source| RecordError::Utf8 { part, source })?;
+            Ok(cols.range(col))
+        };
+        self.id = utf8(Col::Id, RecordPart::Id)?;
+        self.alleles.push(utf8(Col::Ref, RecordPart::Alleles)?);
+        let alt = cols.range(Col::Alt);
+        let alt_bytes = cols.col(line, Col::Alt);
+        if alt_bytes != b"." {
+            std::str::from_utf8(alt_bytes)
+                .map_err(|source| RecordError::Utf8 { part: RecordPart::Alleles, source })?;
+            let mut start = alt.start;
+            for allele in alt_bytes.split(|&b| b == b',') {
+                // r[impl vcf_reader.limits]
+                if self.alleles.len() >= usize::from(u16::MAX) {
+                    let n = alt_bytes.iter().filter(|&&b| b == b',').count().saturating_add(2);
+                    return Err(RecordError::TooManyAlleles { n });
+                }
+                // An allele is at most the line, which fits u32.
+                let end = start.saturating_add(u32::try_from(allele.len()).unwrap_or(u32::MAX));
+                self.alleles.push(start..end);
+                start = end.saturating_add(1);
+            }
+        }
+        self.qual = parse_f32(cols.col(line, Col::Qual))
+            .map_err(|source| RecordError::Text { part: RecordPart::Qual, source })?;
+        let filter = cols.col(line, Col::Filter);
+        self.filter = match filter {
+            b"." | b"" => FilterColumn::Missing,
+            b"PASS" => FilterColumn::Pass,
+            _ => FilterColumn::Failed,
+        };
+        if self.filter != FilterColumn::Missing {
+            for name in filter.split(|&b| b == b';') {
+                let declared = file
+                    .keys
+                    .get(name)
+                    .filter(|id| file.filters.get(id.get() as usize).is_some_and(Option::is_some));
+                match declared {
+                    Some(id) => self.filter_ids.push(id),
+                    None => file.warn_undeclared(KeyKind::Filter, name),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn shifted(r: &Range<u32>, shift: u32) -> Range<u32> {
+    r.start.saturating_sub(shift)..r.end.saturating_sub(shift)
 }
 
 fn value_error(part: RecordPart, e: BcfValueError) -> RecordError {

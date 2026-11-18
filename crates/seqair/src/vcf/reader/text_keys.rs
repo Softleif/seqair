@@ -81,7 +81,7 @@ impl TextKeys {
         };
         let (first, last) = words(name);
         let mask = self.slots.len().saturating_sub(1);
-        let mut i = (hash(first, last, name.len()) >> self.shift) as usize;
+        let mut i = usize::try_from(hash(first, last, name.len()) >> self.shift).unwrap_or(0);
         // At most half full: a free slot is always found.
         for _ in 0..self.slots.len() {
             match self.slots.get(i) {
@@ -113,7 +113,7 @@ impl TextKeys {
     pub(crate) fn get(&self, key: &[u8]) -> Option<DictId> {
         let (first, last) = words(key);
         let mask = self.slots.len().saturating_sub(1);
-        let mut i = (hash(first, last, key.len()) >> self.shift) as usize;
+        let mut i = usize::try_from(hash(first, last, key.len()) >> self.shift).unwrap_or(0);
         loop {
             let slot = self.slots.get(i)?.as_ref()?;
             if self.same(slot, first, key) {
@@ -126,7 +126,11 @@ impl TextKeys {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::cast_possible_truncation, reason = "test indices below 60")]
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::arithmetic_side_effects,
+        reason = "test indices below 60"
+    )]
 
     use super::*;
     use hegel::prelude::*;

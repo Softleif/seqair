@@ -3,6 +3,7 @@
 
 use super::bcf_value::TypedValue;
 use super::error::FieldError;
+use super::text_value::{TextGt, TextNumber, TextVec, text_str};
 use super::values::{GenotypeRef, GtAlleles, OptValues, Values};
 use crate::vcf::header::ValueType;
 use crate::vcf::record_encoder::{Arr, FieldKind, Flag, Gt, OptArr, Scalar, Str};
@@ -17,6 +18,21 @@ pub struct Stored<'a>(pub(crate) StoredRepr<'a>);
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StoredRepr<'a> {
     Bcf(TypedValue<'a>),
+    /// A VCF text value: `None` for an INFO key without `=`, which holds
+    /// nothing (BCF's empty vector); an empty value is `.` (missing).
+    Text(Option<&'a [u8]>),
+}
+
+/// The text of a value as it parses: an empty value is `.`.
+fn text_value(value: &[u8]) -> &[u8] {
+    if value.is_empty() { b"." } else { value }
+}
+
+fn text_vec<T: TextNumber>(value: Option<&[u8]>) -> Result<TextVec<'_, T>, FieldError> {
+    Ok(match value {
+        None => TextVec::empty(),
+        Some(v) => TextVec::new(text_value(v))?,
+    })
 }
 
 /// How to decode: what a `Gt` needs from the file.
@@ -53,18 +69,18 @@ pub trait ReadKind: FieldKind + sealed::Sealed {
     fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError>;
 }
 
-fn typed(value: Stored<'_>) -> TypedValue<'_> {
-    match value.0 {
-        StoredRepr::Bcf(v) => v,
-    }
-}
-
 fn ints(value: Stored<'_>) -> Result<OptValues<'_, i32>, FieldError> {
-    Ok(OptValues::bcf(typed(value).ints()?))
+    Ok(match value.0 {
+        StoredRepr::Bcf(v) => OptValues::bcf(v.ints()?),
+        StoredRepr::Text(t) => OptValues::text(text_vec(t)?),
+    })
 }
 
 fn floats(value: Stored<'_>) -> Result<OptValues<'_, f32>, FieldError> {
-    Ok(OptValues::bcf(typed(value).floats()?))
+    Ok(match value.0 {
+        StoredRepr::Bcf(v) => OptValues::bcf(v.floats()?),
+        StoredRepr::Text(t) => OptValues::text(text_vec(t)?),
+    })
 }
 
 macro_rules! numeric_kinds {
@@ -145,7 +161,10 @@ impl ReadKind for Str {
     }
 
     fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
-        let s = typed(value).str()?;
+        let s = match value.0 {
+            StoredRepr::Bcf(v) => v.str()?,
+            StoredRepr::Text(t) => text_str(t.unwrap_or_default())?,
+        };
         Ok((!s.is_empty() && s != ".").then_some(s))
     }
 }
@@ -162,17 +181,35 @@ impl ReadKind for Gt {
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
     fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
-        let v = typed(value);
-        if v.count() > MAX_PLOIDY {
-            return Err(FieldError::Ploidy { ploidy: v.count(), max: MAX_PLOIDY });
-        }
-        let gt = GtAlleles::Bcf(v.gt(cx.first_phase_is_read)?);
+        let gt = match value.0 {
+            StoredRepr::Bcf(v) => {
+                check_ploidy(v.count())?;
+                GtAlleles::Bcf(v.gt(cx.first_phase_is_read)?)
+            }
+            StoredRepr::Text(t) => {
+                let t = text_value(t.unwrap_or_default());
+                // Every allele but the first follows a separator; so may the first.
+                let sep = |b: &u8| *b == b'/' || *b == b'|';
+                let seps = t.iter().filter(|b| sep(b)).count();
+                check_ploidy(seps.saturating_add(usize::from(!t.first().is_some_and(sep))))?;
+                GtAlleles::Text(TextGt::new(t, cx.first_phase_is_read)?)
+            }
+        };
         let mut alleles = gt.clone();
         Ok(match (alleles.next(), alleles.next()) {
             (None, _) | (Some(super::values::GtAllele { allele: None, .. }), None) => None,
             _ => Some(GenotypeRef(gt)),
         })
     }
+}
+
+// r[impl vcf_reader.limits]
+/// Refuse a genotype of more than [`MAX_PLOIDY`] alleles before reading it.
+fn check_ploidy(n: usize) -> Result<(), FieldError> {
+    if n > MAX_PLOIDY {
+        return Err(FieldError::Ploidy { ploidy: n, max: MAX_PLOIDY });
+    }
+    Ok(())
 }
 
 // r[impl vcf_values.dynamic]

@@ -101,6 +101,11 @@ pub(crate) struct TextVec<'a, T> {
 }
 
 impl<'a, T: TextNumber> TextVec<'a, T> {
+    /// No elements: an INFO key written without a value.
+    pub(crate) fn empty() -> Self {
+        Self { rest: None, len: 0, _t: PhantomData }
+    }
+
     /// Checks every element of `value` (`""` is one empty, invalid element).
     pub(crate) fn new(value: &'a [u8]) -> Result<Self, TextValueError> {
         let mut len = 0usize;

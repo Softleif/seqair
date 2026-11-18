@@ -1,16 +1,19 @@
 //! [`Reader`]: records read front to back into a [`Fields`] type
 //! (`r[vcf_reader.reader]`, `r[vcf_reader.read_into+2]`).
 
-use super::error::{RecordAt, RecordError, VcfReadError};
+use super::entries::{FormatIndex, LazyIndex};
+use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, SampleSelection, Sections};
 use super::file::{DataStart, FileShared, Input, VcfFile};
-use super::raw::{BcfRecord, Fixed, RawRecord, Repr};
+use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord};
 use super::site::{SiteParts, bcf_info_start};
-use crate::bam::bgzf::{BgzfError, BgzfStream, Workers};
+use crate::bam::bgzf::{BgzfError, BgzfStream, VirtualOffset, Workers};
+use crate::io::text_scan::find_byte;
 use crate::vcf::header::VcfHeader;
+use crate::vcf::record_encoder::ContigId;
 use rayon_core::ThreadPool;
 use seqair_types::SmolStr;
-use std::io::{Seek, SeekFrom};
+use std::io::{BufRead, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::num::NonZeroU8;
 use std::sync::Arc;
@@ -18,6 +21,10 @@ use std::sync::Arc;
 /// Most bytes a BCF record's `l_shared + l_indiv` may claim
 /// (`r[vcf_reader.limits]`).
 pub const MAX_RECORD_BYTES: u64 = 256 << 20;
+
+/// Most bytes a VCF text line may hold, its newline not counted
+/// (`r[vcf_reader.limits]`).
+pub const MAX_LINE_BYTES: u64 = 256 << 20;
 
 /// Configures a [`Reader`]; [`open`](Self::open) plans `F` and opens it.
 #[must_use]
@@ -83,19 +90,32 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             DataStart::After(n) => (0, n),
         };
         let mut input = shared.open_input()?;
-        input.seek(SeekFrom::Start(start)).map_err(|source| BgzfError::ReadFailed { source })?;
-        // r[impl vcf_reader.reuse_io]
-        // r[impl vcf_reader.fork_equivalence]
-        let mut stream =
-            BgzfStream::builder(input).workers(self.workers).start_offset(start).build();
-        skip_bytes(&mut stream, skip).map_err(|e| e.into_read_error(RecordAt::default()))?;
+        let seek = |input: &mut Input, at: u64| {
+            input.seek(SeekFrom::Start(at)).map_err(|source| BgzfError::ReadFailed { source })
+        };
+        let input = if shared.format == VcfFormat::Vcf {
+            seek(&mut input, start.saturating_add(skip))?;
+            Framed::Plain(input)
+        } else {
+            seek(&mut input, start)?;
+            // r[impl vcf_reader.reuse_io]
+            // r[impl vcf_reader.fork_equivalence]
+            let stream =
+                BgzfStream::builder(input).workers(self.workers).start_offset(start).build();
+            let mut input = Framed::Bgzf(Box::new(stream));
+            skip_bytes(&mut input, skip).map_err(|e| e.into_read_error(RecordAt::default()))?;
+            input
+        };
         let core = Core {
             file: Arc::clone(shared),
             plan,
             sections,
-            stream,
+            input,
             scratch: Vec::new(),
             site: SiteParts::default(),
+            info_index: LazyIndex::default(),
+            format_index: LazyIndex::default(),
+            text: TextState::default(),
             ordinal: 0,
         };
         Ok(Reader { core, current: None })
@@ -126,17 +146,93 @@ impl Framing {
     }
 }
 
-fn skip_bytes(stream: &mut BgzfStream<Input>, mut n: u64) -> Result<(), Framing> {
+/// A reader's decompressed input: a BGZF stream, or a plain text file.
+enum Framed {
+    Bgzf(Box<BgzfStream<Input>>),
+    Plain(Input),
+}
+
+impl Framed {
+    fn fill(&mut self) -> Result<&[u8], BgzfError> {
+        match self {
+            Self::Bgzf(s) => s.fill(),
+            Self::Plain(p) => p.fill_buf().map_err(|source| BgzfError::ReadFailed { source }),
+        }
+    }
+
+    fn advance(&mut self, n: usize) {
+        match self {
+            Self::Bgzf(s) => s.advance(n),
+            Self::Plain(p) => p.consume(n),
+        }
+    }
+
+    fn read_exact_into(&mut self, out: &mut [u8]) -> Result<(), BgzfError> {
+        let mut done = 0usize;
+        while let Some(rest) = out.get_mut(done..)
+            && !rest.is_empty()
+        {
+            let available = self.fill()?;
+            let n = available.len().min(rest.len());
+            if n == 0 {
+                return Err(BgzfError::UnexpectedEof);
+            }
+            if let (Some(dst), Some(src)) = (rest.get_mut(..n), available.get(..n)) {
+                dst.copy_from_slice(src);
+            }
+            self.advance(n);
+            done = done.saturating_add(n);
+        }
+        Ok(())
+    }
+
+    /// The virtual offset of the next byte; `None` for plain text.
+    fn virtual_offset(&self) -> Option<VirtualOffset> {
+        match self {
+            Self::Bgzf(s) => s.virtual_offset(),
+            Self::Plain(_) => None,
+        }
+    }
+}
+
+fn skip_bytes(input: &mut Framed, mut n: u64) -> Result<(), Framing> {
     while n > 0 {
-        let available = stream.fill()?.len();
+        let available = input.fill()?.len();
         if available == 0 {
             return Err(Framing::Truncated);
         }
         let step = usize::try_from(n).map_or(available, |n| n.min(available));
-        stream.advance(step);
+        input.advance(step);
         n = n.saturating_sub(step as u64);
     }
     Ok(())
+}
+
+/// What a text reader keeps between lines: the columns of the current one,
+/// and the last CHROM with its contig, so a contig is looked up only when
+/// CHROM changes (`r[vcf_reader.contigs]`).
+#[derive(Debug, Default)]
+struct TextState {
+    cols: TextCols,
+    chrom: Vec<u8>,
+    contig: Option<ContigId>,
+}
+
+impl TextState {
+    /// Find `line`'s columns and its contig.
+    fn read(&mut self, line: &[u8], file: &FileShared) -> Result<(), RecordError> {
+        self.cols.find(line)?;
+        let chrom = self.cols.col(line, Col::Chrom);
+        if self.contig.is_none() || self.chrom != chrom {
+            let name = std::str::from_utf8(chrom)
+                .map_err(|source| RecordError::Utf8 { part: RecordPart::Chrom, source })?;
+            // r[impl vcf_reader.contigs]
+            self.contig = Some(file.contigs.by_name(&file.header, name));
+            self.chrom.clear();
+            self.chrom.extend_from_slice(chrom);
+        }
+        Ok(())
+    }
 }
 
 /// A reader's I/O state and plan; everything but the record it lends out.
@@ -144,12 +240,23 @@ struct Core<P> {
     file: Arc<FileShared>,
     plan: P,
     sections: Sections,
-    stream: BgzfStream<Input>,
+    input: Framed,
     /// A record that spans the stream's batches, copied together.
     scratch: Vec<u8>,
     /// The current record's site columns, decoded.
     site: SiteParts,
+    /// The current record's INFO and FORMAT indexes, for [`RawRecord`]'s views.
+    info_index: LazyIndex,
+    format_index: LazyIndex<FormatIndex>,
+    text: TextState,
     ordinal: u64,
+}
+
+/// Where a line is: in the input's current batch (its length, and the
+/// bytes to step past it), or copied into the scratch buffer.
+enum Line {
+    InPlace { len: usize, consumed: usize },
+    Copied,
 }
 
 impl<P> Core<P> {
@@ -160,20 +267,126 @@ impl<P> Core<P> {
         &mut self,
         with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
     ) -> Result<Option<R>, VcfReadError> {
-        if self.stream.fill()?.is_empty() {
+        self.info_index.reset();
+        self.format_index.reset();
+        if self.file.is_text() { self.next_text(with) } else { self.next_bcf(with) }
+    }
+
+    /// Frame the next non-empty line; `None` at the end.
+    fn frame_line(&mut self) -> Result<Option<(Line, RecordAt)>, VcfReadError> {
+        loop {
+            if self.input.fill()?.is_empty() {
+                return Ok(None);
+            }
+            let at = RecordAt { ordinal: self.ordinal, offset: self.input.virtual_offset() };
+            let buf = self.input.fill()?;
+            let line = match find_byte(buf, b'\n') {
+                Some(len) if len > 0 && buf.get(..len) != Some(b"\r") => {
+                    Line::InPlace { len, consumed: len.saturating_add(1) }
+                }
+                Some(len) => {
+                    // An empty line holds no record.
+                    self.input.advance(len.saturating_add(1));
+                    continue;
+                }
+                None => {
+                    self.copy_line(at)?;
+                    if self.scratch.is_empty() || self.scratch == b"\r" {
+                        continue;
+                    }
+                    Line::Copied
+                }
+            };
+            self.ordinal = self.ordinal.saturating_add(1);
+            return Ok(Some((line, at)));
+        }
+    }
+
+    // r[impl vcf_reader.limits]
+    /// Copy a line that runs past the current batch into `scratch`, up to
+    /// [`MAX_LINE_BYTES`]; the input's end ends a last line too.
+    fn copy_line(&mut self, at: RecordAt) -> Result<(), VcfReadError> {
+        self.scratch.clear();
+        loop {
+            let buf = self.input.fill()?;
+            if buf.is_empty() {
+                return Ok(());
+            }
+            let (take, done) = match find_byte(buf, b'\n') {
+                Some(i) => (i, true),
+                None => (buf.len(), false),
+            };
+            let len = self.scratch.len().saturating_add(take) as u64;
+            if len > MAX_LINE_BYTES {
+                return Err(at.error(RecordError::LineTooLong { len, max: MAX_LINE_BYTES }));
+            }
+            self.scratch.extend_from_slice(buf.get(..take).unwrap_or_default());
+            self.input.advance(if done { take.saturating_add(1) } else { take });
+            if done {
+                return Ok(());
+            }
+        }
+    }
+
+    fn next_text<R>(
+        &mut self,
+        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    ) -> Result<Option<R>, VcfReadError> {
+        let Some((framed, at)) = self.frame_line()? else { return Ok(None) };
+        let Self {
+            file, plan, sections, input, scratch, site, info_index, format_index, text, ..
+        } = self;
+        let (line, consumed) = match framed {
+            Line::InPlace { len, consumed } => {
+                (input.fill()?.get(..len).unwrap_or_default(), Some(consumed))
+            }
+            Line::Copied => (scratch.as_slice(), None),
+        };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let result = (|| {
+            text.read(line, file).map_err(|e| at.error(e))?;
+            if sections.site() {
+                site.decode_text(line, &text.cols, file).map_err(|e| at.error(e))?;
+            }
+            let contig = text.contig.as_ref().ok_or_else(|| at.error(RecordError::Truncated))?;
+            let raw = RawRecord {
+                file,
+                contig,
+                at,
+                sections: *sections,
+                site: sections.site().then_some(&*site),
+                info_index,
+                format_index,
+                repr: Repr::Text(TextRecord { line, cols: &text.cols }),
+            };
+            with(plan, raw)
+        })();
+        if let Some(n) = consumed {
+            input.advance(n);
+        }
+        result.map(Some)
+    }
+
+    fn next_bcf<R>(
+        &mut self,
+        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    ) -> Result<Option<R>, VcfReadError> {
+        if self.input.fill()?.is_empty() {
             return Ok(None);
         }
-        let at = RecordAt { ordinal: self.ordinal, offset: self.stream.virtual_offset() };
+        let at = RecordAt { ordinal: self.ordinal, offset: self.input.virtual_offset() };
         self.ordinal = self.ordinal.saturating_add(1);
-        let Self { file, plan, sections, stream, scratch, site, .. } = self;
+        let Self { file, plan, sections, input, scratch, site, info_index, format_index, .. } =
+            self;
+        let parts = Parts { file, sections: *sections, site, info_index, format_index, at };
 
         // The record header straight from the batch, or, cut by the batch's
         // end, read (and kept) here.
-        let (head, head_read) = match stream.fill()?.first_chunk::<8>() {
+        let (head, head_read) = match input.fill()?.first_chunk::<8>() {
             Some(head) => (*head, false),
             None => {
                 let mut head = [0u8; 8];
-                stream
+                input
                     .read_exact_into(&mut head)
                     .map_err(|e| Framing::from(e).into_read_error(at))?;
                 (head, true)
@@ -195,9 +408,9 @@ impl<P> Core<P> {
         let wants_indiv = sections.samples() != SampleSelection::None;
 
         // The whole record in the current batch: read it in place.
-        if !head_read && let Some(record) = stream.fill()?.get(..end) {
-            let result = hand_out(file, plan, *sections, site, at, record, shared_end, with);
-            stream.advance(end);
+        if !head_read && let Some(record) = input.fill()?.get(..end) {
+            let result = parts.hand_out(plan, record, shared_end, with);
+            input.advance(end);
             return result.map(Some);
         }
         // Otherwise copy it together, skipping samples nobody reads.
@@ -209,50 +422,69 @@ impl<P> Core<P> {
             copied = head.len();
         }
         scratch.resize(if wants_indiv { end } else { shared_end }, 0);
-        stream
+        input
             .read_exact_into(scratch.get_mut(copied..).unwrap_or_default())
             .map_err(|e| framing(e.into()))?;
         if !wants_indiv {
-            skip_bytes(stream, u64::from(l_indiv)).map_err(framing)?;
+            skip_bytes(input, u64::from(l_indiv)).map_err(framing)?;
         }
-        hand_out(file, plan, *sections, site, at, scratch, shared_end, with).map(Some)
+        parts.hand_out(plan, scratch, shared_end, with).map(Some)
     }
 }
 
-/// Hand `with` the BCF record `record`, whose shared section ends at
-/// `shared_end` (its individual section, if read, follows).
-#[expect(clippy::too_many_arguments, reason = "the reader's fields, split to borrow apart")]
-fn hand_out<P, R>(
-    file: &Arc<FileShared>,
-    plan: &P,
+/// The parts of a [`Core`] a BCF record is decoded with, borrowed apart
+/// from its input.
+struct Parts<'c> {
+    file: &'c Arc<FileShared>,
     sections: Sections,
-    site: &mut SiteParts,
+    site: &'c mut SiteParts,
+    info_index: &'c LazyIndex,
+    format_index: &'c LazyIndex<FormatIndex>,
     at: RecordAt,
-    record: &[u8],
-    shared_end: usize,
-    with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
-) -> Result<R, VcfReadError> {
-    let shared = record.get(8..shared_end).unwrap_or_default();
-    let indiv = record.get(shared_end..).unwrap_or_default();
-    let fixed =
-        Fixed::parse(shared).ok_or_else(|| at.error(RecordError::SharedTooShort { len: 0 }))?;
-    // r[impl vcf_reader.contigs]
-    let contig = file
-        .contigs
-        .by_rid(fixed.rid)
-        .ok_or_else(|| at.error(RecordError::UnknownContig { index: fixed.rid }))?;
-    let info_start = if sections.site() {
-        site.decode_bcf(shared, fixed.n_allele, fixed.qual, file)
-    } else if sections.info() {
-        bcf_info_start(shared, fixed.n_allele)
-    } else {
-        Ok(shared.len())
-    };
-    let info_start = info_start.map_err(|e| at.error(e))?;
-    let bcf = BcfRecord { bytes: record, shared, indiv, fixed, info_start };
-    let site = sections.site().then_some(&*site);
-    let raw = RawRecord { file, contig, at, sections, site, repr: Repr::Bcf(bcf) };
-    with(plan, raw)
+}
+
+impl Parts<'_> {
+    /// Hand `with` the BCF record `record`, whose shared section ends at
+    /// `shared_end` (its individual section, if read, follows).
+    fn hand_out<P, R>(
+        self,
+        plan: &P,
+        record: &[u8],
+        shared_end: usize,
+        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    ) -> Result<R, VcfReadError> {
+        let Self { file, sections, site, info_index, format_index, at } = self;
+        let shared = record.get(8..shared_end).unwrap_or_default();
+        let indiv = record.get(shared_end..).unwrap_or_default();
+        let fixed =
+            Fixed::parse(shared).ok_or_else(|| at.error(RecordError::SharedTooShort { len: 0 }))?;
+        // r[impl vcf_reader.contigs]
+        let contig = file
+            .contigs
+            .by_rid(fixed.rid)
+            .ok_or_else(|| at.error(RecordError::UnknownContig { index: fixed.rid }))?;
+        let info_start = if sections.site() {
+            site.decode_bcf(shared, fixed.n_allele, fixed.qual, file)
+        } else if sections.info() {
+            bcf_info_start(shared, fixed.n_allele)
+        } else {
+            Ok(shared.len())
+        };
+        let info_start = info_start.map_err(|e| at.error(e))?;
+        let bcf = BcfRecord { bytes: record, shared, indiv, fixed, info_start };
+        let site = sections.site().then_some(&*site);
+        let raw = RawRecord {
+            file,
+            contig,
+            at,
+            sections,
+            site,
+            info_index,
+            format_index,
+            repr: Repr::Bcf(bcf),
+        };
+        with(plan, raw)
+    }
 }
 
 /// Records read front to back into `F`.

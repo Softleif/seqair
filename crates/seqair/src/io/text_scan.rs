@@ -193,7 +193,6 @@ fn scan_block<S: Simd>(
 /// breaks — the sample columns of a VCF line (`\t`), the fields of a sample
 /// (`:`), the elements of a value (`,`).
 // r[impl vcf_reader.text_scan]
-#[expect(dead_code, reason = "the VCF text reader (next commit)")]
 pub(crate) fn for_each_byte<B, F>(hay: &[u8], needle: u8, f: F) -> ControlFlow<B>
 where
     F: FnMut(usize) -> ControlFlow<B>,
@@ -244,7 +243,6 @@ where
 /// order, and whether it is `outer`, until `f` breaks: the sample columns
 /// (`\t`) and their fields (`:`) of a VCF line in one pass.
 // r[impl vcf_reader.text_scan]
-#[expect(dead_code, reason = "the VCF text reader (next commit)")]
 pub(crate) fn for_each_of_two<B, F>(hay: &[u8], outer: u8, inner: u8, f: F) -> ControlFlow<B>
 where
     F: FnMut(usize, bool) -> ControlFlow<B>,
@@ -317,7 +315,6 @@ pub(crate) struct InfoEntry {
 /// included (`""` is one empty entry), so the caller decides what an empty
 /// key or a `.` column means.
 // r[impl vcf_reader.text_scan]
-#[cfg_attr(not(test), expect(dead_code, reason = "the VCF text reader (next commit)"))]
 pub(crate) fn for_each_info_entry<B, F>(info: &[u8], f: F) -> ControlFlow<B>
 where
     F: FnMut(InfoEntry) -> ControlFlow<B>,
