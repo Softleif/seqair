@@ -14,6 +14,14 @@ use std::fmt;
 // r[impl types.mapping_quality.type]
 // r[impl types.mapping_quality.copy]
 // r[impl types.mapping_quality.no_ord]
+/// ```
+/// use seqair_types::MappingQuality;
+///
+/// assert_eq!(MappingQuality::from_byte(60).get(), Some(60));
+/// // 255 means "not available" in SAM; it is never a score.
+/// assert_eq!(MappingQuality::UNAVAILABLE.get(), None);
+/// assert_eq!(MappingQuality::UNAVAILABLE.as_byte(), 255);
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MappingQuality(u8);

@@ -16,6 +16,17 @@ use std::fmt;
 // r[impl types.base_quality.type]
 // r[impl types.base_quality.copy]
 // r[impl types.base_quality.no_ord]
+/// ```
+/// use seqair_types::BaseQuality;
+///
+/// assert_eq!(BaseQuality::from_byte(30).get(), Some(30));
+/// // 0xFF is BAM's "no quality" (SAM `*`), never a score.
+/// assert_eq!(BaseQuality::UNAVAILABLE.get(), None);
+/// // A record's qualities view as bytes and back without copying.
+/// let quals = BaseQuality::slice_from_bytes(&[30, 31, 0xFF]);
+/// assert_eq!(quals[2], BaseQuality::UNAVAILABLE);
+/// assert_eq!(BaseQuality::slice_to_bytes(quals), &[30, 31, 0xFF]);
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BaseQuality(u8);

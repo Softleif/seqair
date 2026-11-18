@@ -5,6 +5,16 @@ use std::fmt;
 ///
 /// A read whose strand cannot be told is `Option<Strand>::None`, so code that
 /// needs a strand gets one.
+///
+/// ```
+/// use seqair_types::{BamFlags, Strand};
+///
+/// // Read 2 of a pair reports its mate's strand: the fragment's.
+/// assert_eq!(Strand::from_flags(BamFlags::from(0x1 | 0x80 | 0x20)), Some(Strand::OB));
+/// assert_eq!(Strand::from_flags(BamFlags::from(0x10)), Some(Strand::OB)); // single-end reverse
+/// assert_eq!(Strand::from_flags(BamFlags::from(0x1)), None); // paired, neither read 1 nor 2
+/// assert_eq!(Strand::OT.as_symbol(), "+");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[must_use]

@@ -1,5 +1,23 @@
 //! BGZF block writer. [`BgzfWriter`] compresses data into independent BGZF blocks
 //! via libdeflate, tracking virtual offsets for index co-production.
+//!
+//! ```
+//! use seqair::io::{BgzfWriter, VirtualOffset};
+//! use std::io::Read as _;
+//!
+//! let mut bgzf = BgzfWriter::new(Vec::new());
+//! bgzf.write_all(b"first record\n")?;
+//! // Where the next byte will go: block 0, 13 bytes in.
+//! assert_eq!(bgzf.virtual_offset(), VirtualOffset::new(0, 13));
+//! bgzf.write_all(b"second record\n")?;
+//! let compressed = bgzf.finish()?; // with the empty EOF block
+//!
+//! // Any gzip reader reads BGZF.
+//! let mut text = String::new();
+//! flate2::read::MultiGzDecoder::new(&compressed[..]).read_to_string(&mut text)?;
+//! assert_eq!(text, "first record\nsecond record\n");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::bgzf::{BgzfError, VirtualOffset};
 use crate::io::IndexBuilder;

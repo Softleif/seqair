@@ -1,5 +1,24 @@
 //! Parse BAM headers and look up contigs. [`BamHeader`] maps between tid integers,
 //! sequence names, and lengths; shared across forked readers via `Arc`.
+//!
+//! ```
+//! use seqair::bam::BamHeader;
+//! use seqair::bam::header::PgRecord;
+//!
+//! let mut header = BamHeader::from_sam_text(
+//!     "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n@SQ\tSN:chr2\tLN:500\n",
+//! )?;
+//! let chr2 = header.tid("chr2").expect("chr2 is a target");
+//! assert_eq!(header.target_len(chr2), Some(500));
+//! assert_eq!(header.target_names().collect::<Vec<_>>(), ["chr1", "chr2"]);
+//!
+//! // A program run twice on its own output gets a second, distinct ID.
+//! let pg = |id: &str| PgRecord { id: id.into(), pn: None, vn: None, cl: None, ds: None, pp: None };
+//! assert_eq!(header.add_pg(pg("tool"))?, "tool");
+//! assert_eq!(header.add_pg(pg("tool"))?, "tool.1");
+//! assert!(header.header_text().ends_with("@PG\tID:tool.1\tPP:tool\n"));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::bgzf::{BgzfError, BgzfRead, BgzfReader};
 use crate::reader::Tid;

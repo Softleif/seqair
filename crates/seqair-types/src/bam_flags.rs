@@ -13,6 +13,18 @@ use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 ///
 /// Wraps the 16-bit SAM/BAM FLAG field, providing named predicates and mutators
 /// instead of raw bitwise operations.
+///
+/// ```
+/// use seqair_types::BamFlags;
+/// use seqair_types::bam_flags::consts::{FLAG_DUPLICATE, FLAG_REVERSE};
+///
+/// let flags = BamFlags::from(99); // paired, proper pair, mate reverse, first in pair
+/// assert!(flags.is_paired() && flags.is_first_in_template() && !flags.is_reverse());
+/// let flags = flags.with(FLAG_DUPLICATE);
+/// assert!(flags.is_duplicate());
+/// assert_eq!(flags.without(FLAG_REVERSE).raw(), 99 | 0x400);
+/// assert_eq!(format!("{flags:#x}"), "0x463");
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct BamFlags(u16);

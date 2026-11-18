@@ -2,6 +2,22 @@
 //!
 //! [`AuxData`] stores tags in raw BAM binary format and provides methods for
 //! reading, adding, replacing, and removing tags. Used by [`OwnedBamRecord`](super::owned_record::OwnedBamRecord).
+//!
+//! ```
+//! use seqair::bam::AuxData;
+//!
+//! let mut aux = AuxData::new();
+//! aux.set_int(*b"NM", 3)?; // stored in the smallest type that holds it: `C`
+//! aux.set_string(*b"RG", b"sample1")?;
+//! aux.set_array_u8(*b"ML", &[200, 13])?;
+//! assert_eq!(aux.get(*b"NM").and_then(|v| v.as_i64()), Some(3));
+//!
+//! aux.set_int(*b"NM", 70_000)?; // replaced, now `I`
+//! aux.remove(*b"RG");
+//! assert!(aux.get(*b"RG").is_none());
+//! assert_eq!(&aux.as_bytes()[..3], b"MLB");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::aux::{self, AuxValue};
 use crate::sam::encode::Escaped;

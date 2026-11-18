@@ -5,6 +5,25 @@
 //! Float tags print as htslib prints them: `f` and `d` values with C's `%g`,
 //! `B:f` elements with htslib's `kputd`. Both are reimplemented here, so no
 //! libc call and no allocation beyond growing `out`.
+//!
+//! ```
+//! use seqair::bam::{BamHeader, RawBamRecord};
+//! use seqair::sam::SamRecordEncoder;
+//! use seqair::sam::format::{format_sam_header, format_sam_record};
+//!
+//! let header = BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n")?;
+//! let line = b"r1\t16\tchr1\t5\t60\t2S2M\t*\t0\t0\tACGT\t*\tXF:f:0.5";
+//! let mut record = RawBamRecord::default();
+//! SamRecordEncoder::new().encode(line, &header, &mut record)?;
+//!
+//! let mut out = Vec::new();
+//! format_sam_header(&header, &mut out)?;
+//! assert_eq!(out, b"@SQ\tSN:chr1\tLN:1000\n");
+//! out.clear();
+//! format_sam_record(&record, &header, &mut out)?;
+//! assert_eq!(out, line);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use crate::bam::{
     BamHeader, RawBamRecord,
