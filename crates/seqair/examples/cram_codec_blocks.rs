@@ -23,6 +23,7 @@
 #[allow(dead_code, reason = "only some block methods are timed")]
 mod cram_raw_blocks;
 #[path = "../benches/support/htscodecs.rs"]
+#[allow(dead_code, reason = "the decoders only")]
 mod htscodecs;
 
 use std::hint::black_box;

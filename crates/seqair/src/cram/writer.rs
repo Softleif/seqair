@@ -116,6 +116,8 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[doc(hidden)]
+pub use self::rans_nx16::encode_for_bench as rans_nx16_encode;
 pub use self::record::Placement;
 
 // r[impl cram_writer.validate_before_write]
