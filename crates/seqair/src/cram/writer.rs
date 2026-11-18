@@ -678,5 +678,32 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     }
 }
 
+/// The archive codecs' encoders, for their fuzz targets.
+#[cfg(feature = "fuzz")]
+#[doc(hidden)]
+pub mod fuzz {
+    /// The arith encoder with the combination named by `flags`' order,
+    /// STRIPE, RLE and PACK bits.
+    pub fn arith_encode(data: &[u8], flags: u8) -> Option<Vec<u8>> {
+        super::arith::encode(data, super::arith::ArithFlags::from_byte(flags))
+    }
+
+    /// The fqzcomp encoder with `(len, reverse, read2)` records and
+    /// strategy `strategy % 4` (htslib's `FQZ`, `FQZ_b`, `FQZ_c`, `FQZ_d`).
+    pub fn fqzcomp_encode(
+        qualities: &[u8],
+        records: &[(u32, bool, bool)],
+        strategy: u8,
+    ) -> Option<Vec<u8>> {
+        use super::fqzcomp::{QualRecord, Strategy};
+        let records: Vec<QualRecord> = records
+            .iter()
+            .map(|&(len, reverse, read2)| QualRecord { len, reverse, read2 })
+            .collect();
+        let strategy = Strategy::ALL.get(usize::from(strategy % 4)).copied()?;
+        super::fqzcomp::encode(qualities, &records, strategy)
+    }
+}
+
 #[cfg(test)]
 mod tests;
