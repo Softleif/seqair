@@ -119,6 +119,8 @@ use thiserror::Error;
 
 #[doc(hidden)]
 pub use self::rans_nx16::encode_for_bench as rans_nx16_encode;
+#[doc(hidden)]
+pub use self::rans_nx16::encode_methods_for_bench as rans_nx16_encode_methods;
 pub use self::record::Placement;
 
 // r[impl cram_writer.validate_before_write]

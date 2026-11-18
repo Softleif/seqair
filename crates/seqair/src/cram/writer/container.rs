@@ -995,11 +995,13 @@ impl Codecs {
         methods
     }
 
-    /// `data` stored by `method`, or `None` where it does not apply.
+    /// `data` stored by `method`, or `None` where it does not apply; `nx16`
+    /// holds what the rANS Nx16 methods share on `data`.
     fn encode(
         &mut self,
         method: Method,
         data: &[u8],
+        nx16: &rans_nx16::Prepared<'_>,
         content: Content<'_>,
     ) -> Option<(u8, Vec<u8>)> {
         match method {
@@ -1013,7 +1015,7 @@ impl Codecs {
             Method::Rans4x8Order1 => Some((4, rans::encode(data, rans::Order::One)?)),
             Method::Nx16(i) => {
                 let flags = *rans_nx16::normal_profile(data.len()).get(usize::from(i))?;
-                Some((5, rans_nx16::encode(data, flags)?))
+                Some((5, rans_nx16::encode_prepared(nx16, flags)?))
             }
             Method::Tok3 => Some((8, tok3::encode(data)?)),
             Method::Arith(i) => {
@@ -1049,8 +1051,9 @@ impl Codecs {
             Tried::All | Tried::Record(_) => self.methods(content),
         };
         let mut declined = true;
+        let nx16 = rans_nx16::Prepared::new(data);
         for method in methods {
-            let Some((id, bytes)) = self.encode(method, data, content) else { continue };
+            let Some((id, bytes)) = self.encode(method, data, &nx16, content) else { continue };
             declined = false;
             sizes.push((method, bytes.len()));
             if bytes.len() < best.as_ref().map_or(data.len(), |(_, b)| b.len()) {
