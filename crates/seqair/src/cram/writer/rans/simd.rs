@@ -105,6 +105,55 @@ fn quotient<S: Simd>(x: u32x4<S>, m: u32x4<S>, s: u32x4<S>) -> u32x4<S> {
     lo.bitcast::<u32x4<S>>().unzip_high(hi.bitcast::<u32x4<S>>()) >> s
 }
 
+/// Marks every byte value of `data` in `present`. A vector of 16 bytes is
+/// tested against the values marked so far, as a 16 × 16 bit table looked
+/// up by each byte's low nibble (two shuffles) and masked by its high
+/// nibble (two more); only a vector holding a new value is marked byte by
+/// byte. A store per byte took a cycle per byte on Zen 2.
+pub(super) fn mark_present(level: Level, data: &[u8], present: &mut [bool; 256]) {
+    dispatch!(level, simd => mark(simd, data, present));
+}
+
+/// For a high nibble `h`, its bit in the half of the table it is in: bit
+/// `h` of the first half for `h < 8`, else 0 (`HIGH_BITS` the other half).
+const LOW_BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0];
+const HIGH_BITS: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 4, 8, 16, 32, 64, 128];
+
+#[simd]
+#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table; nibbles index 16")]
+#[allow(clippy::arithmetic_side_effects, reason = "a vector shift of u8 lanes")]
+fn mark<S: Simd>(simd: S, data: &[u8], present: &mut [bool; 256]) {
+    // `table[h / 8][l]` holds bit `h % 8` for value `h·16 + l`.
+    let mut table = [[0u8; 16]; 2];
+    for (b, _) in (0u8..=255).zip(present.iter()).filter(|(_, p)| **p) {
+        table[usize::from(b >> 7)][usize::from(b & 0xF)] |= 1 << ((b >> 4) & 7);
+    }
+    let low_bits = u8x16::from_slice(simd, &LOW_BITS);
+    let high_bits = u8x16::from_slice(simd, &HIGH_BITS);
+    let nibble = u8x16::splat(simd, 0xF);
+    let zero = u8x16::splat(simd, 0);
+    let mut low_half = u8x16::from_slice(simd, &table[0]);
+    let mut high_half = u8x16::from_slice(simd, &table[1]);
+    let (chunks, tail) = data.as_chunks::<16>();
+    for chunk in chunks {
+        let v = u8x16::from_slice(simd, chunk);
+        let (lo, hi) = (v & nibble, v >> 4);
+        let hits = (low_half.swizzle_dyn(lo) & low_bits.swizzle_dyn(hi))
+            | (high_half.swizzle_dyn(lo) & high_bits.swizzle_dyn(hi));
+        if hits.simd_eq(zero).any_true() {
+            for &b in chunk {
+                present[usize::from(b)] = true;
+                table[usize::from(b >> 7)][usize::from(b & 0xF)] |= 1 << ((b >> 4) & 7);
+            }
+            low_half = u8x16::from_slice(simd, &table[0]);
+            high_half = u8x16::from_slice(simd, &table[1]);
+        }
+    }
+    for &b in tail {
+        present[usize::from(b)] = true;
+    }
+}
+
 /// Order 0 over whole rounds of four bytes, last first.
 pub(super) fn code_order_0(
     level: Level,
