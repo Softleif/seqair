@@ -12,7 +12,11 @@ use fearless_simd_macros::simd;
 /// For each pair of 4-lane masks (`r1` the lanes emitting a byte, `r2 ⊆ r1`
 /// those emitting two, as `r1 | r2 << 4`), the byte shuffle that moves
 /// their bytes to the top of 16 bytes in decode order: lane by lane from
-/// lane 0, bits 8–15 before bits 0–7.
+/// lane 0, bits 8–15 before bits 0–7. The slots below them hold 0x80,
+/// which x86's shuffle zeroes but the `Fallback` level's `swizzle_dyn`
+/// wraps to lane 0's low byte (`SSE2`'s emulation too): harmless either
+/// way, as those slots lie below the kept bytes and are overwritten by the
+/// next step's store or left out of the stream.
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -254,4 +258,38 @@ fn code_o1<S: Simd>(
     }
     x.store_slice(states);
     words.at = local.at;
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, reason = "test code")]
+mod tests {
+    use super::*;
+
+    /// Every valid mask pair's shuffle puts the lanes' bytes where the
+    /// scalar step stores them: lanes from the highest down, each storing
+    /// its state's low 16 bits big-endian below the bytes so far and
+    /// keeping as many as it emits.
+    #[test]
+    fn the_emit_table_places_bytes_as_the_scalar_step_does() {
+        // The four states' bytes, little-endian, all distinct and non-zero.
+        let x: [u8; 16] = std::array::from_fn(|i| 0x10 + u8::try_from(i).unwrap_or(0));
+        for r1 in 0..16usize {
+            for r2 in (0..16usize).filter(|r2| r2 & !r1 == 0) {
+                let mut buf = [0u8; 18];
+                let mut at = buf.len();
+                for lane in (0..4).rev() {
+                    let n = (r1 >> lane & 1) + (r2 >> lane & 1);
+                    let low = u16::from_le_bytes([x[4 * lane], x[4 * lane + 1]]);
+                    buf[at - 2..at].copy_from_slice(&low.to_be_bytes());
+                    at -= n;
+                }
+                let m = r1 | r2 << 4;
+                let shuffled: Vec<u8> =
+                    EMIT[m].iter().map(|&i| x.get(usize::from(i)).copied().unwrap_or(0)).collect();
+                let k = usize::from(EMITTED[m]);
+                assert_eq!(k, buf.len() - at, "r1 {r1:04b} r2 {r2:04b}");
+                assert_eq!(&shuffled[16 - k..], &buf[at..], "r1 {r1:04b} r2 {r2:04b}");
+            }
+        }
+    }
 }
