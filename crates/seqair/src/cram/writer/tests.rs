@@ -72,6 +72,8 @@ fn refused_records_leave_the_writer_usable() {
     tab.aux = AuxData::from_bytes(b"ZZZa\tb\0".to_vec());
     let mut reserved = mapped(5, b"r", b"AC");
     reserved.aux.set_int(*b"cF", 1).unwrap();
+    let mut bad_tag_name = mapped(5, b"r", b"AC");
+    bad_tag_name.aux = AuxData::from_bytes(b"1XC\x05".to_vec());
     let mut double = mapped(5, b"r", b"AC");
     double.aux.set_double(*b"XD", 1.0);
     let mut short_seq = mapped(5, b"r", b"AC");
@@ -85,7 +87,11 @@ fn refused_records_leave_the_writer_usable() {
     let cases: Vec<(OwnedBamRecord, IsExpected)> = vec![
         (unsorted, |e| matches!(e, CramWriteError::Unsorted { .. })),
         (mapped(5, b"", b"AC"), |e| matches!(e, CramWriteError::EmptyReadName)),
-        (unmapped_with_cigar, |e| matches!(e, CramWriteError::UnmappedWithAlignment)),
+        (unmapped_with_cigar, |e| {
+            matches!(e, CramWriteError::UnmappedWithAlignment { cigar_ops: 1, mapq: 60 })
+        }),
+        (mapped(5, b"a\0b", b"AC"), |e| matches!(e, CramWriteError::NulInReadName)),
+        (bad_tag_name, |e| matches!(e, CramWriteError::InvalidTagName { .. })),
         (tab, |e| matches!(e, CramWriteError::TabInStringTag { .. })),
         (reserved, |e| matches!(e, CramWriteError::ReservedTag { .. })),
         (double, |e| matches!(e, CramWriteError::UnsupportedTagType { ty: 'd', .. })),

@@ -52,7 +52,12 @@ impl Pool {
                     while let Ok(Job { index, slice, frame }) =
                         jobs.lock().map_err(drop).and_then(|rx| rx.recv().map_err(drop))
                     {
-                        let result = slice.assemble(&frame, &mut codecs);
+                        // A panic must come back as an error: the caller
+                        // waits for every container in order.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            slice.assemble(&frame, &mut codecs)
+                        }))
+                        .unwrap_or(Err(CramWriteError::CompressionWorkerLost));
                         if done.send(Done { index, slice, result }).is_err() {
                             return;
                         }

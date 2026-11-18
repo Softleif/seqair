@@ -26,8 +26,18 @@ struct Target {
 
 /// A target the FASTA holds.
 pub(super) struct TargetReference {
-    /// The header's `M5`, until the bases have been checked against it.
-    unverified_m5: Option<SmolStr>,
+    m5: M5,
+}
+
+/// Where the header's `M5` stands against the FASTA's bases.
+enum M5 {
+    /// Computed from them, or checked.
+    Verified,
+    /// The header's, not checked yet: that costs reading the reference,
+    /// which the writer does when the first record on it arrives.
+    Unchecked(SmolStr),
+    /// Not the bases': every record on the reference is refused.
+    Mismatch { header: SmolStr, fasta: SmolStr },
 }
 
 impl CramHeader {
@@ -47,9 +57,11 @@ impl CramHeader {
             String::with_capacity(text.len().saturating_add(targets.len().saturating_mul(80)));
         let mut bases = Vec::new();
         let mut sq_lines = 0usize;
-
-        if !has_sq && !text.starts_with("@HD") {
+        // Without `@SQ` lines, they go after a leading `@HD`, else first.
+        let mut synthesized = has_sq;
+        if !synthesized && !text.starts_with("@HD") {
             synthesize(&mut out, &mut targets, fasta, &mut bases)?;
+            synthesized = true;
         }
         for line in text.lines() {
             out.push_str(line);
@@ -69,12 +81,12 @@ impl CramHeader {
                 sq_lines = sq_lines.saturating_add(1);
             }
             out.push('\n');
-            if !has_sq && line.starts_with("@HD") && sq_lines == 0 {
+            if !synthesized {
                 synthesize(&mut out, &mut targets, fasta, &mut bases)?;
-                sq_lines = targets.len();
+                synthesized = true;
             }
         }
-        if sq_lines != targets.len() {
+        if has_sq && sq_lines != targets.len() {
             return Err(CramWriteError::HeaderTargetsMismatch {
                 index: sq_lines,
                 sq_name: None,
@@ -129,19 +141,27 @@ impl CramHeader {
         bases: &mut Vec<u8>,
     ) -> Result<(), CramWriteError> {
         let Some(target) = self.targets.get_mut(tid.as_usize()) else { return Ok(()) };
+        let mismatch = |name: &SmolStr, header: &SmolStr, fasta: &SmolStr| {
+            CramWriteError::ReferenceMd5Mismatch {
+                contig: name.clone(),
+                header: header.clone(),
+                fasta: fasta.clone(),
+            }
+        };
+        if let Some(TargetReference { m5: M5::Mismatch { header, fasta } }) = &target.reference {
+            return Err(mismatch(&target.name, header, fasta));
+        }
         fetch_upper(&target.name, target.length, fasta, bases)?;
         if let Some(reference) = &mut target.reference
-            && let Some(expected) = reference.unverified_m5.take()
+            && let M5::Unchecked(header) = &reference.m5
         {
             let found = md5_hex(bases);
-            if !expected.eq_ignore_ascii_case(&found) {
-                reference.unverified_m5 = Some(expected.clone());
-                return Err(CramWriteError::ReferenceMd5Mismatch {
-                    contig: target.name.clone(),
-                    header: expected,
-                    fasta: found,
-                });
+            if !header.eq_ignore_ascii_case(&found) {
+                let err = mismatch(&target.name, header, &found);
+                reference.m5 = M5::Mismatch { header: header.clone(), fasta: found };
+                return Err(err);
             }
+            reference.m5 = M5::Verified;
         }
         Ok(())
     }
@@ -185,10 +205,10 @@ fn describe(
         });
     }
     match m5 {
-        Some(m5) => Ok((Some(TargetReference { unverified_m5: Some(SmolStr::new(m5)) }), None)),
+        Some(m5) => Ok((Some(TargetReference { m5: M5::Unchecked(SmolStr::new(m5)) }), None)),
         None => {
             fetch_upper(&target.name, target.length, fasta, bases)?;
-            Ok((Some(TargetReference { unverified_m5: None }), Some(md5_hex(bases))))
+            Ok((Some(TargetReference { m5: M5::Verified }), Some(md5_hex(bases))))
         }
     }
 }

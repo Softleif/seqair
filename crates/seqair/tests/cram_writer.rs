@@ -68,6 +68,14 @@ fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
 
 // r[verify cram_writer.test_roundtrip]
 // r[verify cram_writer.fidelity]
+// r[verify cram_writer.test_size]
+// r[verify cram_writer.file_definition]
+// r[verify cram_writer.header_container]
+// r[verify cram_writer.eof]
+// r[verify cram_writer.compression]
+// r[verify cram_writer.builder]
+// r[verify cram_writer.finish]
+// r[verify cram_writer.scope]
 /// The fixture BAM written with `write_raw` reads back, through samtools and
 /// through seqair, as samtools' own CRAM 3.0 of it reads back.
 #[test]
@@ -108,6 +116,7 @@ fn fixture_reads_back_as_samtools_cram_does() {
         assert_eq!(ours, theirs, "record {i}, read by seqair");
     }
 
+    samtools(&["quickcheck", ours.to_str().unwrap()]);
     let size = |p: &Path| std::fs::metadata(p).unwrap().len();
     eprintln!("ours {} bytes, samtools 3.0 {} bytes", size(&ours), size(&theirs));
 
@@ -131,9 +140,7 @@ fn crai_lines(path: &Path) -> Vec<String> {
     flate2::read::MultiGzDecoder::new(std::fs::File::open(path).unwrap())
         .read_to_string(&mut text)
         .unwrap();
-    let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    lines.sort();
-    lines
+    text.lines().map(String::from).collect()
 }
 
 // r[verify cram_writer.crai]
@@ -299,7 +306,7 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
         if tc.draw(gs::booleans()) {
             (CONTIGS[contig].0.to_string(), pos + 1, 0, "*".to_string(), seq, (contig, pos))
         } else {
-            let pos1 = tc.draw(gs::sampled_from(vec![0, 1]));
+            let pos1 = tc.draw(gs::sampled_from(vec![0, 1, 1, 17]));
             ("*".to_string(), pos1, 0, "*".to_string(), seq, (usize::MAX, 0))
         }
     } else {
@@ -311,6 +318,9 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
         }
         if tc.draw(gs::booleans()) {
             ops.push(('S', 1 + tc.draw(gs::integers::<usize>().max_value(8))));
+        }
+        if tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
+            ops.push((tc.draw(gs::sampled_from(vec!['I', 'D'])), 1 + tc.draw(gs::integers::<usize>().max_value(3))));
         }
         for i in 0..1 + tc.draw(gs::integers::<usize>().max_value(3)) {
             if i > 0 {
@@ -400,6 +410,12 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
         let values: String = (0..n).map(|i| format!(",{}", i as i32 * 1000 - 1500)).collect();
         tags.push(format!("XB:B:s{values}"));
     }
+    if tc.draw(gs::booleans()) {
+        tags.push(format!("XC:B:c,{},-3", tc.draw(gs::integers::<i8>())));
+    }
+    if tc.draw(gs::booleans()) {
+        tags.push("XG:B:f,1.5,-0.25".to_string());
+    }
     let mut text = format!(
         "r{n}\t{flag}\t{rname}\t{pos1}\t{mapq}\t{cigar}\t{rnext}\t{pnext}\t{tlen}\t{seq}\t{qual}"
     );
@@ -411,25 +427,36 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
     Line { key, text }
 }
 
-/// A SAM line's fields, with the tags sorted: htslib and seqair may put a
-/// tag the decode regenerates in different places.
+/// A SAM line with `MD`, `NM` and `RG` moved to the end, sorted: the
+/// decoders put a tag they generate (or a read group) after the stored
+/// ones, and htslib keeps `MD`/`NM` stored where seqair drops them. Every
+/// other tag keeps its place.
 fn normalized(line: &str) -> String {
     let fields: Vec<&str> = line.split('\t').collect();
     let (fixed, tags) = fields.split_at(11.min(fields.len()));
-    let mut tags = tags.to_vec();
-    tags.sort_unstable();
-    [fixed.join("\t"), tags.join("\t")].join("\t")
+    let moved = |t: &&str| ["MD:", "NM:", "RG:"].iter().any(|p| t.starts_with(p));
+    let (mut tail, kept): (Vec<&str>, Vec<&str>) = tags.iter().copied().partition(moved);
+    tail.sort_unstable();
+    [fixed, &kept, &tail].concat().join("\t")
 }
 
-/// The records of `bam` written through each of the writer's inputs; the
-/// files must be byte for byte the same.
-fn write_each_way(dir: &Path, bam: &Path, fasta: &Path) -> PathBuf {
+/// The records of `bam` written through each of the writer's inputs, and
+/// with and without threads, which must all give the same bytes. Returns
+/// the file and its `.crai`.
+fn write_each_way(
+    dir: &Path,
+    bam: &Path,
+    fasta: &Path,
+    records_per_slice: u32,
+) -> (PathBuf, PathBuf) {
+    type Writer = seqair::cram::writer::CramWriter<Vec<u8>>;
     let (header, records) = stream_bam(bam);
-    let write_with = |threads: usize, f: &dyn Fn(&mut seqair::cram::writer::CramWriter<Vec<u8>>)| {
+    let write = |threads: usize, f: &dyn Fn(&mut Writer)| {
         let reference = IndexedFastaReader::open(fasta).unwrap();
         let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
             .write_index(true)
             .compression_threads(threads)
+            .records_per_slice(records_per_slice)
             .build()
             .unwrap();
         f(&mut writer);
@@ -438,14 +465,17 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path) -> PathBuf {
         index.unwrap().write_crai(&mut crai).unwrap();
         (bytes, crai)
     };
-    let write = |f: &dyn Fn(&mut seqair::cram::writer::CramWriter<Vec<u8>>)| write_with(0, f).0;
-    let raw = write(&|w| {
-        for r in &records {
-            w.write_raw(r).unwrap();
+    let records = &records;
+    let raw_of = |placed_only: bool| {
+        move |w: &mut Writer| {
+            for r in records.iter().filter(|r| !placed_only || r.tid().is_some()) {
+                w.write_raw(r).unwrap();
+            }
         }
-    });
-    let owned = write(&|w| {
-        for r in &records {
+    };
+    let raw = write(0, &raw_of(false));
+    let owned = write(0, &|w| {
+        for r in records {
             let mut seq = Vec::new();
             r.iupac_bases_into(&mut seq);
             let owned = OwnedBamRecord {
@@ -465,17 +495,7 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path) -> PathBuf {
     });
     assert!(raw == owned, "write and write_raw differ");
     // r[verify cram_writer.threads]
-    let threaded = write_with(3, &|w| {
-        for r in &records {
-            w.write_raw(r).unwrap();
-        }
-    });
-    let serial = write_with(0, &|w| {
-        for r in &records {
-            w.write_raw(r).unwrap();
-        }
-    });
-    assert!(threaded == serial, "the threaded writer's file or index differs");
+    assert!(write(3, &raw_of(false)) == raw, "the threaded writer's file or index differs");
     // The store keeps placed records only.
     let mut store = RecordStore::new();
     let placed: Vec<_> = records
@@ -483,20 +503,17 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path) -> PathBuf {
         .filter(|r| r.tid().is_some())
         .map(|r| store.push_raw(r.as_payload(), &header, &mut ()).unwrap().unwrap())
         .collect();
-    let stored = write(&|w| {
+    let stored = write(0, &|w| {
         for &idx in &placed {
             w.write_store_record(&store, idx).unwrap();
         }
     });
-    let raw_placed = write(&|w| {
-        for r in records.iter().filter(|r| r.tid().is_some()) {
-            w.write_raw(r).unwrap();
-        }
-    });
-    assert!(raw_placed == stored, "write_store_record and write_raw differ");
+    assert!(write(0, &raw_of(true)) == stored, "write_store_record and write_raw differ");
     let path = dir.join("ours.cram");
-    std::fs::write(&path, raw).unwrap();
-    path
+    std::fs::write(&path, raw.0).unwrap();
+    let crai = dir.join("ours.cram.crai");
+    std::fs::write(&crai, raw.1).unwrap();
+    (path, crai)
 }
 
 // r[verify cram_writer.test_roundtrip]
@@ -508,6 +525,17 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path) -> PathBuf {
 // r[verify cram_writer.record.read_group]
 // r[verify cram_writer.record.unmapped]
 // r[verify cram_writer.record.mate]
+// r[verify cram_writer.record.order]
+// r[verify cram_writer.record.flags]
+// r[verify cram_writer.record.position]
+// r[verify cram_writer.record.quality]
+// r[verify cram_writer.record.mapq]
+// r[verify cram_writer.slicing]
+// r[verify cram_writer.container_header]
+// r[verify cram_writer.slice_header]
+// r[verify cram_writer.slice_extent]
+// r[verify cram_writer.preservation_map]
+// r[verify cram_writer.data_series]
 /// Drawn reads written by seqair read back as samtools' CRAM 3.0 of them
 /// does, through samtools and through seqair; and every input writes the
 /// same bytes.
@@ -518,7 +546,10 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
     let mut lines: Vec<Line> = (0..n).map(|i| tc.draw(read(refs.clone(), i))).collect();
     lines.sort_by_key(|l| l.key);
     let text: String = lines.iter().map(|l| l.text.as_str()).collect();
-    let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, tc.draw(gs::booleans()));
+    // Small slices sometimes, so records cross slice boundaries.
+    let records_per_slice = tc.draw(gs::sampled_from(vec![10_000, 10_000, 1, 2, 5]));
+    let calmd = tc.draw(gs::booleans());
+    let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, calmd, records_per_slice);
     tc.assume(compared);
 }
 
@@ -529,7 +560,12 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
 /// Returns `false`, having checked only that samtools reads seqair's file,
 /// when samtools cannot read its own: a deletion past the reference's end
 /// without `MD`/`NM` (`r[cram_writer.md_nm.past_reference_end]`).
-fn assert_reads_back_as_samtools_cram_does(refs: &[Vec<u8>], records: &str, calmd: bool) -> bool {
+fn assert_reads_back_as_samtools_cram_does(
+    refs: &[Vec<u8>],
+    records: &str,
+    calmd: bool,
+    records_per_slice: u32,
+) -> bool {
     let dir = tempfile::tempdir().unwrap();
     let fasta = write_fasta(dir.path(), refs);
     let sam = dir.path().join("in.sam");
@@ -547,7 +583,11 @@ fn assert_reads_back_as_samtools_cram_does(refs: &[Vec<u8>], records: &str, calm
         std::fs::write(&bam, out.stdout).unwrap();
     }
 
-    let ours = write_each_way(dir.path(), &bam, &fasta);
+    let (ours, crai) = write_each_way(dir.path(), &bam, &fasta, records_per_slice);
+    // r[verify cram_writer.crai]
+    let samtools_crai = dir.path().join("samtools.crai");
+    samtools(&["index", "-o", samtools_crai.to_str().unwrap(), ours.to_str().unwrap()]);
+    assert_eq!(crai_lines(&crai), crai_lines(&samtools_crai), "the index is samtools index's");
     let theirs = dir.path().join("theirs.cram");
     samtools(&[
         "view",
@@ -587,7 +627,7 @@ fn found_cases_read_back_as_samtools_cram_does() {
         // Past the end without a deletion: MD/NM generated, as htslib does.
         "r1\t0\tchr1\t3000\t0\t2M\t*\t0\t0\tAA\t*\n",
     ] {
-        assert!(assert_reads_back_as_samtools_cram_does(&refs, records, false));
+        assert!(assert_reads_back_as_samtools_cram_does(&refs, records, false, 10_000));
     }
 }
 
@@ -606,13 +646,93 @@ fn a_deletion_past_the_reference_end_reads_back_through_samtools() {
         format!("md_only\t0\tchr1\t3000\t9\t1M3D\t*\t0\t0\t{last}\tI\tMD:Z:1^XYZ\n"),
     ];
     let text: String = records.concat();
-    assert!(!assert_reads_back_as_samtools_cram_does(&refs, &text, false));
+    assert!(!assert_reads_back_as_samtools_cram_does(&refs, &text, false, 10_000));
     let sam = dir.path().join("in.sam");
     std::fs::write(&sam, header_text() + &text).unwrap();
     let bam = dir.path().join("in.bam");
     samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
-    let ours = write_each_way(dir.path(), &bam, &fasta);
+    let (ours, _) = write_each_way(dir.path(), &bam, &fasta, 10_000);
     let read: Vec<String> = samtools_lines(&ours, &fasta);
     let expected: Vec<String> = text.lines().map(String::from).collect();
     assert_eq!(read, expected);
+}
+
+/// The header of a BAM whose text is `text` and whose binary reference list
+/// is [`CONTIGS`].
+fn bam_header_with_text(text: &str) -> seqair::bam::BamHeader {
+    let mut bytes = b"BAM\x01".to_vec();
+    bytes.extend_from_slice(&(text.len() as i32).to_le_bytes());
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(&(CONTIGS.len() as i32).to_le_bytes());
+    for (name, len) in CONTIGS {
+        bytes.extend_from_slice(&(name.len() as i32 + 1).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&(len as i32).to_le_bytes());
+    }
+    let mut bgzf = seqair::io::BgzfWriter::new(Vec::new());
+    bgzf.write_all(&bytes).unwrap();
+    let bam = bgzf.finish().unwrap();
+    BamStreamReader::new(std::io::Cursor::new(bam)).unwrap().into_header()
+}
+
+// r[verify cram_writer.header_text]
+// r[verify cram_writer.header_m5]
+/// A BAM header whose text lists no references gets one `@SQ` line per
+/// target, with `M5`, after a leading `@HD` or else first.
+#[test]
+fn a_header_without_sq_lines_gets_them() {
+    let refs = reference_bases(&mut Rng(3));
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = write_fasta(dir.path(), &refs);
+    for (text, before) in [
+        ("", ""),
+        ("@HD\tVN:1.6\n@CO\tc\n", "@HD\tVN:1.6\n"),
+        ("@CO\tc\n@HD\tVN:1.6\n", ""),
+        ("@RG\tID:a\n", ""),
+    ] {
+        let header = bam_header_with_text(text);
+        let reference = IndexedFastaReader::open(&fasta).unwrap();
+        let writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference).build().unwrap();
+        let (cram, _) = writer.finish().unwrap();
+        let written = CramStreamReader::new(&cram[..]).unwrap().into_header();
+        let written = written.header_text();
+        let sq: String = CONTIGS
+            .iter()
+            .zip(&refs)
+            .map(|((name, len), bases)| {
+                let m5 = format!("{:x}", md5::compute(bases.to_ascii_uppercase()));
+                format!("@SQ\tSN:{name}\tLN:{len}\tM5:{m5}\n")
+            })
+            .collect();
+        let rest = text.strip_prefix(before).unwrap();
+        assert_eq!(written, format!("{before}{sq}{rest}"), "{text:?}");
+    }
+}
+
+// r[verify cram_writer.reference_free]
+/// Records on a reference the FASTA lacks are written without it, and read
+/// back through samtools and seqair as they were.
+#[test]
+fn a_reference_the_fasta_lacks_is_written_without_it() {
+    let refs = reference_bases(&mut Rng(5));
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = write_fasta(dir.path(), &refs);
+    let text = header_text().replacen("@RG", "@SQ\tSN:chrX\tLN:500\n@RG", 1);
+    let records = [
+        "a\t0\tchr1\t11\t60\t4M\t*\t0\t0\tACGT\tIIII\tXS:i:1",
+        "b\t0\tchrX\t3\t60\t2S3M1I2M2D1M1N2M\t*\t0\t0\tTTACGNACGAA\tIIIIIIIIIII\tNM:i:3\tMD:Z:0A",
+        "c\t81\tchrX\t9\t7\t1H3M1P1M\t=\t3\t-7\tACGT\t*",
+        "d\t133\tchrX\t9\t0\t*\t=\t9\t0\tAC\t##",
+    ];
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, text + &records.join("\n") + "\n").unwrap();
+    let bam = dir.path().join("in.bam");
+    samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
+    let (ours, _) = write_each_way(dir.path(), &bam, &fasta, 10_000);
+    let through_samtools = samtools_lines(&ours, &fasta);
+    // chr1 has a reference: its record gains MD/NM on read.
+    assert!(through_samtools[0].starts_with(records[0]));
+    assert_eq!(through_samtools[1..], records[1..]);
+    assert_eq!(seqair_lines(&ours, &fasta), through_samtools);
 }
