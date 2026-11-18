@@ -118,6 +118,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[doc(hidden)]
+pub use self::rans::encode_for_bench as rans4x8_encode;
+#[doc(hidden)]
 pub use self::rans_nx16::encode_for_bench as rans_nx16_encode;
 #[doc(hidden)]
 pub use self::rans_nx16::encode_methods_for_bench as rans_nx16_encode_methods;

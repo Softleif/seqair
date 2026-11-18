@@ -2,6 +2,10 @@
 //! [`crate::cram::rans`], laid out as htscodecs' `rANS_static.c` writes it.
 
 use crate::cram::varint::write_itf8;
+use std::cell::RefCell;
+use std::thread::LocalKey;
+
+mod reference;
 
 // r[impl cram_writer.rans4x8]
 
@@ -56,22 +60,77 @@ impl Symbol {
 }
 
 type Table = [Symbol; 256];
+/// A symbol as the fast coding loop reads it: the reciprocal in the low
+/// half, and in the high half the start (bits 0–11), the frequency
+/// (12–24) and the shift (25–28). 0 for a symbol without frequency, which
+/// no position looks up.
+type Enc = u64;
+
+impl Symbol {
+    #[allow(clippy::arithmetic_side_effects, reason = "start < 4096, freq ≤ 4095, shift ≤ 12")]
+    fn pack(self) -> Enc {
+        debug_assert!(self.start < 1 << 12 && self.freq < 1 << 13 && self.shift < 1 << 4);
+        u64::from(self.rcp) | u64::from(self.start | self.freq << 12 | self.shift << 25) << 32
+    }
+}
+
+// r[impl cram_writer.rans4x8.fast]
+/// How [`encode_with`] counts and codes: the reference loops, or the fast
+/// path. Both write the same bytes.
+#[derive(Debug, Clone, Copy)]
+enum Coder {
+    Reference,
+    Fast,
+}
 
 /// `data` compressed, or `None` when it is empty, too large for the
 /// format's 32-bit sizes, or too small for order 1.
 pub(super) fn encode(data: &[u8], order: Order) -> Option<Vec<u8>> {
+    encode_with(data, order, Coder::Fast)
+}
+
+/// [`encode`] for benchmarks and fuzzing: order 1 or 0, with the reference
+/// loops the fast path is checked against, or with the fast path.
+#[doc(hidden)]
+pub fn encode_for_bench(data: &[u8], order_1: bool, reference: bool) -> Option<Vec<u8>> {
+    let order = if order_1 { Order::One } else { Order::Zero };
+    encode_with(data, order, if reference { Coder::Reference } else { Coder::Fast })
+}
+
+fn encode_with(data: &[u8], order: Order, coder: Coder) -> Option<Vec<u8>> {
     // An empty table would read as symbol 0 followed by the states.
     if data.is_empty() {
         return None;
     }
     let raw_len = u32::try_from(data.len()).ok()?;
-    let mut table = Vec::new();
-    let mut rev = Vec::with_capacity(data.len());
-    let states = match order {
-        Order::Zero => encode_order_0(data, &mut table, &mut rev),
-        Order::One => encode_order_1(data, &mut table, &mut rev)?,
-    };
-    let payload_len = table.len().saturating_add(16).saturating_add(rev.len());
+    match coder {
+        Coder::Reference => {
+            let mut table = Vec::new();
+            let mut rev = Vec::with_capacity(data.len());
+            let states = match order {
+                Order::Zero => reference::encode_order_0(data, &mut table, &mut rev),
+                Order::One => reference::encode_order_1(data, &mut table, &mut rev)?,
+            };
+            rev.reverse();
+            assemble(order, raw_len, &table, states, &rev)
+        }
+        Coder::Fast => match order {
+            Order::Zero => fast_order_0(data, raw_len),
+            Order::One => fast_order_1(data, raw_len),
+        },
+    }
+}
+
+/// The stream: order, sizes, table, the four states, and the
+/// renormalization bytes in decode order.
+fn assemble(
+    order: Order,
+    raw_len: u32,
+    table: &[u8],
+    states: [u32; 4],
+    words: &[u8],
+) -> Option<Vec<u8>> {
+    let payload_len = table.len().saturating_add(16).saturating_add(words.len());
     let mut out = Vec::with_capacity(payload_len.saturating_add(9));
     out.push(match order {
         Order::Zero => 0,
@@ -79,121 +138,321 @@ pub(super) fn encode(data: &[u8], order: Order) -> Option<Vec<u8>> {
     });
     out.extend_from_slice(&u32::try_from(payload_len).ok()?.to_le_bytes());
     out.extend_from_slice(&raw_len.to_le_bytes());
-    out.extend_from_slice(&table);
+    out.extend_from_slice(table);
     for state in states {
         out.extend_from_slice(&state.to_le_bytes());
     }
-    out.extend(rev.iter().rev());
+    out.extend_from_slice(words);
     Some(out)
 }
 
-fn encode_order_0(data: &[u8], table: &mut Vec<u8>, rev: &mut Vec<u8>) -> [u32; 4] {
-    let mut counts = [0u32; 256];
-    for &b in data {
-        let c = counts.get_mut(usize::from(b));
-        if let Some(c) = c {
-            *c = c.saturating_add(1);
-        }
-    }
-    let symbols = normalize(&counts);
-    write_frequencies(table, &symbols);
-
-    let mut states = [LOWER_BOUND; 4];
-    // The decoder reads byte `i` with state `i % 4`, renormalizing after
-    // each; the encoder runs it backwards.
-    for (i, &b) in data.iter().enumerate().rev() {
-        if let (Some(state), Some(&sym)) = (states.get_mut(i % 4), symbols.get(usize::from(b))) {
-            put(state, rev, sym);
-        }
-    }
-    states
+/// The renormalization bytes, written backwards from the end of `buf` so
+/// that `buf[at..]` holds them in decode order. A symbol emits at most two
+/// bytes, so 2 a symbol and 2 spare never run out.
+struct Words<'a> {
+    buf: &'a mut [u8],
+    at: usize,
 }
 
-fn encode_order_1(data: &[u8], table: &mut Vec<u8>, rev: &mut Vec<u8>) -> Option<[u32; 4]> {
+impl<'a> Words<'a> {
+    /// Room for `symbols` symbols' bytes in `scratch`, whose old contents
+    /// are overwritten before they are read; `None` if that overflows.
+    fn new(scratch: &'a mut Vec<u8>, symbols: usize) -> Option<Self> {
+        scratch.resize(symbols.checked_mul(2)?.checked_add(2)?, 0);
+        Some(Self { at: scratch.len(), buf: scratch })
+    }
+
+    fn decode_order(&self) -> &[u8] {
+        self.buf.get(self.at..).unwrap_or_default()
+    }
+}
+
+thread_local! {
+    /// [`Words`]' buffer, kept between blocks: a fresh one per block is a
+    /// page fault per 4 KiB of bytes.
+    static WORDS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The order-1 counts and coding table (1.5 MiB), kept between blocks:
+    /// zeroing them would cost a small block more than its coding.
+    static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::default());
+}
+
+/// A word buffer larger than this (a block of 16 MiB) is dropped after use
+/// rather than kept for the thread's next block.
+const MAX_KEPT_WORDS: usize = 32 << 20;
+
+/// Per-thread scratch: what to give back after use.
+trait Scratch: Default {
+    fn trim(&mut self) {}
+}
+
+impl Scratch for Vec<u8> {
+    fn trim(&mut self) {
+        if self.capacity() > MAX_KEPT_WORDS {
+            *self = Vec::new();
+        }
+    }
+}
+
+/// `f` on this thread's scratch, or on a fresh one while the thread-local
+/// is being destroyed or already in use (neither happens in the encoder's
+/// own calls, but neither may panic).
+fn with_scratch<T: Scratch, R>(
+    key: &'static LocalKey<RefCell<T>>,
+    f: impl FnOnce(&mut T) -> Option<R>,
+) -> Option<R> {
+    let mut f = Some(f);
+    let kept = key.try_with(|cell| {
+        let mut scratch = cell.try_borrow_mut().ok()?;
+        let r = f.take().map(|f| f(&mut scratch));
+        scratch.trim();
+        r
+    });
+    match kept {
+        Ok(Some(r)) => r,
+        // `f` has not run.
+        _ => f.take()?(&mut T::default()),
+    }
+}
+
+/// Order-1 counts in four tables, so that a run of one pair is four chains
+/// of increments rather than one, and the coding table, each indexed by the
+/// context and the symbol as a big-endian u16.
+struct Order1Scratch {
+    counts: [Vec<u32>; 4],
+    /// The rows of `counts` the last block may have left non-zero.
+    dirty: [bool; 256],
+    /// Rows of contexts the current block lacks hold an earlier block's
+    /// entries, which no position of this block reads.
+    enc: Vec<Enc>,
+}
+
+impl Scratch for Order1Scratch {}
+
+impl Default for Order1Scratch {
+    fn default() -> Self {
+        Self {
+            counts: std::array::from_fn(|_| vec![0; 1 << 16]),
+            dirty: [false; 256],
+            enc: vec![0; 1 << 16],
+        }
+    }
+}
+
+/// Order-0 counts, in four tables so that a run of one byte is four chains
+/// of increments rather than one.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables")]
+fn count_order_0(data: &[u8]) -> [u32; 256] {
+    let mut c = [[0u32; 256]; 4];
+    let (quads, tail) = data.as_chunks::<4>();
+    for &[a, b, d, e] in quads {
+        c[0][usize::from(a)] = c[0][usize::from(a)].wrapping_add(1);
+        c[1][usize::from(b)] = c[1][usize::from(b)].wrapping_add(1);
+        c[2][usize::from(d)] = c[2][usize::from(d)].wrapping_add(1);
+        c[3][usize::from(e)] = c[3][usize::from(e)].wrapping_add(1);
+    }
+    for &a in tail {
+        c[0][usize::from(a)] = c[0][usize::from(a)].wrapping_add(1);
+    }
+    let [mut sum, c1, c2, c3] = c;
+    for (((s, a), b), d) in sum.iter_mut().zip(c1).zip(c2).zip(c3) {
+        // Each count is at most `data.len()` < 2^32.
+        *s = s.wrapping_add(a).wrapping_add(b).wrapping_add(d);
+    }
+    sum
+}
+
+/// A table's symbols packed for the coding loop.
+fn pack_row(freq: &[u32; 256], row: &mut [Enc]) {
+    let mut start = 0u32;
+    for (e, &f) in row.iter_mut().zip(freq) {
+        *e = Symbol::new(start, f).pack();
+        start = start.saturating_add(f);
+    }
+}
+
+fn fast_order_0(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
+    let freq = normalize(&count_order_0(data));
+    let mut table = Vec::new();
+    write_frequencies(&mut table, &freq);
+    let mut enc = [0; 256];
+    pack_row(&freq, &mut enc);
+    with_scratch(&WORDS, |scratch| {
+        let mut words = Words::new(scratch, data.len())?;
+        let states = code_order_0(data, &enc, &mut words);
+        assemble(Order::Zero, raw_len, &table, states, words.decode_order())
+    })
+}
+
+fn fast_order_1(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
     // htscodecs reads the byte before the remainder from the last quarter.
     if data.len() < 4 {
         return None;
     }
-    let quarter = data.len() / 4;
-    // Each byte's context: the byte before it in its quarter, 0 at a
-    // quarter's start; the remainder continues the last quarter.
-    let context = |i: usize| -> u8 {
-        if i < quarter.saturating_mul(4) && i.is_multiple_of(quarter) {
-            0
-        } else {
-            data.get(i.wrapping_sub(1)).copied().unwrap_or(0)
-        }
-    };
+    with_scratch(&ORDER_1, |o1| {
+        let table = order_1_tables(o1, data);
+        let enc: &[Enc; 1 << 16] = o1.enc.as_slice().try_into().ok()?;
+        with_scratch(&WORDS, |scratch| {
+            let mut words = Words::new(scratch, data.len())?;
+            let states = code_order_1(data, enc, &mut words);
+            assemble(Order::One, raw_len, &table, states, words.decode_order())
+        })
+    })
+}
 
-    let mut counts = vec![[0u32; 256]; 256];
-    for (i, &b) in data.iter().enumerate() {
-        if let Some(c) =
-            counts.get_mut(usize::from(context(i))).and_then(|row| row.get_mut(usize::from(b)))
-        {
-            *c = c.saturating_add(1);
+/// The order-1 tables as written, with `o1.enc` filled for every context
+/// of `data` (at least 4 bytes): every byte counted with the one before it,
+/// then the quarter starts moved to context 0.
+#[allow(clippy::indexing_slicing, reason = "u8s and u16s index 256- and 65536-entry tables")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "counts ≤ data.len() < 2^32; each quarter start was counted once as a pair"
+)]
+fn order_1_tables(o1: &mut Order1Scratch, data: &[u8]) -> Vec<u8> {
+    for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
+        for c in &mut o1.counts {
+            c[ctx << 8..][..256].fill(0);
+        }
+        *dirty = false;
+    }
+    let [c0, c1, c2, c3] = &mut o1.counts;
+    // Every context is a byte of `data`, or 0 at a quarter's start.
+    let mut contexts = [false; 256];
+    contexts[0] = true;
+    for &b in data {
+        contexts[usize::from(b)] = true;
+    }
+    o1.dirty = contexts;
+
+    // The pairs take the four tables in turn.
+    let Some((&first, rest)) = data.split_first() else {
+        return Vec::new();
+    };
+    c0[usize::from(first)] += 1;
+    let mut prev = usize::from(first);
+    let (quads, tail) = rest.as_chunks::<4>();
+    for &[a, b, c, d] in quads {
+        let (a, b, c, d) = (usize::from(a), usize::from(b), usize::from(c), usize::from(d));
+        c0[prev << 8 | a] += 1;
+        c1[a << 8 | b] += 1;
+        c2[b << 8 | c] += 1;
+        c3[c << 8 | d] += 1;
+        prev = d;
+    }
+    for &a in tail {
+        c0[prev << 8 | usize::from(a)] += 1;
+        prev = usize::from(a);
+    }
+    for ctx in (0..256).filter(|&c| contexts[c]) {
+        let rows =
+            [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
+        for row in rows {
+            for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(row) {
+                *a += std::mem::take(b);
+            }
         }
     }
-    let mut tables = vec![[Symbol::default(); 256]; 256];
+    let quarter = data.len() / 4;
+    for p in (1..4).map(|j| j * quarter) {
+        c0[usize::from(data[p - 1]) << 8 | usize::from(data[p])] -= 1;
+        c0[usize::from(data[p])] += 1;
+    }
+
+    let rows = c0.as_chunks::<256>().0;
     let mut active = [false; 256];
-    for ((row, symbols), on) in counts.iter().zip(tables.iter_mut()).zip(active.iter_mut()) {
-        if row.iter().any(|&c| c > 0) {
-            *symbols = normalize(row);
-            *on = true;
-        }
+    for ((on, row), &ctx) in active.iter_mut().zip(rows).zip(&contexts) {
+        *on = ctx && row.iter().any(|&c| c > 0);
     }
-    write_runs(table, &active, |table, ctx| {
-        if let Some(symbols) = tables.get(ctx) {
-            write_frequencies(table, symbols);
+    let mut table = Vec::new();
+    let enc = &mut o1.enc;
+    write_runs(&mut table, &active, |table, ctx| {
+        if let Some(row) = rows.get(ctx) {
+            let freq = normalize(row);
+            write_frequencies(table, &freq);
+            pack_row(&freq, &mut enc[ctx << 8..][..256]);
         }
     });
-
-    let mut states = [LOWER_BOUND; 4];
-    let mut put_at = |state: usize, i: usize| {
-        let b = data.get(i).copied().unwrap_or(0);
-        let sym = tables
-            .get(usize::from(context(i)))
-            .and_then(|row| row.get(usize::from(b)))
-            .copied()
-            .unwrap_or_default();
-        if let Some(state) = states.get_mut(state) {
-            put(state, rev, sym);
-        }
-    };
-    // Decode order: position by position across the four quarters, then
-    // the remainder with state 3. Encode it backwards.
-    for i in (quarter.saturating_mul(4)..data.len()).rev() {
-        put_at(3, i);
-    }
-    for pos in (0..quarter).rev() {
-        for q in (0..4).rev() {
-            put_at(q, q.saturating_mul(quarter).saturating_add(pos));
-        }
-    }
-    Some(states)
+    table
 }
 
-/// `RansEncPutSymbol`: renormalize (bytes written backwards into `rev`),
-/// then encode, dividing by the symbol's reciprocal.
-#[inline]
-fn put(x: &mut u32, rev: &mut Vec<u8>, sym: Symbol) {
-    debug_assert!(sym.freq > 0, "encoding a symbol without frequency");
-    let x_max = ((LOWER_BOUND >> 12) << 8).saturating_mul(sym.freq.max(1));
-    while *x >= x_max {
-        #[allow(clippy::cast_possible_truncation, reason = "the low byte")]
-        rev.push(*x as u8);
-        *x >>= 8;
-    }
-    // x < 2^31 after renormalization: (q << 12) + x % f + start, as
-    // x + start + q·(4096 − f).
-    let q = sym.quotient(*x);
-    *x = x
-        .wrapping_add(sym.start)
-        .wrapping_add(q.wrapping_mul((1u32 << 12).saturating_sub(sym.freq)));
+/// One state's step: renormalize (0–2 bytes, `x` being below 2^31 and
+/// `x_max = f·2^19` at least 2^19), then encode, dividing by the
+/// reciprocal. Branch-free: both bytes are stored either way, below the
+/// bytes so far, and kept only as far as the state renormalizes.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "at ≥ 2 while symbols remain (see `Words`)")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "n ≤ 2 ≤ at; q·(4096 − f) + x % f + start < 2^31"
+)]
+#[allow(clippy::cast_possible_truncation, reason = "the low bytes; the high half of a u64 product")]
+fn put(x: u32, e: Enc, words: &mut Words<'_>) -> u32 {
+    let info = (e >> 32) as u32;
+    let f = (info >> 12) & 0x1FFF;
+    let x_max = f << 19;
+    let n = u32::from(x >= x_max) + u32::from(x >> 8 >= x_max);
+    let at = words.at;
+    debug_assert!(at >= 2, "a word buffer holds 2 bytes a symbol");
+    // Decode order: the second byte emitted (bits 8–15) first.
+    words.buf[at - 2..at].copy_from_slice(&(x as u16).to_be_bytes());
+    words.at = at - n as usize;
+    let x = x >> (8 * n);
+    let q = ((u64::from(x + x) * (e & 0xFFFF_FFFF)) >> 32) as u32 >> (info >> 25);
+    x + (info & 0xFFF) + q * ((1 << 12) - f)
 }
 
+/// Order 0: byte `i` with state `i % 4`, backwards.
+#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table; l < 4")]
+fn code_order_0(data: &[u8], enc: &[Enc; 256], words: &mut Words<'_>) -> [u32; 4] {
+    let mut x = [LOWER_BOUND; 4];
+    let (rounds, tail) = data.as_chunks::<4>();
+    for (l, &b) in tail.iter().enumerate().rev() {
+        x[l] = put(x[l], enc[usize::from(b)], words);
+    }
+    for &[a, b, c, d] in rounds.iter().rev() {
+        x[3] = put(x[3], enc[usize::from(d)], words);
+        x[2] = put(x[2], enc[usize::from(c)], words);
+        x[1] = put(x[1], enc[usize::from(b)], words);
+        x[0] = put(x[0], enc[usize::from(a)], words);
+    }
+    x
+}
+
+/// The order-1 lookup of `b` after `ctx`.
+fn pair(ctx: u8, b: u8) -> usize {
+    usize::from(u16::from_be_bytes([ctx, b]))
+}
+
+/// Order 1 (`data` at least 4 bytes): position by position across the four
+/// quarters, then the remainder with state 3, backwards. A quarter's first
+/// byte has context 0; the remainder continues the last quarter.
+#[allow(clippy::indexing_slicing, reason = "u16s index a 65536-entry table; windows of 2")]
+#[allow(clippy::arithmetic_side_effects, reason = "4·quarter ≥ 4")]
+fn code_order_1(data: &[u8], enc: &[Enc; 1 << 16], words: &mut Words<'_>) -> [u32; 4] {
+    let mut x = [LOWER_BOUND; 4];
+    let quarter = data.len() / 4;
+    debug_assert!(quarter >= 1);
+    for w in data[4 * quarter - 1..].windows(2).rev() {
+        x[3] = put(x[3], enc[pair(w[0], w[1])], words);
+    }
+    let (q0, rest) = data.split_at(quarter);
+    let (q1, rest) = rest.split_at(quarter);
+    let (q2, rest) = rest.split_at(quarter);
+    let q3 = &rest[..quarter];
+    let positions = q0.windows(2).zip(q1.windows(2)).zip(q2.windows(2)).zip(q3.windows(2));
+    for (((a, b), c), d) in positions.rev() {
+        x[3] = put(x[3], enc[pair(d[0], d[1])], words);
+        x[2] = put(x[2], enc[pair(c[0], c[1])], words);
+        x[1] = put(x[1], enc[pair(b[0], b[1])], words);
+        x[0] = put(x[0], enc[pair(a[0], a[1])], words);
+    }
+    for (state, q) in x.iter_mut().zip([q0, q1, q2, q3]).rev() {
+        *state = put(*state, enc[pair(0, q[0])], words);
+    }
+    x
+}
 /// Scale `counts` to frequencies summing to [`TOTAL`], each present symbol
-/// at least 1, and give each its slot range.
-fn normalize(counts: &[u32; 256]) -> Table {
+/// at least 1.
+fn normalize(counts: &[u32; 256]) -> [u32; 256] {
     let total: u64 = counts.iter().map(|&c| u64::from(c)).sum();
     let mut freq = [0u32; 256];
     for (f, &c) in freq.iter_mut().zip(counts) {
@@ -220,25 +479,15 @@ fn normalize(counts: &[u32; 256]) -> Table {
             }
         }
     }
-    let mut table = [Symbol::default(); 256];
-    let mut start = 0u32;
-    for (sym, &f) in table.iter_mut().zip(&freq) {
-        *sym = Symbol::new(start, f);
-        start = start.saturating_add(f);
-    }
-    table
+    freq
 }
 
 /// An order-0 frequency table: the present symbols, run-length coded as
 /// htscodecs writes them, each with its frequency as ITF8; then 0.
-fn write_frequencies(out: &mut Vec<u8>, symbols: &Table) {
-    let mut present = [false; 256];
-    for (p, s) in present.iter_mut().zip(symbols) {
-        *p = s.freq > 0;
-    }
-    write_runs(out, &present, |out, sym| {
-        let freq = symbols.get(sym).map_or(0, |s| s.freq);
-        write_itf8(out, i32::try_from(freq).unwrap_or(i32::MAX));
+fn write_frequencies(out: &mut Vec<u8>, freq: &[u32; 256]) {
+    write_runs(out, &freq.map(|f| f > 0), |out, sym| {
+        let f = freq.get(sym).copied().unwrap_or(0);
+        write_itf8(out, i32::try_from(f).unwrap_or(i32::MAX));
     });
 }
 
@@ -270,13 +519,57 @@ pub(super) fn write_runs(
     }
     out.push(0);
 }
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::arithmetic_side_effects, reason = "test code")]
 mod tests {
     use super::*;
     use crate::cram::rans::decode;
     use hegel::prelude::*;
+
+    /// A block: bytes of an alphabet of 1 to 256 symbols, uniform or in
+    /// runs (repeated pairs, which the fast counts split four ways), of any
+    /// length, the short ones below 4 included.
+    #[hegel::composite]
+    fn arb_block(tc: &TestCase) -> Vec<u8> {
+        let alphabet: u32 = tc.draw(gs::integers::<u32>().min_value(1).max_value(256));
+        let max_run: u32 = tc.draw(gs::sampled_from(&[1, 4, 64]));
+        let len: usize = tc.draw(gs::integers::<usize>().max_value(20_000));
+        let mut x = tc.draw(gs::integers::<u64>()) | 1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let r = next();
+            #[allow(clippy::cast_possible_truncation, reason = "below alphabet ≤ 256")]
+            let b = (r % u64::from(alphabet)) as u8;
+            let run = usize::try_from((r >> 32) % u64::from(max_run)).unwrap() + 1;
+            data.extend(std::iter::repeat_n(b, run.min(len - data.len())));
+        }
+        data
+    }
+
+    // r[verify cram_writer.rans4x8.fast]
+    /// The fast path writes the reference loops' bytes, and a block's
+    /// leftovers in the thread's scratch change nothing in the next one.
+    #[hegel::test]
+    fn the_fast_path_writes_the_reference_bytes(tc: TestCase) {
+        let first = tc.draw(arb_block());
+        let second = tc.draw(arb_block());
+        for data in [&first, &second, &first] {
+            for order in [Order::Zero, Order::One] {
+                let fast = encode_with(data, order, Coder::Fast);
+                let reference = encode_with(data, order, Coder::Reference);
+                assert!(fast == reference, "{order:?} of {} bytes", data.len());
+                if let Some(fast) = fast {
+                    assert!(decode(&fast).unwrap() == *data, "{order:?}");
+                }
+            }
+        }
+    }
 
     // r[verify cram_writer.rans4x8]
     #[hegel::test]
@@ -322,10 +615,10 @@ mod tests {
         if counts.iter().all(|&c| c == 0) {
             counts[0] = 1;
         }
-        let table = normalize(&counts);
-        assert_eq!(table.iter().map(|s| s.freq).sum::<u32>(), TOTAL);
-        for (s, &c) in table.iter().zip(&counts) {
-            assert_eq!(s.freq > 0, c > 0);
+        let freq = normalize(&counts);
+        assert_eq!(freq.iter().sum::<u32>(), TOTAL);
+        for (&f, &c) in freq.iter().zip(&counts) {
+            assert_eq!(f > 0, c > 0);
         }
     }
 
