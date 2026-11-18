@@ -12,3 +12,13 @@ Small slices of real files, used by the reading guide's doctests
 Regenerate with `bcftools view` from the sources (indexes with `--write-index`).
 The panel's header still declares `AC` as `Number=1` (bcftools warns); kept as is,
 since real files carry such declarations.
+
+`headers/` holds header text only, for `VcfHeader::parse` (`crates/seqair/tests/vcf_header_parse.rs`):
+
+| file | source | trimmed |
+|---|---|---|
+| `kgp_chr22.bcf.header` | 1000 Genomes panel BCF `l_text` (with `IDX=`; FORMAT GT declared between INFO lines) | samples cut to 4 |
+| `gnomad41_chr22.bcf.header` | gnomAD 4.1 chr22 BCF `l_text` (with `IDX=`) | 4 of every 5 INFO lines dropped, leaving IDX gaps |
+| `rastair_sv168.bcf.header` | rastair BCF `l_text` (no `IDX=`, VCFv4.3, `Number=M`) | first 25 contigs |
+| `giab_hg002.vcf.header` | GIAB HG002 v4.2.1 VCF text | first 25 contigs |
+| `clinvar.vcf.header` | ClinVar VCF text | none |
