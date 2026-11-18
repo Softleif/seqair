@@ -206,10 +206,10 @@ fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
 // r[verify cram_writer.test_roundtrip]
 // r[verify cram_writer.fidelity]
 // r[verify cram_writer.test_size]
-// r[verify cram_writer.file_definition]
+// r[verify cram_writer.file_definition+2]
 // r[verify cram_writer.header_container]
 // r[verify cram_writer.eof]
-// r[verify cram_writer.compression+2]
+// r[verify cram_writer.compression+3]
 // r[verify cram_writer.builder]
 // r[verify cram_writer.finish]
 // r[verify cram_writer.scope]
@@ -230,6 +230,7 @@ fn fixture_reads_back_as_samtools_cram_does() {
         (CramVersion::V3_1(CramProfile::Normal), "3.1"),
         (CramVersion::V3_1(CramProfile::Archive), "3.1"),
     ] {
+        let archive = version == CramVersion::V3_1(CramProfile::Archive);
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("ours.cram");
         let reference = IndexedFastaReader::open(&fasta).unwrap();
@@ -244,11 +245,14 @@ fn fixture_reads_back_as_samtools_cram_does() {
 
         let theirs = dir.path().join("theirs.cram");
         let version_option = format!("version={name}");
+        let profile_option = if archive { "archive" } else { "normal" };
         samtools(&[
             "view",
             "-C",
             "--output-fmt-option",
             &version_option,
+            "--output-fmt-option",
+            profile_option,
             "-T",
             fasta.to_str().unwrap(),
             "-o",
@@ -268,6 +272,25 @@ fn fixture_reads_back_as_samtools_cram_does() {
         let size = |p: &Path| std::fs::metadata(p).unwrap().len();
         eprintln!("CRAM {name}: ours {} bytes, samtools {} bytes", size(&ours), size(&theirs));
         assert!(size(&ours) <= size(&theirs), "larger than samtools' CRAM {name}");
+        if archive {
+            // The archive codecs are what the file holds: fqzcomp (`f`) for
+            // the qualities, the arithmetic coder (`a`/`A`) somewhere, as
+            // samtools reports them.
+            let sizes = samtools(&["cram-size", ours.to_str().unwrap()]);
+            let method = |series: &str| {
+                sizes.lines().find_map(|l| {
+                    let f: Vec<&str> = l.split_whitespace().collect();
+                    (f.get(6) == Some(&series)).then(|| f.get(5).copied().unwrap_or("").to_owned())
+                })
+            };
+            assert!(method("QS").is_some_and(|m| m.contains('f')), "{sizes}");
+            assert!(
+                sizes
+                    .lines()
+                    .any(|l| l.split_whitespace().nth(5).is_some_and(|m| m.contains(['a', 'A']))),
+                "{sizes}"
+            );
+        }
 
         // Several containers, so the pool reorders some.
         let reference = IndexedFastaReader::open(&fasta).unwrap();
