@@ -4,6 +4,7 @@
 //! write fuzz targets.
 
 use seqair::bam::RawBamRecord;
+use seqair::bam::RecordStore;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::cram::stream::CramStreamReader;
@@ -210,10 +211,56 @@ pub fn check(
         format_sam_record(output, &cram_header, &mut sam).unwrap();
     }
 
+    store_writes_as_records(&cram_header, fasta, &decoded, threads, rps, version);
+
     let (again, accepted_again) = write(&cram_header, fasta, &decoded, threads, rps, version);
     assert_eq!(accepted_again.len(), decoded.len(), "decoded records are all writable");
     let (_, decoded_again) = read(&again, fasta);
     for (i, (a, b)) in decoded.iter().zip(&decoded_again).enumerate() {
         assert_eq!(a.as_payload(), b.as_payload(), "record {i} is not a fixed point");
     }
+}
+
+/// `write_store` of the placed records writes what `write_store_record`
+/// writes for each in turn, in two stores so the first leaves a slice open.
+fn store_writes_as_records(
+    header: &BamHeader,
+    fasta: &Path,
+    records: &[RawBamRecord],
+    threads: usize,
+    rps: u32,
+    version: CramVersion,
+) {
+    let mut stores = [RecordStore::new(), RecordStore::new()];
+    let half = records.len() / 2;
+    for (i, r) in records.iter().enumerate() {
+        let Some(store) = stores.get_mut(usize::from(i >= half)) else { continue };
+        if store.push_raw(r.as_payload(), header, &mut ()).is_err() {
+            return;
+        }
+    }
+    let write = |by_store: bool, threads: usize| {
+        let reference = IndexedFastaReader::open(fasta).unwrap();
+        let mut writer = CramWriterBuilder::to_writer(Vec::new(), header, reference)
+            .compression_threads(threads)
+            .records_per_slice(rps)
+            .version(version)
+            .write_index(true)
+            .build()
+            .unwrap();
+        for store in &stores {
+            if by_store {
+                writer.write_store(store).unwrap();
+            } else {
+                for idx in store.indices() {
+                    writer.write_store_record(store, idx).unwrap();
+                }
+            }
+        }
+        let (cram, index) = writer.finish().unwrap();
+        let mut crai = Vec::new();
+        index.unwrap().write_crai(&mut crai).unwrap();
+        (cram, crai)
+    };
+    assert!(write(true, threads) == write(false, 0), "write_store differs");
 }
