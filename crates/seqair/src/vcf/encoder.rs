@@ -3,6 +3,7 @@
 
 use super::bcf_encoding::*;
 use super::error::VcfError;
+use super::field_set::FieldSet;
 use crate::bam::bgzf_writer::BgzfSink;
 use crate::io::{IndexBuilder, VirtualOffset};
 use std::io::Write;
@@ -106,35 +107,25 @@ impl ContigHandle {
 
 // ── Field deduplication tracker ─────────────────────────────────────────
 
-// r[impl record_encoder.info_dedup]
-// r[impl record_encoder.format_dedup]
+// r[impl record_encoder.info_dedup+2]
+// r[impl record_encoder.format_dedup+2]
 /// Tracks written fields by `dict_idx` to detect duplicates within a record and
 /// overwrite them in place. Reused across records: cleared per record, all
 /// allocations retained.
 ///
-/// Duplicate **detection** is O(1): a `u64` bitset keyed directly by `dict_idx`
-/// (which the header builder caps below 64 via
-/// [`MAX_DICT_ENTRIES`](crate::vcf::header::MAX_DICT_ENTRIES)). The linear
-/// `entries` scan only runs when a duplicate is actually found — i.e. never on
-/// the common write-each-field-once path.
+/// Duplicate **detection** is O(1): a [`FieldSet`] keyed by `dict_idx`. The
+/// linear `entries` scan only runs when a duplicate is actually found — i.e.
+/// never on the common write-each-field-once path.
 #[derive(Default)]
 pub(crate) struct FieldTracker {
     /// `(dict_idx, start_offset)` per distinct field, in first-write order.
     /// Offsets stay ascending and are kept in sync across in-place overwrites.
     entries: Vec<(u32, usize)>,
-    /// Membership bitset keyed by `dict_idx`. Bit `i` set ⇒ field `i` written.
-    seen: u64,
+    /// The `dict_idx` of every field in `entries`.
+    seen: FieldSet,
     /// Reused scratch holding the freshly-appended field bytes during the rare
     /// overwrite path, so they can be spliced over the previous occurrence.
     scratch: Vec<u8>,
-}
-
-/// Bit for `dict_idx` in the membership set. `dict_idx < 64` is guaranteed by
-/// the header builder; the mask keeps the shift defined even if that is violated
-/// (the worst case is a spurious scan, never UB).
-pub(crate) fn dict_bit(dict_idx: u32) -> u64 {
-    debug_assert!(dict_idx < 64, "dict_idx must be < 64 (enforced by the header builder)");
-    1u64 << (dict_idx & 63)
 }
 
 #[allow(
@@ -146,13 +137,8 @@ pub(crate) fn dict_bit(dict_idx: u32) -> u64 {
 impl FieldTracker {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
-        self.seen = 0;
+        self.seen.clear();
         // `scratch` keeps its capacity for reuse.
-    }
-
-    /// Whether `dict_idx` has already been written in this record (O(1)).
-    fn contains(&self, dict_idx: u32) -> bool {
-        self.seen & dict_bit(dict_idx) != 0
     }
 
     /// Index of `dict_idx` in `entries`. Only called once a duplicate is known.
@@ -165,12 +151,6 @@ impl FieldTracker {
         let start = self.entries[idx].1;
         let end = self.entries.get(idx + 1).map_or(buf_len, |e| e.1);
         (start, end)
-    }
-
-    /// Record a brand-new field starting at `start`.
-    fn mark(&mut self, dict_idx: u32, start: usize) {
-        self.seen |= dict_bit(dict_idx);
-        self.entries.push((dict_idx, start));
     }
 
     /// Shift the offsets of every field written after `idx` by `new_len - old_len`
@@ -206,12 +186,12 @@ impl FieldTracker {
         start: usize,
         skip_sep: bool,
     ) -> bool {
-        if !self.contains(dict_idx) {
-            self.mark(dict_idx, start);
+        if self.seen.insert(dict_idx) {
+            self.entries.push((dict_idx, start));
             return true;
         }
         tracing::warn!(field = name, "field encoded twice; overwriting previous value");
-        let idx = self.find(dict_idx).expect("contains() implies an entry exists");
+        let idx = self.find(dict_idx).expect("`seen` holds exactly the ids in `entries`");
         let (old_start, old_end) = self.byte_range(idx, start);
 
         self.scratch.clear();
@@ -634,10 +614,26 @@ mod tests {
         let mut buf = Vec::new();
         let mut t = FieldTracker::default();
         append_commit(&mut t, &mut buf, 5, b"AAAA", false);
-        assert!(t.contains(5));
-        assert!(!t.contains(6));
+        assert!(t.seen.contains(5));
+        assert!(!t.seen.contains(6));
         t.clear();
-        assert!(!t.contains(5));
+        assert!(!t.seen.contains(5));
         assert!(t.find(5).is_none());
+    }
+
+    // r[verify record_encoder.info_dedup+2]
+    /// Ids past the 64 an earlier `u64` bitset could address are told apart
+    /// (no aliasing of 300 onto 300 % 64) and a duplicate still overwrites in place.
+    #[test]
+    fn commit_dedups_ids_beyond_one_word() {
+        let mut buf = Vec::new();
+        let mut t = FieldTracker::default();
+        assert!(append_commit(&mut t, &mut buf, 300, b"AAAA", false));
+        assert!(append_commit(&mut t, &mut buf, 300 % 64, b"BBBB", false));
+        assert!(append_commit(&mut t, &mut buf, 65_535, b"CCCC", false));
+        assert!(!append_commit(&mut t, &mut buf, 300, b"DD", false));
+        assert_eq!(buf, b"DDBBBBCCCC");
+        t.clear();
+        assert!(append_commit(&mut t, &mut buf, 65_535, b"E", false));
     }
 }

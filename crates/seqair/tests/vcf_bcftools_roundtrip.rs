@@ -380,8 +380,8 @@ fn bcftools_stats_succeeds() {
     assert!(stats.contains("number of records:"), "bcftools stats output: {stats}");
 }
 
-// r[verify record_encoder.info_dedup]
-// r[verify record_encoder.format_dedup]
+// r[verify record_encoder.info_dedup+2]
+// r[verify record_encoder.format_dedup+2]
 /// Write the same INFO and FORMAT fields twice, verify bcftools reads the
 /// overwritten values (not duplicates, not the first value).
 #[test]
@@ -414,7 +414,7 @@ fn bcftools_dedup_overwrite() {
     assert_eq!(fields[1], "99", "FORMAT DP should be the overwritten value");
 }
 
-// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.info_dedup+2]
 /// Overwrite an INFO field that has *another* field written between the two
 /// occurrences. The in-between field must survive untouched and the overwritten
 /// field must take its final value — verified through bcftools.
@@ -441,7 +441,7 @@ fn bcftools_dedup_interleaved_info() {
     assert_eq!(fields[1], "0.25", "the interleaved AF is preserved");
 }
 
-// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.info_dedup+2]
 /// Overwrite an INFO *array* field with a different number of elements; bcftools
 /// must read back the final array (the in-place splice handles width changes).
 #[test]
@@ -466,7 +466,7 @@ fn bcftools_dedup_array_width_change() {
     assert_eq!(fields[1], "7", "the field written between the two AD writes is intact");
 }
 
-// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.info_dedup+2]
 /// The same INFO field written three times reads back as its last value.
 #[test]
 fn bcftools_dedup_repeated_overwrite() {
@@ -495,7 +495,7 @@ fn bcftools_dedup_repeated_overwrite() {
     assert_eq!(fields[1], "30", "FORMAT DP keeps the last of three writes");
 }
 
-// r[verify record_encoder.format_dedup]
+// r[verify record_encoder.format_dedup+2]
 /// Overwrite a FORMAT field that sits *between* two others (GT:DP:GQ, overwrite
 /// DP after GQ is written). The per-sample colon splice must keep every column
 /// in place; bcftools reads each FORMAT subfield correctly.
@@ -524,8 +524,8 @@ fn bcftools_dedup_interleaved_format_middle() {
     assert_eq!(fields[2], "40", "GQ column (written between the DP writes) intact");
 }
 
-// r[verify record_encoder.info_dedup]
-// r[verify record_encoder.format_dedup]
+// r[verify record_encoder.info_dedup+2]
+// r[verify record_encoder.format_dedup+2]
 /// A full record where every INFO and FORMAT field is written twice, in
 /// interleaved order. bcftools must read each field's final value.
 #[test]

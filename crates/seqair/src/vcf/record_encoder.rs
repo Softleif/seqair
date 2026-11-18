@@ -1193,7 +1193,7 @@ mod tests {
 
     // ── INFO dedup tests ────────────────────────────────────────────
 
-    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.info_dedup+2]
     #[test]
     fn info_overwrite_last_value_wins_vcf() {
         let setup = TestSetup::new();
@@ -1215,7 +1215,7 @@ mod tests {
         assert_eq!(info_col, "DP=100", "duplicate INFO should keep only the last value");
     }
 
-    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.info_dedup+2]
     #[test]
     fn info_overwrite_first_of_multiple_vcf() {
         let setup = TestSetup::new();
@@ -1239,7 +1239,7 @@ mod tests {
         assert_eq!(info_col, "DP=100;BQ=35.5", "overwritten field keeps its original position");
     }
 
-    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.info_dedup+2]
     #[test]
     fn info_overwrite_middle_vcf() {
         let setup = TestSetup::new();
@@ -1264,7 +1264,7 @@ mod tests {
         assert_eq!(info_col, "DP=50;BQ=99;DB", "overwritten middle field keeps its position");
     }
 
-    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.info_dedup+2]
     #[test]
     fn info_overwrite_last_value_wins_bcf() {
         let setup = TestSetup::new();
@@ -1297,7 +1297,7 @@ mod tests {
         );
     }
 
-    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.info_dedup+2]
     #[test]
     fn info_dedup_tracker_resets_between_records() {
         let setup = TestSetup::new();
@@ -1332,7 +1332,7 @@ mod tests {
 
     // ── FORMAT dedup tests ──────────────────────────────────────────
 
-    // r[verify record_encoder.format_dedup]
+    // r[verify record_encoder.format_dedup+2]
     #[test]
     fn format_overwrite_last_value_wins_vcf() {
         let setup = TestSetup::new(); // 1 sample
@@ -1357,7 +1357,7 @@ mod tests {
         assert_eq!(cols[9], "0/1:99", "overwritten FORMAT DP should be 99");
     }
 
-    // r[verify record_encoder.format_dedup]
+    // r[verify record_encoder.format_dedup+2]
     #[test]
     fn format_overwrite_first_of_multiple_vcf() {
         let setup = TestSetup::new(); // 1 sample
@@ -1383,7 +1383,7 @@ mod tests {
         assert_eq!(cols[9], "1/1:45", "sample data follows the unchanged key order");
     }
 
-    // r[verify record_encoder.format_dedup]
+    // r[verify record_encoder.format_dedup+2]
     #[test]
     fn format_overwrite_bcf() {
         let setup = TestSetup::new(); // 1 sample

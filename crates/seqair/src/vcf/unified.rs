@@ -3,8 +3,9 @@
 use super::OutputFormat;
 use super::alleles::Alleles;
 use super::bcf_encoding::*;
-use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker, dict_bit};
+use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker};
 use super::error::VcfError;
+use super::field_set::FieldSet;
 use super::header::VcfHeader;
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
@@ -191,6 +192,7 @@ enum WriterInner<W: Write> {
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
         info_tracker: FieldTracker,
+        fmt_seen: FieldSet,
     },
     VcfGz {
         bgzf: BgzfSink<W>,
@@ -200,6 +202,7 @@ enum WriterInner<W: Write> {
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
         info_tracker: FieldTracker,
+        fmt_seen: FieldSet,
     },
     Bcf {
         bgzf: BgzfSink<W>,
@@ -224,6 +227,7 @@ impl<W: Write> Writer<W> {
                 sample_bufs: Vec::new(),
                 n_samples: 0,
                 info_tracker: FieldTracker::default(),
+                fmt_seen: FieldSet::default(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
                 bgzf: BgzfSink::Serial(BgzfWriter::new(inner)),
@@ -233,6 +237,7 @@ impl<W: Write> Writer<W> {
                 sample_bufs: Vec::new(),
                 n_samples: 0,
                 info_tracker: FieldTracker::default(),
+                fmt_seen: FieldSet::default(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
                 bgzf: BgzfSink::Serial(BgzfWriter::new(inner)),
@@ -295,6 +300,7 @@ impl<W: Write> Writer<W> {
                 sample_bufs,
                 n_samples,
                 info_tracker,
+                fmt_seen,
             } => WriterInner::VcfGz {
                 bgzf: bgzf.with_compression(level, threads)?,
                 index,
@@ -303,6 +309,7 @@ impl<W: Write> Writer<W> {
                 sample_bufs,
                 n_samples,
                 info_tracker,
+                fmt_seen,
             },
             WriterInner::Bcf {
                 bgzf,
@@ -429,7 +436,15 @@ impl<W: Write> Writer<W, Ready> {
                 alleles.begin_record(&mut enc, ContigHandle(contig.tid()), pos, qual)?;
                 EncoderInner::Bcf(enc)
             }
-            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs, n_samples, info_tracker } => {
+            WriterInner::Vcf {
+                output,
+                buf,
+                fmt_keys,
+                sample_bufs,
+                n_samples,
+                info_tracker,
+                fmt_seen,
+            } => {
                 info_tracker.clear();
                 let output = VcfOutput::Plain(output);
                 EncoderInner::Vcf(begin_vcf_record(
@@ -443,6 +458,7 @@ impl<W: Write> Writer<W, Ready> {
                     qual,
                     *n_samples,
                     info_tracker,
+                    fmt_seen,
                 )?)
             }
             WriterInner::VcfGz {
@@ -453,6 +469,7 @@ impl<W: Write> Writer<W, Ready> {
                 sample_bufs,
                 n_samples,
                 info_tracker,
+                fmt_seen,
             } => {
                 info_tracker.clear();
                 let output = VcfOutput::Bgzf { bgzf, index: index.as_mut() };
@@ -467,6 +484,7 @@ impl<W: Write> Writer<W, Ready> {
                     qual,
                     *n_samples,
                     info_tracker,
+                    fmt_seen,
                 )?)
             }
         };
@@ -665,9 +683,9 @@ struct VcfEncoderFields<'a> {
     n_samples: u32,
     filter_written: bool,
     info_tracker: &'a mut FieldTracker,
-    /// FORMAT fields in `fmt_keys`, as a bitset keyed by `dict_idx`, so the
-    /// common first-write path needs no name comparison.
-    fmt_seen: u64,
+    /// The `dict_idx` of every FORMAT field in `fmt_keys`, so the common
+    /// first-write path needs no name comparison.
+    fmt_seen: &'a mut FieldSet,
 }
 
 // r[impl record_encoder.buffer_reuse]
@@ -684,9 +702,11 @@ fn begin_vcf_record<'a>(
     qual: Option<f32>,
     n_samples: u32,
     info_tracker: &'a mut FieldTracker,
+    fmt_seen: &'a mut FieldSet,
 ) -> Result<VcfEncoderFields<'a>, VcfError> {
     buf.clear();
     fmt_keys.clear();
+    fmt_seen.clear();
     // Retain existing Vec allocations for buffer reuse across records (r[record_encoder.buffer_reuse]).
     // Only clear contents; begin_samples will resize if needed.
     for sb in sample_bufs.iter_mut() {
@@ -747,7 +767,7 @@ fn begin_vcf_record<'a>(
         n_samples,
         filter_written: false,
         info_tracker,
-        fmt_seen: 0,
+        fmt_seen,
     })
 }
 
@@ -900,7 +920,7 @@ impl<'a> RecordEncoder<'a, Begun> {
 
 // ── Field dedup helpers ───────────────────────────────────────────────
 
-// r[impl record_encoder.info_dedup]
+// r[impl record_encoder.info_dedup+2]
 impl VcfEncoderFields<'_> {
     /// Open an INFO field: ensure the FILTER column is closed, then emit the
     /// `;` separator (when this is not the first field) and return the byte
@@ -928,7 +948,7 @@ impl VcfEncoderFields<'_> {
     }
 }
 
-// r[impl record_encoder.info_dedup]
+// r[impl record_encoder.info_dedup+2]
 impl BcfRecordEncoder<'_> {
     /// Commit an INFO field whose bytes were just appended at `[start..]` in
     /// `shared_buf`. On a duplicate, splices the new bytes over the previous
@@ -939,7 +959,7 @@ impl BcfRecordEncoder<'_> {
         }
     }
 
-    // r[impl record_encoder.format_dedup]
+    // r[impl record_encoder.format_dedup+2]
     /// FORMAT counterpart of [`commit_info_field`](Self::commit_info_field),
     /// operating on `indiv_buf` and `n_fmt`.
     fn commit_format_field(&mut self, id: &FieldId, start: usize) {
@@ -949,7 +969,7 @@ impl BcfRecordEncoder<'_> {
     }
 }
 
-// r[impl record_encoder.format_dedup]
+// r[impl record_encoder.format_dedup+2]
 impl VcfEncoderFields<'_> {
     /// Open a FORMAT field: append the `:` separator to every sample buffer when
     /// this is not the first field. The caller then writes each sample's value,
@@ -967,9 +987,7 @@ impl VcfEncoderFields<'_> {
     /// last colon-field in each sample buffer) is moved over the previous
     /// occurrence in place, preserving key order to match the BCF/htslib path.
     fn commit_format_field(&mut self, id: &FieldId) {
-        let bit = dict_bit(id.dict_idx());
-        if self.fmt_seen & bit == 0 {
-            self.fmt_seen |= bit;
+        if self.fmt_seen.insert(id.dict_idx()) {
             // A clone shares or copies the header's name; no re-validation.
             self.fmt_keys.push(id.name.clone());
             return;

@@ -187,8 +187,8 @@ fn bcf_writer_noodles_roundtrip(tc: TestCase) {
     assert_eq!(records[0].qual_bits, Some(qual.to_bits()), "QUAL");
 }
 
-// r[verify record_encoder.info_dedup]
-// r[verify record_encoder.format_dedup]
+// r[verify record_encoder.info_dedup+2]
+// r[verify record_encoder.format_dedup+2]
 /// Writing INFO/FORMAT fields twice must produce output identical to writing
 /// only the final value. Tested for both VCF text and BCF binary.
 #[hegel::test(test_cases = crate::pinned::cases(30))]

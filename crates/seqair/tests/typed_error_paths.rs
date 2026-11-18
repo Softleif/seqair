@@ -1109,8 +1109,8 @@ fn an_undeclared_contig_is_reported_by_name_through_both_error_types() {
     );
 }
 
-// r[verify record_encoder.info_dedup]
-// r[verify record_encoder.format_dedup]
+// r[verify record_encoder.info_dedup+2]
+// r[verify record_encoder.format_dedup+2]
 /// A field encoded twice in one record is *not* an error: the second write
 /// overwrites the first in place, and the output carries exactly one column.
 /// Pinning that keeps the dedup path from quietly turning into a rejection.

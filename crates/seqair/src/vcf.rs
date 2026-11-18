@@ -181,6 +181,7 @@ pub mod alleles;
 pub(crate) mod bcf_encoding;
 pub(crate) mod encoder;
 pub mod error;
+pub(crate) mod field_set;
 pub mod header;
 pub mod record;
 pub mod record_encoder;
