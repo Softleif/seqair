@@ -31,6 +31,7 @@ mod pool;
 mod rans;
 mod rans_nx16;
 mod record;
+mod tok3;
 
 use self::container::{Assembled, SliceBuilder, SliceKind};
 use self::header::CramHeader;
