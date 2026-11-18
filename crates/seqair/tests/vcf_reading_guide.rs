@@ -2,25 +2,18 @@
 //! (`crates/seqair/src/vcf/reading.md`, `r[vcf_fields.guide]`): each runs as
 //! a doctest of `seqair::vcf::reader`, and none may stay `ignore`.
 //!
-//! Until the VCF text, region query and partition phases land, the examples
-//! that need them stay `ignore`. This test pins exactly which: making an
+//! Until the region query and partition phases land, the examples that
+//! need them stay `ignore`. This test pins exactly which: making an
 //! example run means taking it off the list, and the list must end empty.
 #![allow(clippy::unwrap_used, reason = "test code")]
 
 /// (section heading, example index within the section) of every example
 /// still marked `ignore`, and what it waits for.
 const STILL_IGNORED: &[(&str, usize, &str)] = &[
-    ("One sample: no sample handles", 0, "VCF text (truth.vcf.gz)"),
     ("Region queries", 0, "region queries"),
     ("Region queries", 1, "query_many"),
     ("Many threads", 0, "partitions"),
-    ("Owning records: `read_into`, `records()`", 0, "VCF text (rastair.vcf.gz)"),
-    ("Positions only", 0, "VCF text (truth.vcf.gz)"),
-    (
-        "Your own record type",
-        0,
-        "its last assertion needs a passing CpG SNV, which rastair.bcf does not have",
-    ),
+    ("Positions only", 0, "calls `Pos1::get`, which is `as_u32`; the example needs fixing"),
 ];
 
 // r[verify vcf_fields.guide]

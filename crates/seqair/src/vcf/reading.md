@@ -55,7 +55,7 @@ library rule.
 A single-sample file reads its FORMAT fields directly. `OnlySample` checks at
 open that there is exactly one sample.
 
-```rust,ignore
+```rust
 use seqair::vcf::{FormatGt, FormatInt, Locus, OnlySample, Site, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -217,7 +217,7 @@ assert_eq!(counts.iter().sum::<usize>(), 400);
 input in a merge, a window of neighbours — own them: `read_into` reuses your
 buffer, `records()` hands out a fresh record each time.
 
-```rust,ignore
+```rust
 use seqair::vcf::{Locus, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -286,7 +286,7 @@ Tuples cover the common shapes; for anything else, implement `Fields` and
 decode straight into your own struct. Everything that depends only on the header
 happens once, in `plan`.
 
-```rust,ignore
+```rust
 use seqair::vcf::{
     Allele, Fields, FilterStatus, InfoFlag, PlanError, RawRecord, ReadOptions, Sections, VcfFile, VcfHeader,
     VcfPos, VcfReadError,
