@@ -564,9 +564,11 @@ fn code_o1<S: Simd, const M: usize>(
     // Whole blocks of positions i - BLOCK .. i, all with a byte before them
     // in their stretch: each lane's BLOCK + 1 bytes from i - BLOCK - 1.
     let mut i = chunk;
+    // Out of the loop: every block overwrites all of it, and zeroing it
+    // each time was a call to `memset`.
+    let mut window = [[[0u8; BLOCK + 1]; 4]; M];
     while i > BLOCK {
         i -= BLOCK;
-        let mut window = [[[0u8; BLOCK + 1]; 4]; M];
         for (j, w) in window.as_flattened_mut().iter_mut().enumerate() {
             let from = j * chunk + i - 1;
             debug_assert!(from + BLOCK < data.len(), "lane {j}'s block ends in its stretch");
