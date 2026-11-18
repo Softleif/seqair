@@ -36,8 +36,14 @@ const FILE_BUFFER: usize = 128 * 1024;
 ///
 /// `Send + Sync + Clone`; a clone shares the parsed state and re-reads
 /// nothing, so a rayon task can open its own reader from a clone.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VcfFile(pub(crate) Arc<FileShared>);
+
+impl std::fmt::Debug for VcfFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Where a file's bytes come from.
 #[derive(Debug)]
@@ -98,7 +104,6 @@ pub(crate) enum DataStart {
 }
 
 /// Everything a [`VcfFile`]'s readers share.
-#[derive(Debug)]
 pub(crate) struct FileShared {
     source: Source,
     pub(crate) format: VcfFormat,
@@ -121,6 +126,19 @@ pub(crate) struct FileShared {
     pub(crate) rlen_keys: RlenKeys,
     warned_duplicate: AtomicBool,
     warned_undeclared: AtomicBool,
+}
+
+// r[impl vcf_reader.debug]
+/// The file, not its tables: every record component holds one.
+impl std::fmt::Debug for FileShared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("VcfFile");
+        match &self.source {
+            Source::Path(path) => d.field("path", path),
+            Source::Bytes(bytes) => d.field("bytes", &bytes.len()),
+        };
+        d.field("format", &self.format).finish_non_exhaustive()
+    }
 }
 
 impl Source {

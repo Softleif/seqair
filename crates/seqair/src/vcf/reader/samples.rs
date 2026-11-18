@@ -9,11 +9,11 @@ use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::file::FileShared;
 use super::index::{DictId, Entry};
-use super::info::{check_brand, decode, dyn_decode};
+use super::info::{check_brand, debug_fields, decode, dyn_decode};
 use super::raw::RawRecord;
 use crate::vcf::header::{FormatDef, SampleIdx, VcfHeader};
 use crate::vcf::record_encoder::{FieldId, FormatKey};
-use seqair_types::SmolStr;
+use seqair_types::{SmallVec, SmolStr};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
@@ -252,12 +252,24 @@ fn check_sample(sample: Option<SampleIdx>, file: &FileShared) -> Result<(), VcfR
 }
 
 /// One sample's FORMAT values.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SampleRef<'a> {
     view: FormatView<'a>,
     column: usize,
     /// The handle it was asked for by, checked against the record's header.
     sample: Option<SampleIdx>,
+}
+
+// r[impl vcf_reader.debug]
+/// The fields present, by name.
+impl std::fmt::Debug for SampleRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sample ")?;
+        match self.iter() {
+            Ok(fields) => debug_fields(f, fields),
+            Err(e) => f.debug_map().entry(&"error", &e.to_string()).finish(),
+        }
+    }
 }
 
 impl<'a> SampleRef<'a> {
@@ -319,9 +331,30 @@ impl<'a> SampleRef<'a> {
 }
 
 /// Every sample's FORMAT values, borrowed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SamplesRef<'a> {
     view: FormatView<'a>,
+}
+
+/// How many samples, and the fields the record has; not every value.
+impl std::fmt::Debug for SamplesRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Samples");
+        d.field("len", &self.len());
+        match self.view.index() {
+            Ok(index) => {
+                let names: SmallVec<&str, 8> = index
+                    .keys
+                    .entries()
+                    .iter()
+                    .filter_map(|e| self.view.file.header.string_map().name(e.id.get() as usize))
+                    .collect();
+                d.field("fields", &names)
+            }
+            Err(e) => d.field("error", &e.to_string()),
+        };
+        d.finish()
+    }
 }
 
 impl<'a> SamplesRef<'a> {
@@ -369,7 +402,6 @@ impl<'a> SamplesRef<'a> {
 }
 
 /// One FORMAT field across all samples, in sample order.
-#[derive(Debug)]
 pub struct Column<'a, V> {
     field: FieldAt<'a>,
     next: usize,
@@ -378,6 +410,15 @@ pub struct Column<'a, V> {
     file: &'a FileShared,
     at: RecordAt,
     _v: PhantomData<fn() -> V>,
+}
+
+impl<V> std::fmt::Debug for Column<'_, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Column")
+            .field("name", &self.name)
+            .field("left", &self.end.saturating_sub(self.next))
+            .finish()
+    }
 }
 
 impl<V> Clone for Column<'_, V> {
@@ -426,8 +467,14 @@ impl<V: ReadKind> ExactSizeIterator for Column<'_, V> {}
 /// The FORMAT values of a single-sample file, read without a sample handle.
 /// Fails to plan unless the header has exactly one sample: there is no
 /// "first sample" reader that would silently pick one of many.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OnlySample(FormatData);
+
+impl std::fmt::Debug for OnlySample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.view().fmt(f)
+    }
+}
 
 impl OnlySample {
     fn view(&self) -> SampleRef<'_> {
@@ -485,10 +532,17 @@ impl Fields for OnlySample {
 // r[impl vcf_fields.sample]
 /// The FORMAT values of the sample the reader's builder named with
 /// `.sample(name)` (or of the only sample, if there is one).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Sample {
     data: FormatData,
     name: SmolStr,
+}
+
+impl std::fmt::Debug for Sample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ", self.name)?;
+        self.view().fmt(f)
+    }
 }
 
 impl Sample {
@@ -558,8 +612,14 @@ impl Fields for Sample {
 
 /// Every sample's FORMAT values, by sample ([`sample`](Self::sample)) or by
 /// field ([`column`](Self::column)).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Samples(FormatData);
+
+impl std::fmt::Debug for Samples {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.view().fmt(f)
+    }
+}
 
 impl Samples {
     fn view(&self) -> SamplesRef<'_> {

@@ -62,6 +62,18 @@ pub struct Locus {
     end: VcfPos,
 }
 
+// r[impl vcf_reader.debug]
+/// `chr1:100`, or `chr1:100-103` for a record spanning more than POS.
+impl std::fmt::Display for Locus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.contig.name(), self.start)?;
+        if self.end != self.start {
+            write!(f, "-{}", self.end)?;
+        }
+        Ok(())
+    }
+}
+
 impl Locus {
     /// A locus whose span [`span_of`] checked.
     pub(crate) fn new_unchecked(contig: ContigId, start: VcfPos, end: VcfPos) -> Self {

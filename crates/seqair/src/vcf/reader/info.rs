@@ -69,6 +69,23 @@ pub(crate) fn dyn_decode<'a>(
         .map_err(|source| at.error(file, RecordError::Field { name: name.into(), source }))
 }
 
+// r[impl vcf_reader.debug]
+/// `fields` as a map of name to value; a malformed section or value is
+/// shown where it is found, and ends the map.
+pub(crate) fn debug_fields<'a, D: 'a>(
+    f: &mut std::fmt::Formatter<'_>,
+    fields: impl Iterator<Item = Result<(&'a str, D, DynValue<'a>), VcfReadError>>,
+) -> std::fmt::Result {
+    let mut map = f.debug_map();
+    for field in fields {
+        match field {
+            Ok((name, _, value)) => map.entry(&name, &value),
+            Err(e) => return map.entry(&"error", &e.to_string()).finish(),
+        };
+    }
+    map.finish()
+}
+
 /// Index an INFO column as its file's format lays it out.
 fn build(
     index: &mut FieldIndex,
@@ -84,7 +101,7 @@ fn build(
 }
 
 /// A record's INFO column, borrowed; indexed on first access.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct InfoRef<'a> {
     bytes: &'a [u8],
     /// BCF's `n_info`.
@@ -92,6 +109,17 @@ pub struct InfoRef<'a> {
     index: &'a LazyIndex,
     file: &'a FileShared,
     at: RecordAt,
+}
+
+/// The fields present, by name.
+impl std::fmt::Debug for InfoRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Info ")?;
+        match self.iter() {
+            Ok(fields) => debug_fields(f, fields),
+            Err(e) => f.debug_map().entry(&"error", &e.to_string()).finish(),
+        }
+    }
 }
 
 impl<'a> InfoRef<'a> {
@@ -161,13 +189,19 @@ impl<'a> InfoRef<'a> {
 // r[impl vcf_fields.owned]
 /// A record's INFO column, owned; its index is built on first access, so a
 /// record rejected on its position or FILTER never pays for it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Info {
     bytes: Vec<u8>,
     n: usize,
     file: Arc<FileShared>,
     at: RecordAt,
     index: LazyIndex,
+}
+
+impl std::fmt::Debug for Info {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.view().fmt(f)
+    }
 }
 
 impl Info {

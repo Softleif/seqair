@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 /// One allele of a record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Allele<'a> {
     /// Bases (`C`, `CTT`), as stored; REF is always `Bases`.
     Bases(&'a [u8]),
@@ -31,6 +31,20 @@ pub enum Allele<'a> {
     /// alleles after it keep their GT index. A record without ALT has no
     /// alleles past REF instead.
     Missing,
+}
+
+// r[impl vcf_reader.debug]
+/// Bases as text: `Bases("ACG")`.
+impl std::fmt::Debug for Allele<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bases(b) => write!(f, "Bases(\"{}\")", b.escape_ascii()),
+            Self::Symbolic(s) => f.debug_tuple("Symbolic").field(s).finish(),
+            Self::Breakend(s) => f.debug_tuple("Breakend").field(s).finish(),
+            Self::Overlapping => f.write_str("Overlapping"),
+            Self::Missing => f.write_str("Missing"),
+        }
+    }
 }
 
 impl<'a> Allele<'a> {
@@ -270,7 +284,7 @@ fn text<'a>(bytes: &'a [u8], range: &Range<u32>) -> &'a str {
 }
 
 /// A record's alleles: REF, then the ALTs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct AllelesRef<'a> {
     bytes: &'a [u8],
     spans: &'a [Range<u32>],
@@ -354,6 +368,12 @@ impl<'a> AllelesRef<'a> {
     }
 }
 
+impl std::fmt::Debug for AllelesRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 fn base(b: u8) -> Option<Base> {
     match b {
         b'A' => Some(Base::A),
@@ -365,7 +385,7 @@ fn base(b: u8) -> Option<Base> {
 }
 
 /// A record's FILTER column.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct FiltersRef<'a> {
     column: FilterColumn,
     ids: &'a [DictId],
@@ -379,6 +399,9 @@ impl<'a> FiltersRef<'a> {
     ///
     /// A VCF text FILTER name the header does not declare still fails the
     /// record, but no [`FilterId`] can name it, so `Failed` does not list it.
+    ///
+    /// `PASS` with other filters (`PASS;q10`) is `Failed`, listing `PASS`
+    /// among them; htslib's `bcf_has_filter(…, "PASS")` says it passed.
     pub fn status(&self) -> FilterStatus<'a> {
         match self.column {
             FilterColumn::Missing => FilterStatus::Missing,
@@ -405,21 +428,32 @@ impl<'a> FiltersRef<'a> {
     }
 }
 
-/// Whether a record passed its filters.
+impl std::fmt::Debug for FiltersRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.status().fmt(f)
+    }
+}
+
+// r[impl vcf_fields.site+2]
+/// Whether a record passed its filters. Match all three: a file may never
+/// write `PASS` (GIAB v5.0q marks passing records `.`), and code that keeps
+/// only `Pass` then keeps nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilterStatus<'a> {
     /// FILTER is exactly `PASS`.
     Pass,
     /// FILTER is `.` (no filters applied).
     Missing,
-    /// The filters the record failed.
+    /// The filters the record failed, in record order. `PASS;q10` is
+    /// `Failed` and lists `PASS` too (htslib's `bcf_has_filter` says it
+    /// passed).
     Failed(FailedFilters<'a>),
 }
 
 impl Eq for FilterStatus<'_> {}
 
 /// The filters a record failed, in record order.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FailedFilters<'a> {
     ids: std::slice::Iter<'a, DictId>,
     table: &'a [Option<FilterId>],
@@ -434,6 +468,13 @@ impl<'a> Iterator for FailedFilters<'a> {
     }
 }
 
+/// The filter names.
+impl std::fmt::Debug for FailedFilters<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.clone().map(FilterId::name)).finish()
+    }
+}
+
 impl PartialEq for FailedFilters<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.clone().eq(other.clone())
@@ -442,11 +483,23 @@ impl PartialEq for FailedFilters<'_> {
 
 // r[impl vcf_fields.site+2]
 /// A record's ID, REF, ALT, QUAL and FILTER, borrowed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SiteRef<'a> {
     bytes: &'a [u8],
     parts: &'a SiteParts,
     file: &'a FileShared,
+}
+
+// r[impl vcf_reader.debug]
+impl std::fmt::Debug for SiteRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Site")
+            .field("ids", &self.ids().collect::<SmallVec<_, 2>>())
+            .field("alleles", &self.alleles())
+            .field("qual", &self.qual())
+            .field("filters", &self.filters().status())
+            .finish()
+    }
 }
 
 impl<'a> SiteRef<'a> {
@@ -484,12 +537,18 @@ impl<'a> SiteRef<'a> {
 }
 
 /// A record's ID, REF, ALT, QUAL and FILTER, owned.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Site {
     /// The ID and allele columns, as stored.
     bytes: Vec<u8>,
     parts: SiteParts,
     file: Arc<FileShared>,
+}
+
+impl std::fmt::Debug for Site {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.view().fmt(f)
+    }
 }
 
 impl Site {

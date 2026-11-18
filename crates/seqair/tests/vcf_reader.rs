@@ -1330,3 +1330,43 @@ fn truth_loci_span_their_deletions() {
     }
     assert!(longest > 1);
 }
+
+// r[verify vcf_reader.debug]
+/// A record's `Debug` shows what it holds, not its file's tables; a locus
+/// displays as `CHROM:POS`.
+#[test]
+fn records_debug_as_what_they_hold() {
+    for name in ["rastair.bcf", "panel.bcf", "truth.vcf.gz"] {
+        let file = VcfFile::open(fixture(name)).unwrap();
+        let record = file.reader::<FullRecord>().open().unwrap().read().unwrap().unwrap();
+        let debug = format!("{record:?}");
+        // About the record's own size: its fields, not the header's.
+        let limit = 6 * record.raw_bytes().len() + 300;
+        assert!(debug.len() < limit, "{name}: {} bytes: {debug}", debug.len());
+        for leak in ["string_map", "HeaderId", "contigs", "FileShared", "infos"] {
+            assert!(!debug.contains(leak), "{name}: {debug}");
+        }
+        assert!(debug.contains(&format!("locus: {}", record.locus())), "{debug}");
+        assert!(format!("{file:?}").len() < 200);
+    }
+    let recs = text_records(&[
+        "chr1\t5\trs1;rs2\tAC\tA,<DEL>\t3\tq10\tDP=4;AF=0.5,.;DB\tGT:DP\t0|1:7\t./.",
+        "chr2\t0\t.\tN\t.\t.\tPASS\t.",
+        "chr2\t1\t.\tN\t.\t.\tPASS;q10\t.",
+    ]);
+    // r[verify vcf_fields.site+2]
+    assert_eq!(format!("{:?}", recs[2].site().filters()), r#"Failed(["PASS", "q10"])"#);
+    assert!(recs[2].site().filters().contains(&seqair::vcf::FilterId::PASS).unwrap());
+    assert_eq!(recs[0].locus().to_string(), "chr1:5-6");
+    assert_eq!(recs[1].locus().to_string(), "chr2:0");
+    let site = format!("{:?}", recs[0].site());
+    assert_eq!(
+        site,
+        r#"Site { ids: ["rs1", "rs2"], alleles: [Bases("AC"), Bases("A"), Symbolic("<DEL>")], qual: Some(3.0), filters: Failed(["q10"]) }"#
+    );
+    assert_eq!(
+        format!("{:?}", recs[0].info()),
+        "Info {\"DP\": Int([Some(4)]), \"AF\": Float([Some(0.5), None]), \"DB\": Flag}"
+    );
+    assert_eq!(format!("{:?}", recs[0].samples()), r#"Samples { len: 2, fields: ["GT", "DP"] }"#);
+}

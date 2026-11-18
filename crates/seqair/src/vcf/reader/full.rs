@@ -12,7 +12,7 @@ use crate::vcf::header::{HeaderId, VcfHeader};
 // r[impl vcf_fields.full_record]
 /// Every part of a record, plus its bytes as stored and its header's id, so
 /// a writer with the same header can copy it unchanged.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FullRecord {
     locus: Locus,
     site: Site,
@@ -20,6 +20,18 @@ pub struct FullRecord {
     samples: Samples,
     bytes: Vec<u8>,
     header: HeaderId,
+}
+
+// r[impl vcf_reader.debug]
+impl std::fmt::Debug for FullRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FullRecord")
+            .field("locus", &format_args!("{}", self.locus))
+            .field("site", &self.site)
+            .field("info", &self.info)
+            .field("samples", &self.samples)
+            .finish()
+    }
 }
 
 impl FullRecord {

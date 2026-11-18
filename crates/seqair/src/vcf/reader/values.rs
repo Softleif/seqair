@@ -31,7 +31,7 @@ enum Repr<'a, T> {
 /// A number vector as the record stores it, whatever its width on disk: each
 /// element `Some(value)`, or `None` where it is missing (`.`). An
 /// `ExactSizeIterator`; `get(i)` reads any element not yet yielded.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OptValues<'a, T>(Repr<'a, T>);
 
 #[expect(private_bounds, reason = "crate-internal methods; the public ones are per type")]
@@ -98,7 +98,7 @@ impl<'a, T: Number> OptValues<'a, T> {
 
 /// A number vector with no missing element. An `ExactSizeIterator`; `get(i)`
 /// reads any element not yet yielded.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Values<'a, T>(OptValues<'a, T>);
 
 // Per element type rather than over the crate's private `Number` bound, so
@@ -132,6 +132,21 @@ macro_rules! number_views {
         }
 
         impl ExactSizeIterator for OptValues<'_, $t> {}
+
+        // r[impl vcf_reader.debug]
+        /// The elements not yet yielded.
+        impl std::fmt::Debug for OptValues<'_, $t> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_list().entries(self.clone()).finish()
+            }
+        }
+
+        /// The elements not yet yielded.
+        impl std::fmt::Debug for Values<'_, $t> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_list().entries(self.clone()).finish()
+            }
+        }
 
         impl Values<'_, $t> {
             /// Element `i` of those not yet yielded; `None` past the end.
@@ -215,16 +230,40 @@ impl Iterator for GtAlleles<'_> {
 
 impl ExactSizeIterator for GtAlleles<'_> {}
 
-// r[impl vcf_values.gt]
+// r[impl vcf_values.gt+2]
 /// One sample's genotype as the record stores it. Re-iterable: every
 /// [`alleles`](Self::alleles) call starts again from the first allele.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenotypeRef<'a>(pub(crate) GtAlleles<'a>);
+
+// r[impl vcf_reader.debug]
+/// As VCF 4.4 writes it: `0/1`, `0|1`, `|1` for a phased haploid allele.
+impl std::fmt::Debug for GenotypeRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut gt = String::new();
+        for (i, a) in self.alleles().enumerate() {
+            if i > 0 || a.phased {
+                gt.push(if a.phased { '|' } else { '/' });
+            }
+            match a.allele {
+                Some(n) => gt.push_str(&n.to_string()),
+                None => gt.push('.'),
+            }
+        }
+        f.debug_tuple("GenotypeRef").field(&gt).finish()
+    }
+}
 
 impl GenotypeRef<'_> {
     /// The alleles in order, each with its phase.
     pub fn alleles(&self) -> impl ExactSizeIterator<Item = GtAllele> + Clone + '_ {
         self.0.clone()
+    }
+
+    // r[impl vcf_values.gt+2]
+    /// Allele `i`, from 0; `None` past the last.
+    pub fn get(&self, i: usize) -> Option<GtAllele> {
+        self.0.clone().nth(i)
     }
 
     /// How many alleles the sample has.
