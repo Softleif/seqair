@@ -251,10 +251,19 @@ pub fn read_ltf8_from(cursor: &mut &[u8]) -> Option<u64> {
 // r[impl cram_writer.blocks+2]
 /// Append `val` as ITF8; a negative value as its two's complement, as CRAM
 /// stores `-1` and other negatives.
+#[inline]
 pub(crate) fn write_itf8(out: &mut Vec<u8>, val: i32) {
+    // Most values (flags aside) fit one byte: no copy of a variable length.
+    if let Ok(byte @ 0..0x80) = u8::try_from(val) {
+        out.push(byte);
+        return;
+    }
     let mut buf = [0u8; 5];
     let n = encode_itf8(val.cast_unsigned(), &mut buf);
-    out.extend_from_slice(buf.get(..n).unwrap_or(&buf));
+    // A fixed-length copy, then the length cut: no call to memcpy.
+    let len = out.len();
+    out.extend_from_slice(&buf);
+    out.truncate(len.saturating_add(n));
 }
 
 /// Append `val` as LTF8: `n - 1` leading one bits and `7n` value bits in
