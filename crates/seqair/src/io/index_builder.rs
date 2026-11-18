@@ -1,5 +1,28 @@
 //! Single-pass index builder for TBI/CSI. Mirrors htslib's `hts_idx_push`
 //! algorithm: accumulates bin/chunk/linear index data during writing.
+//!
+//! The BAM, VCF and BCF writers drive one for you (`write_index(true)`); by
+//! hand, each record is pushed with the virtual offset just past it:
+//!
+//! ```
+//! use seqair::io::{IndexBuilder, VirtualOffset};
+//!
+//! // One reference; the header ends 120 bytes into the first BGZF block.
+//! let mut index = IndexBuilder::bai(1, VirtualOffset::new(0, 120));
+//! index.push(0, 1_000, 1_150, VirtualOffset::new(0, 400))?; // [1000, 1150) on tid 0
+//! index.push(0, 1_020, 1_170, VirtualOffset::new(0, 680))?;
+//! index.finish(VirtualOffset::new(0, 680))?;
+//!
+//! let mut bai = Vec::new();
+//! index.write_bai(&mut bai, 1)?;
+//! assert_eq!(&bai[..4], b"BAI\x01");
+//!
+//! // Records out of coordinate order are an error, not a broken index.
+//! let mut index = IndexBuilder::bai(1, VirtualOffset::new(0, 120));
+//! index.push(0, 500, 600, VirtualOffset::new(0, 200))?;
+//! assert!(index.push(0, 100, 200, VirtualOffset::new(0, 300)).is_err());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use crate::io::VirtualOffset;
 use seqair_types::SmolStr;

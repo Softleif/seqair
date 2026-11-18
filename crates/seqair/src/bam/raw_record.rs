@@ -5,6 +5,29 @@
 //! for byte. Nothing is decoded until an accessor asks for it, and nothing is
 //! lost: unplaced records, IUPAC bases, every aux tag and its integer width,
 //! and the stored `bin` all survive a read and a write unchanged.
+//!
+//! Edits work in place, as for a pipeline that annotates each record it
+//! streams through:
+//!
+//! ```
+//! use seqair::bam::{BamHeader, RawBamRecord};
+//! use seqair::sam::SamRecordEncoder;
+//! use seqair::sam::format::format_sam_record;
+//! use seqair_types::{IupacBase, MappingQuality};
+//!
+//! let header = BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n")?;
+//! let mut record = RawBamRecord::default();
+//! SamRecordEncoder::new().encode(b"r1\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII", &header, &mut record)?;
+//!
+//! record.set_mapq(MappingQuality::from_byte(20));
+//! record.set_seq(&IupacBase::from_ascii_slice(b"ACGG"))?;
+//! record.edit_aux(|aux| aux.set_int(*b"XM", 1))?;
+//!
+//! let mut line = Vec::new();
+//! format_sam_record(&record, &header, &mut line)?;
+//! assert_eq!(line, b"r1\t0\tchr1\t5\t20\t4M\t*\t0\t0\tACGG\tIIII\tXM:i:1");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::{
     AuxData, AuxDataError, BamHeader, DecodeError, MateFields,

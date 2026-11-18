@@ -6,6 +6,19 @@ use fearless_simd_macros::simd;
 /// store, each variant's discriminant being its 4-bit code. Lossless where
 /// [`Base`] is not; use `Base` for calling and `IupacBase` for records that
 /// pass through unchanged.
+///
+/// ```
+/// use seqair_types::{Base, IupacBase};
+///
+/// // BAM's 4-bit codes, every one of them: ambiguity codes and `=` survive.
+/// let seq = IupacBase::from_ascii_slice(b"ACRn=");
+/// assert_eq!(IupacBase::to_ascii_slice(&seq), b"ACRN=");
+/// assert_eq!(IupacBase::R.code(), 5);
+/// assert_eq!(IupacBase::R.complement(), IupacBase::Y);
+/// // Down to the four bases a pileup counts.
+/// assert_eq!(IupacBase::R.to_base(), Base::Unknown);
+/// assert_eq!(IupacBase::T.to_base(), Base::T);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, bytemuck::NoUninit)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]

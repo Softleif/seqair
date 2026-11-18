@@ -106,7 +106,7 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 /// ```
 ///
 /// A 0-based and a 1-based position are different types
-/// (r[`pos.incompatible`]):
+/// (`r[pos.incompatible]`):
 ///
 /// ```compile_fail,E0308
 /// use seqair_types::pos::{Pos0, Pos1};
@@ -114,14 +114,14 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 /// let one: Pos1 = zero;
 /// ```
 ///
-/// and they do not compare (r[`pos.incompatible`]):
+/// and they do not compare (`r[pos.incompatible]`):
 ///
 /// ```compile_fail,E0308
 /// use seqair_types::pos::{Pos0, Pos1};
 /// let _ = Pos0::new(100).unwrap() == Pos1::new(100).unwrap();
 /// ```
 ///
-/// Conversion is only ever explicit (r[`pos.explicit_conversion`]):
+/// Conversion is only ever explicit (`r[pos.explicit_conversion]`):
 ///
 /// ```compile_fail,E0277
 /// use seqair_types::pos::{Pos0, Pos1};
@@ -129,14 +129,14 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 /// ```
 ///
 /// Two positions do not add — the sum of two locations is not a location
-/// (r[`pos.no_add_pos`]):
+/// (`r[pos.no_add_pos]`):
 ///
 /// ```compile_fail,E0369
 /// use seqair_types::pos::Pos0;
 /// let _ = Pos0::new(100).unwrap() + Pos0::new(1).unwrap();
 /// ```
 ///
-/// and a position is not an integer (r[`pos.explicit_conversion`]):
+/// and a position is not an integer (`r[pos.explicit_conversion]`):
 ///
 /// ```compile_fail,E0308
 /// use seqair_types::pos::Pos0;
@@ -144,7 +144,7 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 /// ```
 ///
 /// A query offset indexes a read, not the reference, so it is not a position
-/// either way round (r[`qpos.not_a_pos`]):
+/// either way round (`r[qpos.not_a_pos]`):
 ///
 /// ```compile_fail,E0308
 /// use seqair_types::pos::{Pos0, QPos};

@@ -7,6 +7,32 @@
 //! same encoder for callers that need raw BAM bytes without going through a
 //! writer.
 //!
+//! ```
+//! use seqair::bam::{BamHeader, OwnedBamRecord};
+//! use seqair::bam::cigar::{CigarOp, CigarOpType};
+//! use seqair_types::{BamFlags, BaseQuality, IupacBase, MappingQuality, Pos0};
+//!
+//! let header = BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n")?;
+//! let mut record = OwnedBamRecord::builder(header.tid("chr1"), Pos0::new(10), b"r1".to_vec())
+//!     .flags(BamFlags::from(0x10)) // reverse strand
+//!     .mapq(MappingQuality::from_byte(42))
+//!     .cigar(vec![CigarOp::new(CigarOpType::SoftClip, 2), CigarOp::new(CigarOpType::Match, 4)])
+//!     .seq(IupacBase::from_ascii_slice(b"TTACGT"))
+//!     .qual(vec![BaseQuality::from_byte(30); 6])
+//!     .build()?;
+//! assert_eq!(record.end_pos(), Pos0::new(13)); // the last base covered
+//!
+//! // Realigned: a new position and CIGAR, checked against the sequence.
+//! record.set_alignment(Pos0::new(8), vec![CigarOp::new(CigarOpType::Match, 6)])?;
+//! record.aux.set_string(*b"XR", b"realigned")?;
+//!
+//! // The BAM bytes a writer would write, without the `block_size` prefix.
+//! let mut bytes = Vec::new();
+//! record.to_bam_bytes(&mut bytes)?;
+//! assert_eq!(&bytes[32..35], b"r1\0"); // the name follows the fixed fields
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! For the read path — bulk decode of a region's records for pileup or
 //! per-read iteration — use [`RecordStore`](super::record_store::RecordStore)
 //! instead. The store streams raw BAM bytes straight into slab buffers

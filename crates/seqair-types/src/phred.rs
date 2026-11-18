@@ -25,6 +25,16 @@ use std::{fmt, ops::Deref};
 /// > | 60 | 1 in 1,000,000 | 99.9999% |
 /// >
 /// > The phred quality score is the negative ratio of the error probability to the reference level of `P=1` expressed in [Decibel (dB)](https://en.wikipedia.org/wiki/20_log_rule "20 log rule").
+///
+/// ```
+/// use seqair_types::{Phred, Probability};
+///
+/// assert_eq!(*Phred::from_phred(20), 20.0);
+/// assert_eq!(Phred::from(Probability::new(0.01)?).as_int(), 20);
+/// // `as_int` clamps to 0..=99, as quality fields store it.
+/// assert_eq!(Phred::from(Probability::new(1e-12)?).as_int(), 99);
+/// # Ok::<(), seqair_types::ProbabilityError>(())
+/// ```
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[must_use]

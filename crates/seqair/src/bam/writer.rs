@@ -2,6 +2,74 @@
 //!
 //! [`BamWriter`] serializes [`OwnedBamRecord`] values
 //! into BGZF-compressed BAM format and optionally co-produces a BAI index during writing.
+//!
+//! A record built, written and read back:
+//!
+//! ```
+//! use seqair::bam::{BamHeader, BamWriterBuilder, OwnedBamRecord, RawBamRecord};
+//! use seqair::bam::cigar::{CigarOp, CigarOpType};
+//! use seqair::bam::header::PgRecord;
+//! use seqair::bam::stream::BamStreamReader;
+//! use seqair_types::{IupacBase, MappingQuality, Pos0};
+//!
+//! let mut header = BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n")?;
+//! header.add_pg(PgRecord {
+//!     id: "my-tool".into(),
+//!     pn: Some("my-tool".into()),
+//!     vn: Some("1.0".into()),
+//!     cl: None,
+//!     ds: None,
+//!     pp: None,
+//! })?;
+//!
+//! let mut record = OwnedBamRecord::builder(header.tid("chr1"), Pos0::new(99), b"read1".to_vec())
+//!     .mapq(MappingQuality::from_byte(60))
+//!     .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
+//!     .seq(IupacBase::from_ascii_slice(b"ACGT"))
+//!     .build()?;
+//! record.aux.set_int(*b"NM", 0)?;
+//!
+//! let mut writer = BamWriterBuilder::to_writer(Vec::new(), &header).build()?;
+//! writer.write(&record)?;
+//! let (bam, _) = writer.finish()?;
+//!
+//! let mut reader = BamStreamReader::new(&bam[..])?;
+//! let mut read = RawBamRecord::default();
+//! assert!(reader.read_record(&mut read)?);
+//! assert_eq!(read.qname(), b"read1");
+//! assert_eq!(read.pos(), Pos0::new(99));
+//! assert!(!reader.read_record(&mut read)?, "one record");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Rewriting a coordinate-sorted BAM record by record, untouched, with its
+//! `.bai` built on the way and compression on four threads:
+//!
+//! ```
+//! use seqair::bam::{BamHeader, BamWriterBuilder, RawBamRecord};
+//! use seqair::bam::stream::BamStreamReader;
+//! use std::fs::File;
+//! # let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/data/test.bam");
+//! # let dir = tempfile::tempdir()?;
+//! # let output = dir.path().join("out.bam");
+//!
+//! let mut reader = BamStreamReader::new(File::open(&input)?)?;
+//! let header = BamHeader::from_template(reader.header());
+//! let mut writer = BamWriterBuilder::to_path(&output, &header)
+//!     .write_index(true)
+//!     .compression_threads(4)
+//!     .build()?;
+//! let mut record = RawBamRecord::default();
+//! while reader.read_record(&mut record)? {
+//!     writer.write_raw(&record)?;
+//! }
+//! let (_file, index) = writer.finish()?;
+//! if let Some(index) = index {
+//!     index.write_bai(File::create(output.with_extension("bam.bai"))?, header.target_count())?;
+//! }
+//! # assert!(output.with_extension("bam.bai").exists());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};

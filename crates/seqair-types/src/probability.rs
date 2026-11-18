@@ -1,6 +1,16 @@
 use std::{num::ParseFloatError, ops::Deref, str::FromStr};
 
 /// A probability value guaranteed to be in the range [0, 1]
+///
+/// ```
+/// use seqair_types::{Phred, Probability};
+///
+/// let p = Probability::new(0.001)?;
+/// assert!(Probability::new(1.5).is_err());
+/// assert!((*p.inverted() - 0.999).abs() < 1e-12);
+/// assert_eq!(Phred::from(p).as_int(), 30);
+/// # Ok::<(), seqair_types::ProbabilityError>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[must_use]
 pub struct Probability(f64);

@@ -1,5 +1,24 @@
 //! Open and query bgzf-compressed SAM files. [`IndexedSamReader`] uses a tabix index to fetch
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
+//!
+//! [`Readers`](crate::Readers) opens SAM, BAM and CRAM alike; this is the
+//! SAM reader under it:
+//!
+//! ```no_run
+//! use seqair::bam::RecordStore;
+//! use seqair::sam::reader::IndexedSamReader;
+//! use seqair_types::Pos0;
+//! use std::path::Path;
+//!
+//! // `reads.sam.gz` is bgzip-compressed, with `reads.sam.gz.tbi` (or `.csi`) beside it.
+//! let mut reader = IndexedSamReader::open(Path::new("reads.sam.gz"))?;
+//! let tid = reader.header().tid("chr1").expect("chr1 is a target");
+//! let mut store = RecordStore::new();
+//! let span = Pos0::new(9_999).expect("in range")..=Pos0::new(10_999).expect("in range");
+//! let n = reader.fetch_into(tid, span.into(), &mut store)?;
+//! println!("{n} records overlap chr1:10000-11000");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use super::encode::{self, SamRecordEncoder, SamRecordError};
 use crate::bam::{

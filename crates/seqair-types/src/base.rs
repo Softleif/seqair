@@ -4,6 +4,17 @@ use fearless_simd_macros::simd;
 use thiserror::Error;
 
 /// Represents a DNA base (A, C, G, T, or Unknown)
+///
+/// ```
+/// use seqair_types::Base;
+///
+/// let bases = Base::from_ascii_vec(b"ACgtN?".to_vec());
+/// assert_eq!(bases, [Base::A, Base::C, Base::G, Base::T, Base::Unknown, Base::Unknown]);
+/// assert_eq!(Base::A.known_index(), Some(0));
+/// assert_eq!(Base::Unknown.known_index(), None);
+/// assert_eq!(Base::A.inverse(), Base::T);
+/// assert_eq!(Base::G.as_char(), 'G');
+/// ```
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, bytemuck::NoUninit)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]

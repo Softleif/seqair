@@ -13,6 +13,14 @@ use std::fmt;
 // r[impl types.mod_probability.type]
 // r[impl types.mod_probability.copy]
 // r[impl types.mod_probability.ord]
+/// ```
+/// use seqair_types::ModProbability;
+///
+/// // An `ML` byte covers 1/256 of [0, 1]; its midpoint is never 0 or 1.
+/// let p = ModProbability::from_byte(255).midpoint();
+/// assert!(*p > 0.99 && *p < 1.0);
+/// assert_eq!(*ModProbability::from_byte(0).midpoint(), 0.5 / 256.0);
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModProbability(u8);
