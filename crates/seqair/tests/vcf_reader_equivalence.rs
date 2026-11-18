@@ -15,10 +15,10 @@
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
-    Allele, Alleles, Arr, ContigDef, ContigId, DynValue, FilterId, FilterStatus, Flag,
+    Allele, Alleles, Arr, ContigDef, ContigId, DynValue, FilterId, FilterStatus, Flag, FormatAny,
     FormatFloatOpts, FormatFloats, FormatGt, FormatInt, FormatString, FullRecord, Genotype, Gt,
-    InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString, Number, OptArr,
-    OutputFormat, Scalar, Str, VcfFile, VcfHeader, VcfPos, Writer,
+    InfoAny, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString, Number,
+    OptArr, OutputFormat, Scalar, Str, VcfFile, VcfHeader, VcfPos, Writer,
 };
 use seqair_types::{Pos1, SmallVec, SmolStr};
 
@@ -39,6 +39,9 @@ struct Keys {
     af: Option<FormatFloats>,
     fo: Option<FormatFloatOpts>,
     st: Option<FormatString>,
+    /// Read back: each declared INFO / FORMAT field as an `Any` key.
+    info_any: Vec<(SmolStr, InfoAny)>,
+    format_any: Vec<(SmolStr, FormatAny)>,
 }
 
 struct Setup {
@@ -459,12 +462,56 @@ fn check(s: &Setup, written: &Record, read: &FullRecord, format: OutputFormat) {
         w.fl,
         w.s1.is_some(),
     ];
-    assert_eq!(info.iter().unwrap().count(), present.iter().filter(|&&p| p).count(), "{at}");
+    assert_eq!(info.iter().count(), present.iter().filter(|&&p| p).count(), "{at}");
+    // r[verify vcf_values.access+2]
+    // `has` says what was written, whatever the value; `get` of an `Any`
+    // key is `Some` exactly then, and missing where the typed `get` is absent.
+    let has = [
+        k.i1.as_ref().map(|key| info.has(key).unwrap()),
+        k.f1.as_ref().map(|key| info.has(key).unwrap()),
+        k.ia.as_ref().map(|key| info.has(key).unwrap()),
+        k.fa.as_ref().map(|key| info.has(key).unwrap()),
+        k.io.as_ref().map(|key| info.has(key).unwrap()),
+        k.fl.as_ref().map(|key| info.has(key).unwrap()),
+        k.s1.as_ref().map(|key| info.has(key).unwrap()),
+    ];
+    for (has, present) in has.iter().zip(present) {
+        assert!(has.is_none_or(|h| h == present), "{at}: has {has:?}, written {present}");
+    }
+    for (name, key) in &k.info_any {
+        let value = info.get(key).unwrap();
+        assert_eq!(value.is_some(), info.has(key).unwrap(), "{at}: {name}");
+        let typed_absent = match name.as_str() {
+            "I1" => info.get(k.i1.as_ref().unwrap()).unwrap().is_none(),
+            "F1" => info.get(k.f1.as_ref().unwrap()).unwrap().is_none(),
+            "IA" => info.get(k.ia.as_ref().unwrap()).unwrap().is_none(),
+            "FA" => info.get(k.fa.as_ref().unwrap()).unwrap().is_none(),
+            "IO" => info.get(k.io.as_ref().unwrap()).unwrap().is_none(),
+            "FL" => !info.get(k.fl.as_ref().unwrap()).unwrap(),
+            _ => info.get(k.s1.as_ref().unwrap()).unwrap().is_none(),
+        };
+        assert_eq!(value.as_ref().is_none_or(DynValue::is_missing), typed_absent, "{at}: {name}");
+    }
 
     let (f, samples) = (&written.format, read.samples());
     assert_eq!(samples.len(), s.n_samples, "{at}");
     for (i, idx) in s.header.sample_indices().enumerate() {
         let sample = samples.sample(idx);
+        // FORMAT names the field for every sample alike.
+        let written = [
+            (k.gt.as_ref().map(|key| sample.has(key).unwrap()), f.gt.is_some()),
+            (k.dp.as_ref().map(|key| sample.has(key).unwrap()), f.dp.is_some()),
+            (k.af.as_ref().map(|key| sample.has(key).unwrap()), f.af.is_some()),
+            (k.fo.as_ref().map(|key| sample.has(key).unwrap()), f.fo.is_some()),
+            (k.st.as_ref().map(|key| sample.has(key).unwrap()), f.st.is_some()),
+        ];
+        for (has, present) in written {
+            assert!(has.is_none_or(|h| h == present), "{at}: sample {i} has {has:?}");
+        }
+        for (name, key) in &k.format_any {
+            let value = sample.get(key).unwrap();
+            assert_eq!(value.is_some(), samples.has(key).unwrap(), "{at}: sample {i} {name}");
+        }
         if let Some(key) = &k.gt {
             // A missing allele keeps its phase bit; a missing haploid call
             // reads as absent (`r[vcf_record.gt_first_phase+3]`).
@@ -549,12 +596,12 @@ fn digest(
                 .collect::<Vec<_>>())
         ),
     };
-    for field in rec.info().iter().unwrap() {
+    for field in rec.info().iter() {
         let (name, _, v) = field.unwrap();
         out.push(format!("INFO {name} {}", dyn_value(&v)));
     }
     for idx in header.sample_indices() {
-        for field in rec.samples().sample(idx).iter().unwrap() {
+        for field in rec.samples().sample(idx).iter() {
             let (name, _, v) = field.unwrap();
             out.push(format!("{} {name} {}", idx.index(), dyn_value(&v)));
         }
@@ -586,7 +633,7 @@ fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec
 }
 
 // r[verify vcf_values.equivalence]
-// r[verify vcf_values.access]
+// r[verify vcf_values.access+2]
 // r[verify vcf_values.dynamic.missing]
 // r[verify vcf_values.bcf_sentinels]
 // r[verify vcf_values.text_numbers]
@@ -594,7 +641,7 @@ fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec
 // r[verify vcf_values.gt+2]
 // r[verify vcf_values.qual]
 // r[verify vcf_fields.site+2]
-// r[verify vcf_fields.info]
+// r[verify vcf_fields.info+2]
 // r[verify vcf_fields.samples]
 // r[verify vcf_reader.formats]
 // r[verify vcf_reader.oracles]
@@ -652,5 +699,7 @@ fn rekey(file: &VcfFile, k: &Keys) -> Keys {
         af: k.af.as_ref().map(|_| h.format_key("AF").unwrap()),
         fo: k.fo.as_ref().map(|_| h.format_key("FO").unwrap()),
         st: k.st.as_ref().map(|_| h.format_key("ST").unwrap()),
+        info_any: h.infos().keys().map(|n| (n.clone(), file.info_key(n).unwrap())).collect(),
+        format_any: h.formats().keys().map(|n| (n.clone(), file.format_key(n).unwrap())).collect(),
     }
 }

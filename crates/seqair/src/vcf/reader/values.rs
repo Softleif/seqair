@@ -27,7 +27,7 @@ enum Repr<'a, T> {
     Text(TextVec<'a, T>),
 }
 
-// r[impl vcf_values.access]
+// r[impl vcf_values.access+2]
 /// A number vector as the record stores it, whatever its width on disk: each
 /// element `Some(value)`, or `None` where it is missing (`.`). An
 /// `ExactSizeIterator`; `get(i)` reads any element not yet yielded.
@@ -81,7 +81,7 @@ impl<'a, T: Number> OptValues<'a, T> {
         }
     }
 
-    // r[impl vcf_values.access]
+    // r[impl vcf_values.access+2]
     /// The same elements, checked to have none missing.
     pub(crate) fn all_present(self) -> Result<Values<'a, T>, MissingElement> {
         let mut rest = self.clone();
@@ -303,7 +303,7 @@ mod tests {
         OptValues::bcf(TypedValue::parse(bytes).unwrap().0.ints().unwrap())
     }
 
-    // r[verify vcf_values.access]
+    // r[verify vcf_values.access+2]
     #[test]
     fn all_present_rejects_the_first_missing_element() {
         assert_eq!(
@@ -349,7 +349,7 @@ mod tests {
         OptValues::text(TextVec::new(bytes).unwrap())
     }
 
-    // r[verify vcf_values.access]
+    // r[verify vcf_values.access+2]
     #[test]
     fn text_views_check_missing_elements_too() {
         assert!(text::<i32>(b".").is_missing());

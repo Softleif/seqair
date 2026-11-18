@@ -125,8 +125,8 @@ fn render_alt(a: Allele<'_>) -> String {
 }
 
 // r[verify vcf_reader.oracles]
-// r[verify vcf_values.access]
-// r[verify vcf_values.dynamic]
+// r[verify vcf_values.access+2]
+// r[verify vcf_values.dynamic+2]
 // r[verify vcf_values.qual]
 // r[verify vcf_fields.full_record]
 /// Every field of every record of a BCF fixture, read through `FullRecord`,
@@ -181,7 +181,7 @@ fn check_against_bcftools(name: &str) {
         };
         assert_eq!(filter, cols[6], "{at}");
 
-        let info: Vec<_> = rec.info().iter().unwrap().collect::<Result<_, _>>().unwrap();
+        let info: Vec<_> = rec.info().iter().collect::<Result<_, _>>().unwrap();
         let theirs: Vec<(&str, Option<&str>)> = if cols[7] == "." {
             vec![]
         } else {
@@ -202,7 +202,7 @@ fn check_against_bcftools(name: &str) {
             for (s, &sample) in samples.iter().enumerate() {
                 let values: Vec<&str> = cols[9 + s].split(':').collect();
                 let ours: Vec<_> =
-                    rec.samples().sample(sample).iter().unwrap().collect::<Result<_, _>>().unwrap();
+                    rec.samples().sample(sample).iter().collect::<Result<_, _>>().unwrap();
                 assert_eq!(ours.len(), keys.len(), "{at}: sample {s} FORMAT fields");
                 for (i, (key, _, value)) in ours.iter().enumerate() {
                     assert_eq!(*key, keys[i], "{at}");
@@ -338,7 +338,7 @@ fn check_against_noodles(name: &str) {
         };
         let their_filters: Vec<String> = t.filters().as_ref().iter().cloned().collect();
         assert_eq!(filters, their_filters, "{at}");
-        let info: Vec<_> = rec.info().iter().unwrap().collect::<Result<_, _>>().unwrap();
+        let info: Vec<_> = rec.info().iter().collect::<Result<_, _>>().unwrap();
         let their_info = t.info().as_ref();
         assert_eq!(info.len(), their_info.len(), "{at}: INFO fields");
         for ((key, _, value), (their_key, their_value)) in info.iter().zip(their_info) {
@@ -349,7 +349,7 @@ fn check_against_noodles(name: &str) {
         let keys: Vec<&String> = t.samples().keys().as_ref().iter().collect();
         for (sample, their_sample) in samples.iter().zip(t.samples().values()) {
             let ours: Vec<_> =
-                rec.samples().sample(*sample).iter().unwrap().collect::<Result<_, _>>().unwrap();
+                rec.samples().sample(*sample).iter().collect::<Result<_, _>>().unwrap();
             assert_eq!(ours.len(), keys.len(), "{at}: FORMAT fields");
             for ((key, _, value), (their_key, their_value)) in
                 ours.iter().zip(keys.iter().zip(their_sample.values()))
@@ -954,7 +954,10 @@ fn a_failed_index_is_returned_on_every_access() {
         let second = info.get(&dp).map_err(|e| e.to_string());
         assert_eq!(first, second);
         if let Err(e) = &first {
-            assert!(info.iter().is_err());
+            // r[verify vcf_values.dynamic+2]
+            let items: Vec<_> = info.iter().collect();
+            assert!(matches!(items[..], [Err(_)]), "the index error is the one item");
+            assert!(info.has(&dp).is_err());
             assert!(e.starts_with("malformed record 2 at chr1:11"), "{e}");
         }
         values.push(first.ok().flatten());
@@ -1057,7 +1060,7 @@ fn text_error(lines: &[&str]) -> (u64, Option<seqair::io::VirtualOffset>, Record
 
 // r[verify vcf_reader.formats]
 // r[verify vcf_fields.site+2]
-// r[verify vcf_values.access]
+// r[verify vcf_values.access+2]
 /// The fixed columns, INFO and FORMAT of hand-written lines: IDs, symbolic
 /// and missing ALTs, QUAL, every FILTER state, flags, strings, vectors.
 #[test]
@@ -1129,7 +1132,7 @@ fn text_records_read_their_columns() {
 }
 
 // r[verify vcf_fields.samples]
-// r[verify vcf_values.access]
+// r[verify vcf_values.access+2]
 // r[verify vcf_values.duplicates]
 // r[verify vcf_reader.field_table]
 // r[verify vcf_reader.undeclared.filter]
@@ -1157,7 +1160,7 @@ fn text_edge_cases_read_as_htslib_reads_them() {
     let info = recs[0].info();
     assert_eq!(info.get(&dp).unwrap(), Some(1), "the first DP wins");
     assert!(info.get(&db).unwrap(), "a flag with a value is set");
-    let fields: Vec<_> = info.iter().unwrap().map(|f| f.unwrap()).collect();
+    let fields: Vec<_> = info.iter().map(|f| f.unwrap()).collect();
     let names: Vec<&str> = fields.iter().map(|f| f.0).collect();
     assert_eq!(names, ["DP", "XX", "DB"], "the second DP is a duplicate");
     assert!(
@@ -1167,10 +1170,10 @@ fn text_edge_cases_read_as_htslib_reads_them() {
     assert!(one.get(&gt).unwrap().is_some());
     assert_eq!(one.get(&fdp).unwrap(), None, "dropped trailing fields are missing");
     assert_eq!(one.get(&ad).unwrap().map(|v| v.count()), None);
-    let fields: Vec<&str> = one.iter().unwrap().map(|f| f.unwrap().0).collect();
+    let fields: Vec<&str> = one.iter().map(|f| f.unwrap().0).collect();
     assert_eq!(fields, ["GT", "DP", "ZZ", "AD"]);
     let two = recs[0].samples().sample(s2);
-    let zz = two.iter().unwrap().map(|f| f.unwrap()).find(|f| f.0 == "ZZ").unwrap().2;
+    let zz = two.iter().map(|f| f.unwrap()).find(|f| f.0 == "ZZ").unwrap().2;
     assert!(matches!(zz, DynValue::Str(Some("q"))), "{zz:?}");
     assert_eq!(two.get(&ad).unwrap().map(Iterator::collect::<Vec<_>>), Some(vec![2, 3]));
 
@@ -1183,7 +1186,7 @@ fn text_edge_cases_read_as_htslib_reads_them() {
         panic!("an undeclared FILTER fails the record")
     };
     assert_eq!(failed.count(), 0);
-    assert_eq!(recs[2].samples().sample(s1).iter().unwrap().count(), 0, "FORMAT . has no fields");
+    assert_eq!(recs[2].samples().sample(s1).iter().count(), 0, "FORMAT . has no fields");
 }
 
 // r[verify vcf_reader.contigs]
@@ -1441,4 +1444,42 @@ fn records_debug_as_what_they_hold() {
         "Info {\"DP\": Int([Some(4)]), \"AF\": Float([Some(0.5), None]), \"DB\": Flag}"
     );
     assert_eq!(format!("{:?}", recs[0].samples()), r#"Samples { len: 2, fields: ["GT", "DP"] }"#);
+}
+
+// r[verify vcf_values.access+2]
+/// One sample's view tells a field the record does not have from a `.`
+/// and from a trailing field the sample dropped, without reading the other
+/// samples (`HiPhase` phases a variant whose GQ is absent, not one whose GQ
+/// is `.`).
+#[test]
+fn one_sample_tells_absent_from_missing() {
+    let file = text_file(&[
+        "chr1\t1\t.\tA\tC\t.\t.\tDP=3\tGT\t0/1\t0/1",
+        "chr1\t2\t.\tA\tC\t.\t.\tDP=.\tGT:DP\t0/1:.\t0/1:4",
+        "chr1\t3\t.\tA\tC\t.\t.\t.\tGT:DP\t0/1\t0/1:4",
+        "chr1\t4\t.\tA\tC\t.\t.\t.\tGT:DP\t0/1:7\t0/1:4",
+    ]);
+    let dp: seqair::vcf::FormatInt = file.format_key("DP").unwrap();
+    let any: seqair::vcf::FormatAny = file.format_key("DP").unwrap();
+    let info_dp: InfoInt = file.info_key("DP").unwrap();
+    let mut reader = file.reader::<(Info, Sample)>().sample("S1").open().unwrap();
+    let mut seen = Vec::new();
+    while let Some((info, sample)) = reader.next_record().unwrap() {
+        let any = sample.get(&any).unwrap();
+        seen.push((
+            info.has(&info_dp).unwrap(),
+            sample.has(&dp).unwrap(),
+            sample.get(&dp).unwrap(),
+            any.as_ref().map(DynValue::is_missing),
+        ));
+    }
+    assert_eq!(
+        seen,
+        [
+            (true, false, None, None),
+            (true, true, None, Some(true)),
+            (false, true, None, Some(true)),
+            (false, true, Some(7), Some(false)),
+        ]
+    );
 }

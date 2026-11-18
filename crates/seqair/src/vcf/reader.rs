@@ -34,7 +34,7 @@ mod text_keys;
 pub(crate) mod text_value;
 pub(crate) mod values;
 
-pub use access::{DecodeCx, DynValue, ReadKind, Stored};
+pub use access::{Any, DecodeCx, DynValue, FormatAny, InfoAny, ReadKind, Stored};
 pub use bcf_value::{BcfType, BcfValueError};
 pub use error::{
     FieldError, KeyKind, RecordError, RecordPart, RecordPlace, RecordSection, VcfFormat,

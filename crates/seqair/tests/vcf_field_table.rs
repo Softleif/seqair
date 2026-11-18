@@ -89,6 +89,13 @@ fn undeclared_keys_resolve_through_the_file() {
     assert_eq!(info.get(&an).unwrap(), Some(4));
     assert_eq!(info.get(&trid).unwrap(), Some("t1"));
     assert_eq!(info.get(&dp).unwrap(), None);
+    // r[verify vcf_values.access+2]
+    // Present whatever its type, through `Any`.
+    let any = |name| -> seqair::vcf::InfoAny { file.info_key(name).unwrap() };
+    assert!(info.get(&any("TRID")).unwrap().is_some_and(|v| !v.is_missing()));
+    assert!(matches!(info.get(&any("DB")).unwrap(), Some(DynValue::Flag)));
+    assert!(matches!(info.get(&any("AN")).unwrap(), Some(DynValue::Int(_))));
+    assert!(info.get(&any("NOPE")).unwrap().is_none());
     let s1 = file.header().sample("S1").unwrap();
     let s2 = file.header().sample("S2").unwrap();
     let samples = rec.samples();
@@ -102,7 +109,6 @@ fn undeclared_keys_resolve_through_the_file() {
     // Every field the record holds is listed with its table definition.
     let defs: Vec<(String, ValueType, Number)> = info
         .iter()
-        .unwrap()
         .map(|f| f.map(|(name, def, _)| (name.to_owned(), def.typ, def.number)).unwrap())
         .collect();
     assert_eq!(
@@ -283,7 +289,7 @@ fn undeclared_keys_read_what_htslib_reads(tc: TestCase) {
     assert_eq!(ours.len(), theirs.len());
     let samples: Vec<_> = file.header().sample_indices().collect();
     for (ours, theirs) in ours.iter().zip(&theirs) {
-        for field in ours.info().iter().unwrap() {
+        for field in ours.info().iter() {
             let (name, _, value) = field.unwrap();
             if name == "DP" {
                 continue; // declared: the other oracles cover it
@@ -292,7 +298,7 @@ fn undeclared_keys_read_what_htslib_reads(tc: TestCase) {
             assert_eq!(render(&value), joined(&strings), "INFO {name}");
         }
         for (s, &sample) in samples.iter().enumerate() {
-            for field in ours.samples().sample(sample).iter().unwrap() {
+            for field in ours.samples().sample(sample).iter() {
                 let (name, _, value) = field.unwrap();
                 if name == "GT" {
                     continue;

@@ -97,13 +97,10 @@ pub fn read_all(file: &VcfFile) -> usize {
             seqair::vcf::FilterStatus::Failed(f) => f.count(),
             _ => 1,
         };
-        if let Ok(fields) = rec.info().iter() {
-            n += fields.map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
-        }
+        n += rec.info().iter().map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
         for sample in header.sample_indices() {
-            if let Ok(fields) = rec.samples().sample(sample).iter() {
-                n += fields.map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
-            }
+            let fields = rec.samples().sample(sample).iter();
+            n += fields.map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
         }
         n += typed(header, rec) + rec.raw_bytes().len();
     }
@@ -125,11 +122,11 @@ impl Fields for Raw {
     fn new(_: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
         let mut n = raw.locus().map_or(0, |l| usize::from(l.start() <= l.end()));
         n += raw.site()?.alleles().alts().count();
-        n += raw.info()?.iter()?.map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
+        n += raw.info()?.iter().map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
         for sample in raw.header().sample_indices().take(4) {
             n += raw
                 .sample(sample)?
-                .iter()?
+                .iter()
                 .map(|f| f.map_or(0, |(_, _, v)| touch(&v)))
                 .sum::<usize>();
         }
@@ -149,9 +146,7 @@ pub fn read_narrow(file: &VcfFile) -> usize {
         && let Ok(reader) = file.reader::<(Info, Sample)>().sample(name.clone()).open()
     {
         for rec in reader.into_iter().take(MAX_RECORDS).map_while(Result::ok) {
-            if let Ok(fields) = rec.1.iter() {
-                n += fields.map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
-            }
+            n += rec.1.iter().map(|f| f.map_or(0, |(_, _, v)| touch(&v))).sum::<usize>();
         }
     }
     if let Ok(reader) = file.reader::<Raw>().open() {

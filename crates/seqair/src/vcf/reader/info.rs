@@ -10,7 +10,6 @@ use super::index::{DictId, FieldIndex};
 use super::raw::RawRecord;
 use crate::vcf::header::{InfoDef, ValueType};
 use crate::vcf::record_encoder::{FieldId, InfoKey};
-use seqair_types::SmolStr;
 use std::sync::Arc;
 
 // r[impl vcf_values.header_brand+2]
@@ -43,16 +42,28 @@ pub(crate) fn stored<'a>(
     })))
 }
 
-/// Decode `value`, the field `name`'s, as `V`.
+/// Decode `value`, the `kind` field `key`'s, as `V`.
 pub(crate) fn decode<'a, V: ReadKind>(
     value: Stored<'a>,
-    name: &SmolStr,
+    key: &FieldId,
+    kind: KeyKind,
     file: &FileShared,
     at: RecordAt,
 ) -> Result<V::Out<'a>, VcfReadError> {
-    let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
+    let mut cx = DecodeCx {
+        first_phase_is_read: file.first_phase_is_read,
+        declared: ValueType::String,
+        genotype: false,
+    };
+    if V::DYNAMIC {
+        // An undeclared field reads as a String.
+        if let Some(typ) = DictId::new(key.dict_idx).and_then(|id| file.fields.declared(kind, id)) {
+            cx.declared = typ;
+        }
+        cx.genotype = kind == KeyKind::Format && key.name == "GT";
+    }
     V::decode(value, cx)
-        .map_err(|source| at.error(file, RecordError::Field { name: name.clone(), source }))
+        .map_err(|source| at.error(file, RecordError::Field { name: key.name.clone(), source }))
 }
 
 /// Decode `value`, the field `name`'s, as `declared` says.
@@ -64,7 +75,7 @@ pub(crate) fn dyn_decode<'a>(
     file: &FileShared,
     at: RecordAt,
 ) -> Result<DynValue<'a>, VcfReadError> {
-    let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read };
+    let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read, declared, genotype };
     DynValue::decode(value, declared, genotype, cx)
         .map_err(|source| at.error(file, RecordError::Field { name: name.into(), source }))
 }
@@ -115,10 +126,7 @@ pub struct InfoRef<'a> {
 impl std::fmt::Debug for InfoRef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Info ")?;
-        match self.iter() {
-            Ok(fields) => debug_fields(f, fields),
-            Err(e) => f.debug_map().entry(&"error", &e.to_string()).finish(),
-        }
+        debug_fields(f, self.iter())
     }
 }
 
@@ -143,7 +151,7 @@ impl<'a> InfoRef<'a> {
         stored(bytes, self.file, RecordPart::Info, self.at)
     }
 
-    // r[impl vcf_values.access]
+    // r[impl vcf_values.access+2]
     /// The field `key` names, decoded as its marker says; absent or `.` is
     /// the marker's absent value (`None`, or `false` for a flag).
     ///
@@ -154,27 +162,40 @@ impl<'a> InfoRef<'a> {
         check_brand(&key.0, self.file)?;
         let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(V::absent()) };
         match self.index()?.get(id) {
-            Some(entry) => decode::<V>(self.value(entry.span())?, &key.0.name, self.file, self.at),
+            Some(entry) => {
+                decode::<V>(self.value(entry.span())?, &key.0, KeyKind::Info, self.file, self.at)
+            }
             None => Ok(V::absent()),
         }
     }
 
-    // r[impl vcf_values.dynamic]
-    /// Every declared field present, in record order (a repeated key once),
-    /// with its declaration and its value read as declared.
+    // r[impl vcf_values.access+2]
+    /// Whether the record holds the field `key` names, whatever its value:
+    /// absent is `!has`, and `.` is `has` with an absent [`get`](Self::get).
     ///
     /// # Errors
-    /// [`VcfReadError::Record`] if the column is malformed; each item, if
-    /// its value is.
+    /// As [`Self::get`].
+    pub fn has<V>(&self, key: &InfoKey<V>) -> Result<bool, VcfReadError> {
+        check_brand(&key.0, self.file)?;
+        let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(false) };
+        Ok(self.index()?.get(id).is_some())
+    }
+
+    // r[impl vcf_values.dynamic+2]
+    /// Every field present, in record order (a repeated key once), with its
+    /// name, its definition in the file's field table and its value read as
+    /// that says. A column that does not index is the first item's error.
     pub fn iter(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(&'a str, &'a InfoDef, DynValue<'a>), VcfReadError>> + use<'a>,
-        VcfReadError,
-    > {
+    ) -> impl Iterator<Item = Result<(&'a str, &'a InfoDef, DynValue<'a>), VcfReadError>> + use<'a>
+    {
         let this = *self;
         let file = self.file;
-        Ok(self.index()?.entries().iter().filter_map(move |e| {
+        let (error, entries) = match self.index() {
+            Ok(index) => (None, index.entries()),
+            Err(e) => (Some(Err(e)), &[][..]),
+        };
+        error.into_iter().chain(entries.iter().filter_map(move |e| {
             let (name, def) = file.fields.info_def(&file.header, e.id)?;
             let value = this
                 .value(e.span())
@@ -184,7 +205,7 @@ impl<'a> InfoRef<'a> {
     }
 }
 
-// r[impl vcf_fields.info]
+// r[impl vcf_fields.info+2]
 // r[impl vcf_fields.owned]
 /// A record's INFO column, owned; its index is built on first access, so a
 /// record rejected on its position or FILTER never pays for it.
@@ -216,16 +237,18 @@ impl Info {
         self.view().get(key)
     }
 
-    /// Every declared field present (see [`InfoRef::iter`]).
+    /// Whether the record holds the field `key` names (see [`InfoRef::has`]).
     ///
     /// # Errors
-    /// As [`InfoRef::iter`].
+    /// As [`InfoRef::has`].
+    pub fn has<V>(&self, key: &InfoKey<V>) -> Result<bool, VcfReadError> {
+        self.view().has(key)
+    }
+
+    /// Every field present (see [`InfoRef::iter`]).
     pub fn iter(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(&str, &InfoDef, DynValue<'_>), VcfReadError>>,
-        VcfReadError,
-    > {
+    ) -> impl Iterator<Item = Result<(&str, &InfoDef, DynValue<'_>), VcfReadError>> {
         self.view().iter()
     }
 }

@@ -6,7 +6,9 @@ use super::error::FieldError;
 use super::text_value::{TextGt, TextNumber, TextVec, text_str};
 use super::values::{GenotypeRef, GtAlleles, OptValues, Values};
 use crate::vcf::header::ValueType;
-use crate::vcf::record_encoder::{Arr, FieldKind, Flag, Gt, OptArr, Scalar, Str};
+use crate::vcf::record_encoder::{
+    Arr, FieldKind, Flag, FormatKey, Gt, InfoKey, OptArr, Scalar, Str,
+};
 
 /// Most alleles a genotype may have (`r[vcf_reader.limits]`).
 pub(crate) const MAX_PLOIDY: usize = 256;
@@ -35,17 +37,22 @@ fn text_vec<T: TextNumber>(value: Option<&[u8]>) -> Result<TextVec<'_, T>, Field
     })
 }
 
-/// How to decode: what a `Gt` needs from the file.
+/// How to decode: what a `Gt` needs from the file, and what an [`Any`]
+/// needs from the field's definition.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeCx {
     pub(crate) first_phase_is_read: bool,
+    /// The field's `Type`; looked up only for a marker that reads it.
+    pub(crate) declared: ValueType,
+    /// Whether the field is FORMAT `GT`.
+    pub(crate) genotype: bool,
 }
 
 mod sealed {
     pub trait Sealed {}
 }
 
-// r[impl vcf_values.access]
+// r[impl vcf_values.access+2]
 /// A key marker a reader can decode, and what it decodes to:
 ///
 /// | marker | `Out` | absent or `.` |
@@ -61,6 +68,10 @@ mod sealed {
 /// absent: VCF lets a sample drop trailing FORMAT fields.
 pub trait ReadKind: FieldKind + sealed::Sealed {
     type Out<'a>;
+
+    /// Whether decoding needs the field's definition ([`Any`]).
+    #[doc(hidden)]
+    const DYNAMIC: bool = false;
 
     #[doc(hidden)]
     fn absent<'a>() -> Self::Out<'a>;
@@ -203,6 +214,47 @@ impl ReadKind for Gt {
     }
 }
 
+// r[impl vcf_values.access+2]
+/// Marker for a field of any declared type, read as its definition says:
+/// `Out` is `Option<DynValue>`, `None` when the record does not hold the
+/// field and `Some` (maybe [`DynValue::is_missing`]) when it does. For
+/// "present whatever the type" (`info.get(&trid)?.is_some_and(|v| !v.is_missing())`)
+/// and for tools that handle fields alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Any {
+    #[doc(hidden)]
+    _Uninhabited(std::convert::Infallible),
+}
+
+/// Reads every `Type` and `Number`; declares nothing a writer could encode
+/// (an `Any` key has no `encode`).
+impl FieldKind for Any {
+    const VALUE_TYPE: ValueType = ValueType::String;
+
+    fn reads_type(_: ValueType) -> bool {
+        true
+    }
+}
+
+/// An INFO key of any type.
+pub type InfoAny = InfoKey<Any>;
+/// A FORMAT key of any type.
+pub type FormatAny = FormatKey<Any>;
+
+impl sealed::Sealed for Any {}
+impl ReadKind for Any {
+    type Out<'a> = Option<DynValue<'a>>;
+    const DYNAMIC: bool = true;
+
+    fn absent<'a>() -> Self::Out<'a> {
+        None
+    }
+
+    fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
+        DynValue::decode(value, cx.declared, cx.genotype, cx).map(Some)
+    }
+}
+
 // r[impl vcf_reader.limits]
 /// Refuse a genotype of more than [`MAX_PLOIDY`] alleles before reading it.
 fn check_ploidy(n: usize) -> Result<(), FieldError> {
@@ -219,7 +271,7 @@ fn whole<T: super::values::Number>(v: OptValues<'_, T>) -> OptValues<'_, T> {
     if v.is_missing() { OptValues::text(TextVec::empty()) } else { v }
 }
 
-// r[impl vcf_values.dynamic]
+// r[impl vcf_values.dynamic+2]
 /// A field's value read by its header declaration, for tools that handle
 /// every field alike (`convert`, `view`).
 #[derive(Debug, Clone)]
@@ -238,6 +290,20 @@ pub enum DynValue<'a> {
 }
 
 impl<'a> DynValue<'a> {
+    // r[impl vcf_values.dynamic+2]
+    /// Whether the value is `.`: an empty number vector (VCF text's `.`,
+    /// BCF's empty or lone missing vector), a missing string or genotype.
+    /// A flag is never missing.
+    pub fn is_missing(&self) -> bool {
+        match self {
+            Self::Int(v) => v.len() == 0,
+            Self::Float(v) => v.len() == 0,
+            Self::Str(s) => s.is_none(),
+            Self::Gt(gt) => gt.is_none(),
+            Self::Flag => false,
+        }
+    }
+
     /// Decode `value` as `declared` says; `genotype` for the FORMAT GT field.
     pub(crate) fn decode(
         value: Stored<'a>,

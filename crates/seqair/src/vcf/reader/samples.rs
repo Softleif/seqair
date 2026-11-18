@@ -207,6 +207,13 @@ impl<'a> FormatView<'a> {
         Ok(FieldAt::Bcf(column))
     }
 
+    /// Whether the record has field `key`.
+    fn has(&self, key: &FieldId) -> Result<bool, VcfReadError> {
+        check_brand(key, self.file)?;
+        let Some(id) = DictId::new(key.dict_idx) else { return Ok(false) };
+        Ok(self.index()?.keys.get(id).is_some())
+    }
+
     /// Field `key`'s values, if the record has it.
     fn field(&self, key: &FieldId) -> Result<Option<FieldAt<'a>>, VcfReadError> {
         check_brand(key, self.file)?;
@@ -265,10 +272,7 @@ pub struct SampleRef<'a> {
 impl std::fmt::Debug for SampleRef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Sample ")?;
-        match self.iter() {
-            Ok(fields) => debug_fields(f, fields),
-            Err(e) => f.debug_map().entry(&"error", &e.to_string()).finish(),
-        }
+        debug_fields(f, self.iter())
     }
 }
 
@@ -277,7 +281,7 @@ impl<'a> SampleRef<'a> {
         Self { view, column, sample }
     }
 
-    // r[impl vcf_values.access]
+    // r[impl vcf_values.access+2]
     /// The sample's value of the field `key` names, decoded as its marker
     /// says; absent or `.` is the marker's absent value.
     ///
@@ -289,28 +293,43 @@ impl<'a> SampleRef<'a> {
         check_sample(self.sample, file)?;
         let Some(field) = self.view.field(&key.0)? else { return Ok(V::absent()) };
         match field.sample(self.column) {
-            Some(value) => decode::<V>(value, &key.0.name, file, self.view.at),
+            Some(value) => decode::<V>(value, &key.0, KeyKind::Format, file, self.view.at),
             None => Ok(V::absent()),
         }
     }
 
-    // r[impl vcf_values.dynamic]
-    /// Every declared FORMAT field present, in record order (a repeated key
-    /// once), with its declaration and this sample's value read as declared.
+    // r[impl vcf_values.access+2]
+    /// Whether the record's FORMAT column names the field `key` names,
+    /// whatever this sample's value: absent is `!has`, and `.` (or a
+    /// trailing field the sample dropped) is `has` with an absent
+    /// [`get`](Self::get). Needs only this sample's section.
     ///
     /// # Errors
-    /// [`VcfReadError::Record`] if the FORMAT data is malformed; each item,
-    /// if its value is.
+    /// As [`Self::get`].
+    pub fn has<V>(&self, key: &FormatKey<V>) -> Result<bool, VcfReadError> {
+        check_sample(self.sample, self.view.file)?;
+        self.view.has(&key.0)
+    }
+
+    // r[impl vcf_values.dynamic+2]
+    /// Every FORMAT field present, in record order (a repeated key once),
+    /// with its name, its definition in the file's field table and this
+    /// sample's value read as that says. FORMAT data that does not index is
+    /// the first item's error.
     pub fn iter(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError>> + use<'a>,
-        VcfReadError,
-    > {
-        check_sample(self.sample, self.view.file)?;
-        let index = self.view.index()?;
+    ) -> impl Iterator<Item = Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError>> + use<'a>
+    {
         let this = *self;
-        Ok(index.keys.entries().iter().map(move |&e| this.dyn_entry(index, e)))
+        let index = check_sample(self.sample, self.view.file).and_then(|()| self.view.index());
+        let (error, entries) = match index {
+            Ok(index) => (None, Some(index)),
+            Err(e) => (Some(Err(e)), None),
+        };
+        let fields = entries.into_iter().flat_map(move |index| {
+            index.keys.entries().iter().map(move |&e| this.dyn_entry(index, e))
+        });
+        error.into_iter().chain(fields)
     }
 
     fn dyn_entry(
@@ -383,11 +402,19 @@ impl<'a> SamplesRef<'a> {
         let (file, at, n) = (self.view.file, self.view.at, self.view.n_samples);
         for i in 0..n {
             if let Some(value) = field.sample(i) {
-                decode::<V>(value, &key.0.name, file, at)?;
+                decode::<V>(value, &key.0, KeyKind::Format, file, at)?;
             }
         }
-        let name = key.0.name.clone();
-        Ok(Some(Column { field, next: 0, end: n, name, file, at, _v: PhantomData }))
+        let key = key.0.clone();
+        Ok(Some(Column { field, next: 0, end: n, key, file, at, _v: PhantomData }))
+    }
+
+    /// Whether the record's FORMAT column names `key` (see [`SampleRef::has`]).
+    ///
+    /// # Errors
+    /// As [`SampleRef::has`].
+    pub fn has<V>(&self, key: &FormatKey<V>) -> Result<bool, VcfReadError> {
+        self.view.has(&key.0)
     }
 
     /// How many samples there are.
@@ -405,7 +432,7 @@ pub struct Column<'a, V> {
     field: FieldAt<'a>,
     next: usize,
     end: usize,
-    name: SmolStr,
+    key: FieldId,
     file: &'a FileShared,
     at: RecordAt,
     _v: PhantomData<fn() -> V>,
@@ -414,7 +441,7 @@ pub struct Column<'a, V> {
 impl<V> std::fmt::Debug for Column<'_, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Column")
-            .field("name", &self.name)
+            .field("name", &self.key.name())
             .field("left", &self.end.saturating_sub(self.next))
             .finish()
     }
@@ -422,7 +449,7 @@ impl<V> std::fmt::Debug for Column<'_, V> {
 
 impl<V> Clone for Column<'_, V> {
     fn clone(&self) -> Self {
-        Self { name: self.name.clone(), _v: PhantomData, ..*self }
+        Self { key: self.key.clone(), _v: PhantomData, ..*self }
     }
 }
 
@@ -434,7 +461,7 @@ impl<'a, V: ReadKind> Column<'a, V> {
     pub fn get(&self, sample: SampleIdx) -> Result<V::Out<'a>, VcfReadError> {
         check_sample(Some(sample), self.file)?;
         match self.field.sample(sample.index()) {
-            Some(value) => decode::<V>(value, &self.name, self.file, self.at),
+            Some(value) => decode::<V>(value, &self.key, KeyKind::Format, self.file, self.at),
             None => Ok(V::absent()),
         }
     }
@@ -449,7 +476,7 @@ impl<'a, V: ReadKind> Iterator for Column<'a, V> {
         }
         let value = self.field.sample(self.next)?;
         self.next = self.next.saturating_add(1);
-        let decoded = decode::<V>(value, &self.name, self.file, self.at);
+        let decoded = decode::<V>(value, &self.key, KeyKind::Format, self.file, self.at);
         debug_assert!(decoded.is_ok(), "column() checked every sample");
         Some(decoded.unwrap_or_else(|_| V::absent()))
     }
@@ -488,16 +515,18 @@ impl OnlySample {
         self.view().get(key)
     }
 
-    /// Every FORMAT field present (see [`SampleRef::iter`]).
+    /// Whether the record's FORMAT column names `key` (see [`SampleRef::has`]).
     ///
     /// # Errors
-    /// As [`SampleRef::iter`].
+    /// As [`SampleRef::has`].
+    pub fn has<V>(&self, key: &FormatKey<V>) -> Result<bool, VcfReadError> {
+        self.view().has(key)
+    }
+
+    /// Every FORMAT field present (see [`SampleRef::iter`]).
     pub fn iter(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(&str, &FormatDef, DynValue<'_>), VcfReadError>>,
-        VcfReadError,
-    > {
+    ) -> impl Iterator<Item = Result<(&str, &FormatDef, DynValue<'_>), VcfReadError>> {
         self.view().iter()
     }
 }
@@ -562,16 +591,18 @@ impl Sample {
         self.view().get(key)
     }
 
-    /// Every FORMAT field present (see [`SampleRef::iter`]).
+    /// Whether the record's FORMAT column names `key` (see [`SampleRef::has`]).
     ///
     /// # Errors
-    /// As [`SampleRef::iter`].
+    /// As [`SampleRef::has`].
+    pub fn has<V>(&self, key: &FormatKey<V>) -> Result<bool, VcfReadError> {
+        self.view().has(key)
+    }
+
+    /// Every FORMAT field present (see [`SampleRef::iter`]).
     pub fn iter(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(&str, &FormatDef, DynValue<'_>), VcfReadError>>,
-        VcfReadError,
-    > {
+    ) -> impl Iterator<Item = Result<(&str, &FormatDef, DynValue<'_>), VcfReadError>> {
         self.view().iter()
     }
 }
@@ -630,6 +661,14 @@ impl Samples {
         key: &FormatKey<V>,
     ) -> Result<Option<Column<'s, V>>, VcfReadError> {
         self.view().column(key)
+    }
+
+    /// Whether the record's FORMAT column names `key` (see [`SampleRef::has`]).
+    ///
+    /// # Errors
+    /// As [`SampleRef::has`].
+    pub fn has<V>(&self, key: &FormatKey<V>) -> Result<bool, VcfReadError> {
+        self.view().has(key)
     }
 
     /// How many samples there are.

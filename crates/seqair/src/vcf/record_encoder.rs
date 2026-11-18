@@ -50,21 +50,25 @@ use std::marker::PhantomData;
 
 // r[impl record_encoder.typed_keys]
 
-/// Marker for a single scalar value.
+/// Marker for a single scalar value: a field declared `Number=1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scalar<T> {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible, PhantomData<T>),
 }
 
-/// Marker for a variable-length array.
+/// Marker for a variable-length array. Reading one, an element missing
+/// inside it (`1,.,3`) is an error ([`MissingElement`](super::MissingElement));
+/// read through [`OptArr`] where elements may be missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arr<T> {
     #[doc(hidden)]
     _Uninhabited(std::convert::Infallible, PhantomData<T>),
 }
 
-/// Marker for an array with optional (missing) elements.
+/// Marker for an array with optional (missing) elements. It reads a field
+/// of any `Number`, so it is also the lenient key: a `GQ` declared
+/// `Number=.` where you expect one value reads with `.get(0)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptArr<T> {
     #[doc(hidden)]
@@ -352,13 +356,16 @@ pub type InfoFloats = InfoKey<Arr<f32>>;
 pub type InfoFlag = InfoKey<Flag>;
 pub type InfoString = InfoKey<Str>;
 pub type InfoIntOpts = InfoKey<OptArr<i32>>;
+pub type InfoFloatOpts = InfoKey<OptArr<f32>>;
 
 pub type FormatGt = FormatKey<Gt>;
 pub type FormatInt = FormatKey<Scalar<i32>>;
 pub type FormatFloat = FormatKey<Scalar<f32>>;
 pub type FormatInts = FormatKey<Arr<i32>>;
+/// Fails on an element missing inside the array; see [`FormatFloatOpts`].
 pub type FormatFloats = FormatKey<Arr<f32>>;
 pub type FormatFloatOpts = FormatKey<OptArr<f32>>;
+pub type FormatIntOpts = FormatKey<OptArr<i32>>;
 pub type FormatString = FormatKey<Str>;
 
 // ── InfoEncoder trait ──────────────────────────────────────────────────
