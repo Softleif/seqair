@@ -91,6 +91,7 @@ mod pool;
 mod rans;
 mod rans_nx16;
 mod record;
+mod store;
 mod tok3;
 
 use self::container::{Assembled, SliceBuilder, SliceKind};
