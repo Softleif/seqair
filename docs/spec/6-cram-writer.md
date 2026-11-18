@@ -62,8 +62,8 @@ A slice's alignment start MUST be the 1-based position of its first record, and 
 r[cram_writer.slice_header]
 The slice header MUST give the slice's reference id, alignment start and span, record count, record counter, block count (the core block and every external block), the content ids of its external blocks, embedded reference `-1`, and the MD5 of the uppercased reference bases over its extent — sixteen zero bytes for a slice of unplaced records or one written without the reference.
 
-r[cram_writer.blocks]
-Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. The compression header MUST list an encoding for every data series, and the slice MUST have an external block for every one of them, empty or not, and one for each tag it holds: htslib's decoder refuses a slice that lacks the encoding of a series it reads, and noodles one that lacks its block, even when the read is of nothing (`BA` and `QS` for a record without bases).
+r[cram_writer.blocks+2]
+Every block MUST be written as `r[cram.block.structure]` reads it: method, content type, content id, compressed and uncompressed size, data, CRC32 of all the bytes before it. Each slice MUST have a core data block (content id 0), empty, as every series is external. The compression header MUST list an encoding for every data series, and the slice MUST have an external block for every `EXTERNAL` series that holds data, and one for each tag it holds: htslib's decoder refuses a slice that lacks the encoding of a series it reads, and noodles one that lacks the block of an `EXTERNAL` series it reads, even when the read is of nothing (`BA` and `QS` for a record without bases), which is why a series with no values is a constant code instead. An empty byte-array series (`IN`, `SC`, `BB`) is read by no record, so its block is left out too.
 
 r[cram_writer.version]
 `CramWriterBuilder::version` MUST choose the CRAM version, 3.1 by default as htslib's, or 3.0 for readers without 3.1's codecs; the file definition's minor version MUST be the one chosen.
@@ -89,11 +89,10 @@ The tok3 encoder (CRAM 3.1 name tokeniser, method 8, [CRAMcodecs] §6) MUST writ
 ## Compression header
 
 r[cram_writer.preservation_map]
-The preservation map MUST give `RN` true, `AP` true (positions are deltas), `RR` true for a slice written against the reference and false otherwise, `SM` the substitution matrix `r[cram_writer.substitution+2]
-A mismatching read base MUST be an `X` feature (`BS`) when the read base is `A`, `C`, `G` or `T`, or is `N` against an `A`, `C`, `G` or `T`, and otherwise a `B` feature (`BA` and its quality in `QS`), as htslib chooses. The substitution matrix MUST be the slice's own: for each reference base, codes 0–3 name the other bases from the one the slice substitutes for it most often to the least, ties in the order `ACGTN` lists them, so the commonest substitutions (a C→T conversion, say) all store code 0 and `BS` compresses to little. A reference base other than `ACGT` uses the `N` row, as the decoder does. htslib writes one fixed matrix.
+The preservation map MUST give `RN` true, `AP` true (positions are deltas), `RR` true for a slice written against the reference and false otherwise, `SM` the substitution matrix `r[cram_writer.substitution]` uses, and `TD` the slice's tag lines in the order of their first use.
 
-r[cram_writer.data_series]
-Every data series MUST be encoded `EXTERNAL`, each in a block of its own content id. `RN`, `IN` and `SC` MUST be `BYTE_ARRAY_STOP` with stop byte 0; `BB` MUST be `BYTE_ARRAY_LEN` with external length and external bytes, in two blocks.
+r[cram_writer.data_series+2]
+A data series of integers or bytes whose values in the slice are all one value MUST be encoded as a one-symbol `HUFFMAN` code of that value, which reads no bits and needs no block; one with no values, as a one-symbol code of 0. Every other data series MUST be encoded `EXTERNAL`, each in a block of its own content id. `RN`, `IN` and `SC` MUST be `BYTE_ARRAY_STOP` with stop byte 0; `BB` MUST be `BYTE_ARRAY_LEN` with external length and external bytes, in two blocks.
 
 r[cram_writer.tags]
 A tag is keyed by its name and BAM type, `name[0] << 16 | name[1] << 8 | type`, and stored in the external block of that key, as htslib does. `A`, `c`, `C`, `s`, `S`, `i`, `I` and `f` values MUST be `BYTE_ARRAY_LEN` with a constant length (a one-symbol `HUFFMAN` code of the type's size) and external bytes; `Z` and `H` values (with their NUL) `BYTE_ARRAY_STOP` with stop byte TAB; `B` arrays `BYTE_ARRAY_LEN` with external length and bytes in the same block. A `Z` or `H` value holding a TAB, which SAM does not allow and the stop byte could not frame, MUST be refused (`TabInStringTag`). A `cF` tag (htslib's private CRAM flags, which readers drop) MUST be refused (`ReservedTag`), and so MUST a tag name other than a letter followed by a letter or digit (`InvalidTagName`): the tag dictionary is NUL-separated.
@@ -135,8 +134,8 @@ r[cram_writer.record.mapq]
 r[cram_writer.features]
 A mapped record's CIGAR MUST become read features (`FC`, and `FP` the 1-based read position minus the previous feature's), walking the CIGAR against the reference: `I` of one base `i` (`BA`) and longer `I` (`IN`); `D` (`DL`); `N` (`RS`); `S` (`SC`); `H` (`HC`); `P` (`PD`). `M`, `=` and `X` compare each read base with the reference base: a base that is the same letter (the reference uppercased) is an implicit match and writes nothing, any other is a substitution (`r[cram_writer.substitution]`), as htslib compares them. A reference letter that is no IUPAC code, or `U`, matches no read base, though a decode copying it would read it as `N` or `T`. The CIGAR's query length MUST be SEQ's (`CigarSeqLengthMismatch`).
 
-r[cram_writer.substitution]
-A mismatching read base MUST be an `X` feature (`BS`) when the read base is `A`, `C`, `G` or `T`, or is `N` against an `A`, `C`, `G` or `T`, and otherwise a `B` feature (`BA` and its quality in `QS`), as htslib chooses. The substitution matrix is fixed: for each reference base the codes 0–3 name the other bases in the order `ACGTN` lists them (`SM` bytes `0x1B` each); a reference base other than `ACGT` uses the `N` row, as the decoder does.
+r[cram_writer.substitution+2]
+A mismatching read base MUST be an `X` feature (`BS`) when the read base is `A`, `C`, `G` or `T`, or is `N` against an `A`, `C`, `G` or `T`, and otherwise a `B` feature (`BA` and its quality in `QS`), as htslib chooses. The substitution matrix MUST be the slice's own: for each reference base, codes 0–3 name the other bases from the one the slice substitutes for it most often to the least, ties in the order `ACGTN` lists them, so the commonest substitutions (a C→T conversion, say) all store code 0 and `BS` compresses to little. A reference base other than `ACGT` uses the `N` row, as the decoder does. htslib writes one fixed matrix.
 
 r[cram_writer.past_reference_end]
 A read base aligned past the end of the reference MUST be a `B` feature: there is no reference base to match.
