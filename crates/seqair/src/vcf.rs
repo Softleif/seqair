@@ -183,6 +183,7 @@ pub(crate) mod encoder;
 pub mod error;
 pub(crate) mod field_set;
 pub mod header;
+pub(crate) mod reader;
 pub mod record;
 pub mod record_encoder;
 pub mod unified;
