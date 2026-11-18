@@ -6,8 +6,8 @@
 //! reference it must match byte for byte.
 
 use super::{
-    Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize, order_1_header, order_1_shift,
-    row_target, symbols, write_row,
+    Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize_into, order_1_header,
+    order_1_shift, target, write_row,
 };
 use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4, u64x2};
 use fearless_simd_macros::simd;
@@ -114,10 +114,14 @@ fn with_scratch<T: Scratch, R>(
 /// context and the symbol as a big-endian u16.
 struct Order1Scratch {
     counts: [Vec<u32>; 4],
-    /// The rows of `counts` the last block may have left non-zero.
-    dirty: [bool; 256],
-    /// Rows outside the current alphabet hold an earlier block's entries,
-    /// which no position of this block reads.
+    /// Whether `counts` may be non-zero: only after a block given up part
+    /// way, since a block's tables take every count they read.
+    dirty: bool,
+    /// The alphabet's rows over the alphabet's columns, row after row.
+    rows: Vec<u32>,
+    freqs: Vec<u32>,
+    /// Entries outside the current alphabet's rows and columns hold an
+    /// earlier block's, which no position of this block reads.
     enc: Vec<Enc>,
 }
 
@@ -127,7 +131,9 @@ impl Default for Order1Scratch {
     fn default() -> Self {
         Self {
             counts: std::array::from_fn(|_| vec![0; 1 << 16]),
-            dirty: [false; 256],
+            dirty: false,
+            rows: Vec::new(),
+            freqs: Vec::new(),
             enc: vec![0; 1 << 16],
         }
     }
@@ -371,30 +377,41 @@ pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<
     })
 }
 
+/// Rows of at most this many symbols are gathered from the four count
+/// tables symbol by symbol; longer ones are summed whole, a vector at a time.
+const GATHERED: usize = 32;
+
 /// The parent's `order_1_tables` and the table writing of its
-/// `encode_order_1`, over the alphabet's rows only: the shift and the
-/// tables as written, with `o1.enc` filled for every context of the
+/// `encode_order_1`, over the alphabet's rows and columns only: the shift
+/// and the tables as written, with `o1.enc` filled for every pair of the
 /// alphabet.
 #[allow(clippy::indexing_slicing, reason = "u8s and u16s index 256- and 65536-entry tables")]
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "counts ≤ data.len(); each stretch start was counted once as a pair; \
-              shift ≥ log2 of a row total"
+              shift ≥ log2 of a row total; a row's starts sum to its total ≤ 4096"
 )]
+#[allow(clippy::cast_possible_truncation, reason = "an index into a 256-symbol alphabet")]
 fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32, Vec<u8>)> {
-    for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
+    if o1.dirty {
         for c in &mut o1.counts {
-            c[ctx << 8..][..256].fill(0);
+            c.fill(0);
         }
-        *dirty = false;
     }
+    o1.dirty = true;
     let [c0, c1, c2, c3] = &mut o1.counts;
     let mut alphabet = [false; 256];
     alphabet[0] = true;
     for &b in data {
         alphabet[usize::from(b)] = true;
     }
-    o1.dirty = alphabet;
+    // The alphabet in order, and each symbol's place in it (0 is first).
+    let syms: Vec<usize> = (0..256).filter(|&s| alphabet[s]).collect();
+    let mut index = [0u8; 256];
+    for (i, &s) in syms.iter().enumerate() {
+        index[s] = i as u8;
+    }
+    let k = syms.len();
 
     // Every byte with the one before it (the first with context 0), the
     // pairs taking the four tables in turn.
@@ -414,53 +431,86 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32,
         c0[prev << 8 | usize::from(a)] += 1;
         prev = usize::from(a);
     }
-    for ctx in (0..256).filter(|&c| alphabet[c]) {
-        let rows =
-            [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
-        for row in rows {
-            for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(row) {
-                *a += std::mem::take(b);
+    // Each row's counts over the alphabet, taken out of the tables, which
+    // are left zero: no pair outside the alphabet was counted.
+    o1.rows.clear();
+    o1.rows.resize(k * k, 0);
+    for (row, &ctx) in o1.rows.chunks_exact_mut(k).zip(&syms) {
+        let at = ctx << 8;
+        let [r0, r1, r2, r3] = [
+            &mut c0[at..][..256],
+            &mut c1[at..][..256],
+            &mut c2[at..][..256],
+            &mut c3[at..][..256],
+        ];
+        if k <= GATHERED {
+            for (r, &s) in row.iter_mut().zip(&syms) {
+                *r = std::mem::take(&mut r0[s])
+                    + std::mem::take(&mut r1[s])
+                    + std::mem::take(&mut r2[s])
+                    + std::mem::take(&mut r3[s]);
+            }
+        } else {
+            let mut sum = [0u32; 256];
+            for ((((s, a), b), c), d) in sum.iter_mut().zip(r0).zip(r1).zip(r2).zip(r3) {
+                *s = std::mem::take(a) + std::mem::take(b) + std::mem::take(c) + std::mem::take(d);
+            }
+            for (r, &s) in row.iter_mut().zip(&syms) {
+                *r = sum[s];
             }
         }
     }
+    o1.dirty = false;
+    let rows = &mut o1.rows;
     // Each stretch start but the first moved to context 0, which `context`
-    // gives it.
+    // gives it; context 0's row is the first.
     let chunk = data.len() / n;
     if chunk > 0 {
         for p in (1..n).map(|j| j * chunk) {
-            c0[usize::from(data[p - 1]) << 8 | usize::from(data[p])] -= 1;
-            c0[usize::from(data[p])] += 1;
+            let (before, at) = (
+                usize::from(index[usize::from(data[p - 1])]),
+                usize::from(index[usize::from(data[p])]),
+            );
+            rows[before * k + at] -= 1;
+            rows[at] += 1;
         }
     }
 
-    let mut rows: Vec<(usize, &mut [u32; 256])> = c0
-        .as_chunks_mut::<256>()
-        .0
-        .iter_mut()
-        .enumerate()
-        .filter(|(ctx, _)| alphabet[*ctx])
-        .collect();
-    for (_, row) in &mut rows {
-        if row.iter().all(|&c| c == 0) {
+    let mut targets = Vec::with_capacity(k);
+    for row in rows.chunks_exact_mut(k) {
+        let (total, symbols) = row
+            .iter()
+            .fold((0u32, 0usize), |(t, s), &c| (t.saturating_add(c), s + usize::from(c > 0)));
+        targets.push(if total == 0 {
+            // A symbol that never precedes another: a row that only ever
+            // decodes symbol 0, as the parent writes it.
             row[0] = 1;
-        }
+            target(1, 1)
+        } else {
+            target(total, symbols)
+        });
     }
-    let shift = order_1_shift(rows.iter().map(|(_, row)| row_target(row)));
+    let shift = order_1_shift(targets.iter().copied());
 
     let mut table = Vec::new();
     super::super::rans::write_runs(&mut table, &alphabet, |_, _| {});
-    for (ctx, row) in &rows {
-        let freqs = normalize(row, row_target(row));
-        write_row(&mut table, &alphabet, &freqs)?;
+    o1.freqs.resize(k, 0);
+    let freqs = &mut o1.freqs;
+    for ((row, &t), &ctx) in rows.chunks_exact(k).zip(&targets).zip(&syms) {
+        normalize_into(row, t, freqs);
+        write_row(&mut table, freqs.iter().copied())?;
         let total: u32 = freqs.iter().sum();
-        let syms = symbols(&freqs, shift - total.trailing_zeros());
-        for (e, &s) in o1.enc[ctx << 8..][..256].iter_mut().zip(&syms) {
-            *e = enc(s);
+        let scale = shift - total.trailing_zeros();
+        let enc_row = &mut o1.enc[ctx << 8..][..256];
+        let mut start = 0;
+        for (&f, &s) in freqs.iter().zip(&syms) {
+            let freq = f << scale;
+            enc_row[s] = enc(Symbol { start, freq });
+            start += freq;
         }
     }
     Some((shift, table))
 }
-
 /// Positions an order-1 block covers: each lane's bytes for them, and the
 /// one before, are copied out once, so the steps index a fixed-size array.
 const BLOCK: usize = 16;
