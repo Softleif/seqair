@@ -336,7 +336,8 @@ fn the_substitution_matrix_orders_bases_by_frequency(tc: hegel::TestCase) {
         .collect();
     let refs = *b"ACGTN";
     let others = |row: usize| refs.iter().copied().filter(move |&b| b != refs[row]).take(4);
-    let encoded: Vec<u8> = pairs.iter().map(|&(row, alt)| u8::try_from(row * 4 + alt).unwrap()).collect();
+    let encoded: Vec<u8> =
+        pairs.iter().map(|&(row, alt)| u8::try_from(row * 4 + alt).unwrap()).collect();
     let (sm, coded) = container::substitution_matrix(&encoded);
     let matrix = SubstitutionMatrix::parse(&sm);
     for (&(row, alt), &code) in pairs.iter().zip(&coded) {
@@ -349,4 +350,51 @@ fn the_substitution_matrix_orders_bases_by_frequency(tc: hegel::TestCase) {
         let counts: Vec<usize> = codes.iter().map(|&b| count(b)).collect();
         assert!(counts.windows(2).all(|w| w[0] >= w[1]), "row {row}: {codes:?} {counts:?}");
     }
+}
+
+// r[verify cram_writer.data_series+2]
+// r[verify cram_writer.blocks+2]
+/// Two reads, alike but for their names and positions, leave most series
+/// constant: those take no block, and the slice reads back.
+#[test]
+fn constant_series_take_no_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = writer(dir.path(), &header(""));
+    let records = [mapped(0, b"a", b"ACGT"), mapped(3, b"bb", b"TACG")];
+    for r in &records {
+        w.write(r).unwrap();
+    }
+    let (cram, _) = w.finish().unwrap();
+    let mut reader = CramStreamReader::new(&cram[..]).unwrap();
+    let container = reader.next_container().unwrap().unwrap();
+    // Both match the reference, have no qualities, and are detached: only
+    // `RN` and `AP` vary. Compression header, slice header, core, and those two.
+    assert_eq!(container.header.num_blocks, 5);
+    let back = read_back(dir.path(), &cram);
+    assert_eq!(back.len(), 2);
+    for (r, b) in records.iter().zip(&back) {
+        assert_eq!(b.qname(), &r.qname[..]);
+        assert_eq!(b.pos(), r.pos);
+    }
+}
+
+#[test]
+fn a_constant_is_one_value_or_none() {
+    use crate::cram::varint::write_itf8;
+    let itf8 = |values: &[i32]| {
+        let mut out = Vec::new();
+        for &v in values {
+            write_itf8(&mut out, v);
+        }
+        out
+    };
+    let c = |s: container::Series, data: &[u8]| s.constant(data);
+    assert_eq!(c(container::Series::Mq, &itf8(&[60, 60, 60])), Some(60));
+    assert_eq!(c(container::Series::Rg, &itf8(&[-1, -1])), Some(-1));
+    assert_eq!(c(container::Series::Ap, &itf8(&[300_000, 300_000])), Some(300_000));
+    assert_eq!(c(container::Series::Ap, &itf8(&[1, 300_000])), None);
+    assert_eq!(c(container::Series::Tl, &[]), Some(0));
+    assert_eq!(c(container::Series::Qs, &[0xFF; 9]), Some(0xFF));
+    assert_eq!(c(container::Series::Qs, &[30, 31]), None);
+    assert_eq!(c(container::Series::In, &[]), None);
 }

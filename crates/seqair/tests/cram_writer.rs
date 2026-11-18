@@ -1027,8 +1027,10 @@ fn series_bytes(cram: &Path, series: &str) -> usize {
 }
 
 // r[verify cram_writer.mates]
-/// Pairs the decode rebuilds are attached (an `NF` block appears) and read
-/// back as they were through samtools, seqair and noodles; others detached.
+/// Pairs the decode rebuilds are attached and read back as they were
+/// through samtools, seqair and noodles; others detached. Attachment shows
+/// as a `CF` block: the first of a pair has `CF` 0x5, the second 0x1, where
+/// every detached record here has 0x3, a constant, which takes no block.
 #[test]
 fn mate_pairs_attach_where_every_decoder_rebuilds_them() {
     let refs = reference_bases(&mut Rng(7));
@@ -1102,7 +1104,7 @@ fn mate_pairs_attach_where_every_decoder_rebuilds_them() {
         let bam = dir.path().join("in.bam");
         samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
         let (ours, _) = write_each_way(dir.path(), &bam, &fasta, Options::default());
-        assert_eq!(series_bytes(&ours, "NF") > 0, attaches, "{what}");
+        assert_eq!(series_bytes(&ours, "CF") > 0, attaches, "{what}");
         let read: Vec<String> = samtools_lines(&ours, &fasta)
             .iter()
             .map(|l| l.split('\t').take(11).collect::<Vec<_>>().join("\t"))
