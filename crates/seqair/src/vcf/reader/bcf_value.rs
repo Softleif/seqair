@@ -185,6 +185,11 @@ impl<'a> TypedValue<'a> {
         self.ty
     }
 
+    /// The payload's length in bytes (the value after its descriptor).
+    pub(crate) fn stored_len(&self) -> usize {
+        self.payload.len()
+    }
+
     /// The element count the descriptor declares (for [`BcfType::Missing`],
     /// with no bytes behind it).
     pub(crate) fn count(&self) -> usize {

@@ -20,17 +20,28 @@ use std::sync::Arc;
 
 /// FORMAT values of some samples in BCF's layout: per field, its key, its
 /// type descriptor, then each sample's elements.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct FormatData {
     bytes: Vec<u8>,
     n_fmt: usize,
     n_samples: usize,
-    file: Option<Arc<FileShared>>,
+    file: Arc<FileShared>,
     at: RecordAt,
     index: LazyIndex,
 }
 
 impl FormatData {
+    fn new(raw: &RawRecord<'_>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            n_fmt: 0,
+            n_samples: 0,
+            file: Arc::clone(raw.file),
+            at: raw.at(),
+            index: LazyIndex::default(),
+        }
+    }
+
     fn begin(&mut self, raw: &RawRecord<'_>, n_fmt: usize, n_samples: usize) {
         self.bytes.clear();
         self.n_fmt = n_fmt;
@@ -111,7 +122,7 @@ impl<'a> Source<'a> {
 
     fn file(&self) -> Option<&'a FileShared> {
         match *self {
-            Self::Indexed(data) => data.file.as_deref(),
+            Self::Indexed(data) => Some(&*data.file),
             Self::Scan { file, .. } => Some(file),
         }
     }
@@ -446,7 +457,7 @@ impl Fields for OnlySample {
     }
 
     fn new(sample: &SampleIdx, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
-        let mut data = FormatData::default();
+        let mut data = FormatData::new(&raw);
         data.fill_one(&raw, *sample)?;
         Ok(Self(data))
     }
@@ -522,7 +533,7 @@ impl Fields for Sample {
     }
 
     fn new((sample, name): &Self::Plan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
-        let mut data = FormatData::default();
+        let mut data = FormatData::new(&raw);
         data.fill_one(&raw, *sample)?;
         Ok(Self { data, name: name.clone() })
     }
@@ -580,7 +591,7 @@ impl Fields for Samples {
     }
 
     fn new(_: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
-        let mut data = FormatData::default();
+        let mut data = FormatData::new(&raw);
         data.fill_all(&raw)?;
         Ok(Self(data))
     }

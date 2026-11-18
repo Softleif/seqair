@@ -8,7 +8,7 @@ use super::file::FileShared;
 use super::info::InfoRef;
 use super::locus::{Locus, VcfPos};
 use super::samples::{SampleRef, SamplesRef};
-use super::site::{SiteRef, SiteSpans};
+use super::site::{SiteParts, SiteRef};
 use crate::vcf::header::{SampleIdx, VcfHeader};
 use crate::vcf::record_encoder::ContigId;
 use seqair_types::SmolStr;
@@ -78,8 +78,8 @@ pub(crate) struct BcfRecord<'a> {
     pub(crate) shared: &'a [u8],
     pub(crate) indiv: &'a [u8],
     pub(crate) fixed: Fixed,
-    /// Where the site columns are; found only when the site or INFO is read.
-    pub(crate) spans: &'a SiteSpans,
+    /// Where INFO starts in `shared`; found only when it is read.
+    pub(crate) info_start: usize,
 }
 
 /// How a record is stored. VCF text records are the next phase: a variant
@@ -101,6 +101,8 @@ pub struct RawRecord<'a> {
     pub(crate) contig: &'a ContigId,
     pub(crate) at: RecordAt,
     pub(crate) sections: Sections,
+    /// The site columns, decoded when [`Sections::SITE`] is read.
+    pub(crate) site: Option<&'a SiteParts>,
     pub(crate) repr: Repr<'a>,
 }
 
@@ -150,8 +152,8 @@ impl<'a> RawRecord<'a> {
     /// [`VcfReadError::NotRequested`], or [`VcfReadError::Record`] if a
     /// column is malformed.
     pub fn site(&self) -> Result<SiteRef<'a>, VcfReadError> {
-        let (shared, spans, n_allele, qual) = self.bcf_site()?;
-        SiteRef::check(shared, spans, n_allele, qual, self.file).map_err(|e| self.error(e))
+        let (bytes, parts) = self.site_parts()?;
+        Ok(SiteRef::new(bytes, parts, self.file))
     }
 
     /// The INFO column; needs [`Sections::INFO`]. Each `get` walks the
@@ -194,9 +196,9 @@ impl<'a> RawRecord<'a> {
 
     /// Point `slot` at the record's file, cloning the `Arc` only when it
     /// changes, so filling a component does not touch the refcount.
-    pub(crate) fn keep_file(&self, slot: &mut Option<Arc<FileShared>>) {
-        if !slot.as_ref().is_some_and(|f| Arc::ptr_eq(f, self.file)) {
-            *slot = Some(Arc::clone(self.file));
+    pub(crate) fn keep_file(&self, slot: &mut Arc<FileShared>) {
+        if !Arc::ptr_eq(slot, self.file) {
+            *slot = Arc::clone(self.file);
         }
     }
 
@@ -205,18 +207,17 @@ impl<'a> RawRecord<'a> {
         self.bcf().bytes
     }
 
-    /// The shared section, its site spans (checked), `n_allele` and QUAL.
-    pub(crate) fn bcf_site(&self) -> Result<(&'a [u8], &'a SiteSpans, u16, u32), VcfReadError> {
-        self.require(self.sections.site(), RecordSection::Site)?;
-        let r = self.bcf();
-        Ok((r.shared, r.spans, r.fixed.n_allele, r.fixed.qual))
+    /// The bytes the site columns were decoded from, and their parts.
+    pub(crate) fn site_parts(&self) -> Result<(&'a [u8], &'a SiteParts), VcfReadError> {
+        let parts = self.site.ok_or(VcfReadError::NotRequested { section: RecordSection::Site })?;
+        Ok((self.bcf().shared, parts))
     }
 
     /// The INFO entries and their count.
     pub(crate) fn bcf_info(&self) -> Result<(&'a [u8], usize), VcfReadError> {
         self.require(self.sections.info(), RecordSection::Info)?;
         let r = self.bcf();
-        Ok((r.shared.get(r.spans.info.clone()).unwrap_or_default(), usize::from(r.fixed.n_info)))
+        Ok((r.shared.get(r.info_start..).unwrap_or_default(), usize::from(r.fixed.n_info)))
     }
 
     /// The individual section, `n_fmt` and the sample count, for `sample`

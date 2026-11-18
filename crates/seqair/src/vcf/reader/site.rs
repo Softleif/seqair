@@ -1,9 +1,10 @@
 //! [`Site`]: ID, REF, ALT, QUAL and FILTER (`r[vcf_fields.site]`).
 
-use super::bcf_value::{BcfValueError, BcfVec, TypedValue, skip_typed_value};
+use super::bcf_value::{BcfValueError, TypedValue, skip_typed_value};
 use super::error::{KeyKind, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, Sections};
 use super::file::FileShared;
+use super::index::DictId;
 use super::raw::RawRecord;
 use crate::vcf::alleles::Alleles;
 use crate::vcf::bcf_encoding::FLOAT_MISSING;
@@ -44,57 +45,166 @@ impl<'a> Allele<'a> {
     }
 }
 
-/// The typed strings of a record's alleles, checked to parse as UTF-8.
-#[derive(Debug, Clone)]
-struct TypedStrings<'a> {
-    rest: &'a [u8],
-    left: usize,
+/// A record's site columns, decoded once by the reader, whatever the
+/// format: where the ID and each allele lie in the record's bytes (checked
+/// to be UTF-8), the FILTER ids (checked to name FILTERs), and QUAL.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SiteParts {
+    pub(crate) id: Range<u32>,
+    /// REF, then each ALT.
+    pub(crate) alleles: Vec<Range<u32>>,
+    pub(crate) filter: FilterColumn,
+    /// The FILTER ids in record order (for `Failed`, and `PASS` for `Pass`).
+    pub(crate) filter_ids: Vec<DictId>,
+    pub(crate) qual: Option<f32>,
 }
 
-impl<'a> Iterator for TypedStrings<'a> {
-    type Item = &'a str;
+/// What a FILTER column says, before its ids are listed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FilterColumn {
+    #[default]
+    Missing,
+    Pass,
+    Failed,
+}
 
-    fn next(&mut self) -> Option<&'a str> {
-        self.left = self.left.checked_sub(1)?;
-        let (value, len) = TypedValue::parse(self.rest).ok()?;
-        self.rest = self.rest.get(len..)?;
-        value.str().ok()
+impl SiteParts {
+    /// Clear for the next record, keeping the buffers.
+    pub(crate) fn begin(&mut self) {
+        self.alleles.clear();
+        self.filter_ids.clear();
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.left, Some(self.left))
+    /// The bytes the ID and alleles span: one run in either format.
+    fn span(&self) -> Range<usize> {
+        let end = self.alleles.last().map_or(self.id.end, |a| a.end);
+        self.id.start as usize..end as usize
+    }
+
+    /// `other`, its spans moved `shift` bytes towards the start.
+    fn rebased_from(&mut self, other: &Self, shift: u32) {
+        let back = |r: &Range<u32>| r.start.saturating_sub(shift)..r.end.saturating_sub(shift);
+        self.id = back(&other.id);
+        self.alleles.clear();
+        self.alleles.extend(other.alleles.iter().map(back));
+        self.filter = other.filter;
+        self.filter_ids.clone_from(&other.filter_ids);
+        self.qual = other.qual;
+    }
+
+    // r[impl vcf_fields.site]
+    /// Decode the site columns of a BCF shared section (after its 24 fixed
+    /// bytes): IDs and alleles UTF-8, every FILTER index a FILTER of the
+    /// header. Returns where INFO starts.
+    pub(crate) fn decode_bcf(
+        &mut self,
+        shared: &[u8],
+        n_allele: u16,
+        qual: u32,
+        file: &FileShared,
+    ) -> Result<usize, RecordError> {
+        self.begin();
+        let mut at = 24usize;
+        let string = |at: &mut usize, part: RecordPart| -> Result<Range<u32>, RecordError> {
+            let rest = shared.get(*at..).unwrap_or_default();
+            let (value, len) = TypedValue::parse(rest).map_err(|e| value_error(part, e))?;
+            let s = value.str().map_err(|e| value_error(part, e))?;
+            // The payload, as `str` read it: after the descriptor, cut at NUL.
+            let start = at.saturating_add(len).saturating_sub(value.stored_len());
+            *at = at.saturating_add(len);
+            span(start, s.len())
+        };
+        self.id = string(&mut at, RecordPart::Id)?;
+        for _ in 0..n_allele {
+            let allele = string(&mut at, RecordPart::Alleles)?;
+            self.alleles.push(allele);
+        }
+        let rest = shared.get(at..).unwrap_or_default();
+        let (value, len) =
+            TypedValue::parse(rest).map_err(|e| value_error(RecordPart::Filter, e))?;
+        let ids = value.ints().map_err(|e| value_error(RecordPart::Filter, e))?;
+        for index in ids.flatten() {
+            let declared = usize::try_from(index).ok().and_then(|i| file.filters.get(i)?.as_ref());
+            let id = declared
+                .and_then(|f| DictId::new(f.dict_idx))
+                .ok_or(RecordError::UnknownKey { index, kind: KeyKind::Filter })?;
+            self.filter_ids.push(id);
+        }
+        self.filter = match self.filter_ids.as_slice() {
+            [] => FilterColumn::Missing,
+            [id] if id.get() == 0 => FilterColumn::Pass,
+            _ => FilterColumn::Failed,
+        };
+        self.qual = (qual != FLOAT_MISSING).then(|| f32::from_bits(qual));
+        Ok(at.saturating_add(len))
     }
 }
 
-impl ExactSizeIterator for TypedStrings<'_> {}
+fn value_error(part: RecordPart, e: BcfValueError) -> RecordError {
+    match e {
+        BcfValueError::Utf8(source) => RecordError::Utf8 { part, source },
+        source => RecordError::Value { part, source },
+    }
+}
+
+/// `start..start + len` as `u32`s: a record is at most 256 MiB.
+pub(crate) fn span(start: usize, len: usize) -> Result<Range<u32>, RecordError> {
+    let end = start.saturating_add(len);
+    match (u32::try_from(start), u32::try_from(end)) {
+        (Ok(s), Ok(e)) => Ok(s..e),
+        _ => Err(RecordError::TooLarge { size: end as u64, max: u64::from(u32::MAX) }),
+    }
+}
+
+/// Where INFO starts in a BCF shared section, its site columns skipped
+/// unchecked (for a type that reads INFO but not the site).
+pub(crate) fn bcf_info_start(shared: &[u8], n_allele: u16) -> Result<usize, RecordError> {
+    let skip = |at: usize, part: RecordPart| -> Result<usize, RecordError> {
+        let rest = shared.get(at..).unwrap_or_default();
+        let len = skip_typed_value(rest).map_err(|source| RecordError::Value { part, source })?;
+        Ok(at.saturating_add(len))
+    };
+    let mut at = skip(24, RecordPart::Id)?;
+    for _ in 0..n_allele {
+        at = skip(at, RecordPart::Alleles)?;
+    }
+    skip(at, RecordPart::Filter)
+}
+
+/// The text of `range` in `bytes`; decoding checked it is UTF-8.
+fn text<'a>(bytes: &'a [u8], range: &Range<u32>) -> &'a str {
+    let b = bytes.get(range.start as usize..range.end as usize).unwrap_or_default();
+    std::str::from_utf8(b).unwrap_or_default()
+}
 
 /// A record's alleles: REF, then the ALTs.
 #[derive(Debug, Clone, Copy)]
 pub struct AllelesRef<'a> {
     bytes: &'a [u8],
-    n: u16,
+    spans: &'a [Range<u32>],
 }
 
 impl<'a> AllelesRef<'a> {
-    fn strings(&self) -> TypedStrings<'a> {
-        TypedStrings { rest: self.bytes, left: usize::from(self.n) }
-    }
-
     /// The REF bases as stored.
     pub fn reference(&self) -> &'a [u8] {
-        self.strings().next().map_or(&[], str::as_bytes)
+        self.spans.first().map_or(&[], |r| text(self.bytes, r).as_bytes())
+    }
+
+    fn alt_strs(&self) -> impl ExactSizeIterator<Item = &'a str> + Clone + use<'a> {
+        let bytes = self.bytes;
+        self.spans.get(1..).unwrap_or_default().iter().map(move |r| text(bytes, r))
     }
 
     /// The ALT alleles; none for a record without ALT (`.`).
     pub fn alts(&self) -> impl ExactSizeIterator<Item = Allele<'a>> + Clone + use<'a> {
-        self.strings().skip(1).map(Allele::classify)
+        self.alt_strs().map(Allele::classify)
     }
 
     /// The writer's typed alleles: an SNV, insertion, deletion or
     /// reference-only site where the bases fit one, else `Complex`.
     pub fn to_alleles(&self) -> Result<Alleles, AllelesError> {
         let reference = self.reference();
-        let alts: SmallVec<&str, 2> = self.strings().skip(1).collect();
+        let alts: SmallVec<&str, 2> = self.alt_strs().collect();
         let bases = |s: &[u8]| s.iter().map(|&b| base(b)).collect::<Option<SmallVec<Base, 4>>>();
         let complex = || {
             let reference = std::str::from_utf8(reference).unwrap_or_default();
@@ -137,29 +247,25 @@ fn base(b: u8) -> Option<Base> {
 /// A record's FILTER column.
 #[derive(Debug, Clone, Copy)]
 pub struct FiltersRef<'a> {
-    /// The typed int vector of dictionary indices, checked to name FILTERs.
-    bytes: &'a [u8],
-    file: Option<&'a FileShared>,
+    column: FilterColumn,
+    ids: &'a [DictId],
+    file: &'a FileShared,
 }
 
 impl<'a> FiltersRef<'a> {
-    /// The dictionary indices; checked when the record was read, and an
-    /// unfilled site has no bytes, which is no filters.
-    fn ids(&self) -> Option<BcfVec<'a, i32>> {
-        TypedValue::parse(self.bytes).and_then(|(v, _)| v.ints()).ok()
-    }
-
     /// `Pass` (exactly `PASS`), `Missing` (`.`) or `Failed` with the
     /// filters that failed. htslib's `bcf_has_filter` counts `.` as PASS;
     /// here each caller decides.
+    ///
+    /// A VCF text FILTER name the header does not declare still fails the
+    /// record, but no [`FilterId`] can name it, so `Failed` does not list it.
     pub fn status(&self) -> FilterStatus<'a> {
-        let Some(ids) = self.ids() else { return FilterStatus::Missing };
-        match (ids.len(), ids.get(0)) {
-            (0, _) => FilterStatus::Missing,
-            (1, Some(Some(0))) => FilterStatus::Pass,
-            _ => FilterStatus::Failed(FailedFilters {
-                ids,
-                table: self.file.map_or(&[], |f| f.filters.as_slice()),
+        match self.column {
+            FilterColumn::Missing => FilterStatus::Missing,
+            FilterColumn::Pass => FilterStatus::Pass,
+            FilterColumn::Failed => FilterStatus::Failed(FailedFilters {
+                ids: self.ids.iter(),
+                table: &self.file.filters,
             }),
         }
     }
@@ -170,13 +276,12 @@ impl<'a> FiltersRef<'a> {
     /// # Errors
     /// [`VcfReadError::ForeignKey`] for a filter of another header.
     pub fn contains(&self, filter: &FilterId) -> Result<bool, VcfReadError> {
-        if let (Some(key), Some(file)) = (filter.header, self.file)
-            && key != file.header.id()
+        if let Some(key) = filter.header
+            && key != self.file.header.id()
         {
             return Err(VcfReadError::ForeignKey { name: filter.name.clone() });
         }
-        let wanted = i32::try_from(filter.dict_idx).ok();
-        Ok(self.ids().into_iter().flatten().any(|id| id.is_some() && id == wanted))
+        Ok(self.ids.iter().any(|id| id.get() == filter.dict_idx))
     }
 }
 
@@ -196,7 +301,7 @@ impl Eq for FilterStatus<'_> {}
 /// The filters a record failed, in record order.
 #[derive(Debug, Clone)]
 pub struct FailedFilters<'a> {
-    ids: BcfVec<'a, i32>,
+    ids: std::slice::Iter<'a, DictId>,
     table: &'a [Option<FilterId>],
 }
 
@@ -204,13 +309,8 @@ impl<'a> Iterator for FailedFilters<'a> {
     type Item = &'a FilterId;
 
     fn next(&mut self) -> Option<&'a FilterId> {
-        loop {
-            let id = self.ids.next()?;
-            let found = id.and_then(|i| self.table.get(usize::try_from(i).ok()?)?.as_ref());
-            if found.is_some() {
-                return found;
-            }
-        }
+        // Decoding checked every id names a FILTER.
+        self.ids.find_map(|id| self.table.get(id.get() as usize)?.as_ref())
     }
 }
 
@@ -220,138 +320,61 @@ impl PartialEq for FailedFilters<'_> {
     }
 }
 
-/// Where the site columns sit in a BCF record's shared section.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SiteSpans {
-    pub(crate) id: Range<usize>,
-    pub(crate) alleles: Range<usize>,
-    pub(crate) filter: Range<usize>,
-    pub(crate) info: Range<usize>,
-}
-
-impl SiteSpans {
-    /// Find the columns in `shared`, the whole shared section, whose site
-    /// columns start after the 24 fixed bytes.
-    pub(crate) fn find(shared: &[u8], n_allele: u16) -> Result<Self, RecordError> {
-        let value = |at: usize, part: RecordPart| -> Result<usize, RecordError> {
-            let rest = shared.get(at..).unwrap_or_default();
-            let len =
-                skip_typed_value(rest).map_err(|source| RecordError::Value { part, source })?;
-            Ok(at.saturating_add(len))
-        };
-        let id_end = value(24, RecordPart::Id)?;
-        let mut alleles_end = id_end;
-        for _ in 0..n_allele {
-            alleles_end = value(alleles_end, RecordPart::Alleles)?;
-        }
-        let filter_end = value(alleles_end, RecordPart::Filter)?;
-        Ok(Self {
-            id: 24..id_end,
-            alleles: id_end..alleles_end,
-            filter: alleles_end..filter_end,
-            info: filter_end..shared.len(),
-        })
-    }
-}
-
 // r[impl vcf_fields.site]
 /// A record's ID, REF, ALT, QUAL and FILTER, borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct SiteRef<'a> {
-    id: &'a str,
-    alleles: AllelesRef<'a>,
-    filters: FiltersRef<'a>,
-    qual: u32,
+    bytes: &'a [u8],
+    parts: &'a SiteParts,
+    file: &'a FileShared,
 }
 
 impl<'a> SiteRef<'a> {
-    /// The site of a BCF record, every part checked: IDs and alleles are
-    /// UTF-8, every FILTER index names a FILTER of the header.
-    pub(crate) fn check(
-        shared: &'a [u8],
-        spans: &SiteSpans,
-        n_allele: u16,
-        qual: u32,
-        file: &'a FileShared,
-    ) -> Result<Self, RecordError> {
-        let part = |r: &Range<usize>| shared.get(r.clone()).unwrap_or_default();
-        let value = |part: RecordPart, e: BcfValueError| match e {
-            BcfValueError::Utf8(source) => RecordError::Utf8 { part, source },
-            source => RecordError::Value { part, source },
-        };
-        let id = TypedValue::parse(part(&spans.id))
-            .and_then(|(v, _)| v.str())
-            .map_err(|e| value(RecordPart::Id, e))?;
-        let alleles = AllelesRef { bytes: part(&spans.alleles), n: n_allele };
-        let mut rest = alleles.bytes;
-        for _ in 0..n_allele {
-            let (v, len) = TypedValue::parse(rest).map_err(|e| value(RecordPart::Alleles, e))?;
-            v.str().map_err(|e| value(RecordPart::Alleles, e))?;
-            rest = rest.get(len..).unwrap_or_default();
-        }
-        let filter_bytes = part(&spans.filter);
-        let ids = TypedValue::parse(filter_bytes)
-            .and_then(|(v, _)| v.ints())
-            .map_err(|e| value(RecordPart::Filter, e))?;
-        for index in ids.flatten() {
-            let declared = usize::try_from(index).ok().and_then(|i| file.filters.get(i)?.as_ref());
-            if declared.is_none() {
-                return Err(RecordError::UnknownKey { index, kind: KeyKind::Filter });
-            }
-        }
-        let filters = FiltersRef { bytes: filter_bytes, file: Some(file) };
-        Ok(Self { id, alleles, filters, qual })
+    /// The site of a record whose `bytes` `parts` decoded.
+    pub(crate) fn new(bytes: &'a [u8], parts: &'a SiteParts, file: &'a FileShared) -> Self {
+        Self { bytes, parts, file }
     }
 
     /// The IDs (`;`-separated in VCF), none for `.`.
     pub fn ids(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
-        let id = if self.id == "." { "" } else { self.id };
+        let id = text(self.bytes, &self.parts.id);
+        let id = if id == "." { "" } else { id };
         id.split(';').filter(|s| !s.is_empty())
     }
 
     pub fn alleles(&self) -> AllelesRef<'a> {
-        self.alleles
+        AllelesRef { bytes: self.bytes, spans: &self.parts.alleles }
     }
 
     /// The writer's typed alleles (see [`AllelesRef::to_alleles`]).
     pub fn to_alleles(&self) -> Result<Alleles, AllelesError> {
-        self.alleles.to_alleles()
+        self.alleles().to_alleles()
     }
 
     // r[impl vcf_values.qual]
     /// QUAL as stored, `None` for `.`. Not a `Phred`: QUAL may be negative,
     /// huge or NaN, and reaches the thousands.
     pub fn qual(&self) -> Option<f32> {
-        (self.qual != FLOAT_MISSING).then(|| f32::from_bits(self.qual))
+        self.parts.qual
     }
 
     pub fn filters(&self) -> FiltersRef<'a> {
-        self.filters
+        FiltersRef { column: self.parts.filter, ids: &self.parts.filter_ids, file: self.file }
     }
 }
 
 /// A record's ID, REF, ALT, QUAL and FILTER, owned.
 #[derive(Debug, Clone)]
 pub struct Site {
-    /// The shared section's site columns, as stored.
+    /// The ID and allele columns, as stored.
     bytes: Vec<u8>,
-    spans: SiteSpans,
-    n_allele: u16,
-    qual: u32,
-    file: Option<Arc<FileShared>>,
+    parts: SiteParts,
+    file: Arc<FileShared>,
 }
 
 impl Site {
     fn view(&self) -> SiteRef<'_> {
-        let part = |r: &Range<usize>| self.bytes.get(r.clone()).unwrap_or_default();
-        let id =
-            TypedValue::parse(part(&self.spans.id)).and_then(|(v, _)| v.str()).unwrap_or_default();
-        SiteRef {
-            id,
-            alleles: AllelesRef { bytes: part(&self.spans.alleles), n: self.n_allele },
-            filters: FiltersRef { bytes: part(&self.spans.filter), file: self.file.as_deref() },
-            qual: self.qual,
-        }
+        SiteRef::new(&self.bytes, &self.parts, &self.file)
     }
 
     /// The IDs (`;`-separated in VCF), none for `.`.
@@ -370,7 +393,7 @@ impl Site {
 
     /// QUAL as stored, `None` for `.` (`r[vcf_values.qual]`).
     pub fn qual(&self) -> Option<f32> {
-        self.view().qual()
+        self.parts.qual
     }
 
     pub fn filters(&self) -> FiltersRef<'_> {
@@ -390,33 +413,19 @@ impl Fields for Site {
     }
 
     fn new(plan: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
-        let mut site = Self {
-            bytes: Vec::new(),
-            spans: SiteSpans::default(),
-            n_allele: 0,
-            qual: FLOAT_MISSING,
-            file: None,
-        };
+        let mut site =
+            Self { bytes: Vec::new(), parts: SiteParts::default(), file: Arc::clone(raw.file) };
         site.fill(plan, raw)?;
         Ok(site)
     }
 
     fn fill(&mut self, _: &(), raw: RawRecord<'_>) -> Result<(), VcfReadError> {
-        raw.site()?;
-        let (shared, spans, n_allele, qual) = raw.bcf_site()?;
-        let start = spans.id.start;
-        let end = spans.filter.end;
+        let (bytes, parts) = raw.site_parts()?;
+        let span = parts.span();
         self.bytes.clear();
-        self.bytes.extend_from_slice(shared.get(start..end).unwrap_or_default());
-        let shift = |r: &Range<usize>| r.start.saturating_sub(start)..r.end.saturating_sub(start);
-        self.spans = SiteSpans {
-            id: shift(&spans.id),
-            alleles: shift(&spans.alleles),
-            filter: shift(&spans.filter),
-            info: 0..0,
-        };
-        self.n_allele = n_allele;
-        self.qual = qual;
+        self.bytes.extend_from_slice(bytes.get(span.clone()).unwrap_or_default());
+        // A record is at most 256 MiB: its offsets fit u32.
+        self.parts.rebased_from(parts, u32::try_from(span.start).unwrap_or(u32::MAX));
         raw.keep_file(&mut self.file);
         Ok(())
     }
@@ -437,21 +446,19 @@ mod tests {
         assert_eq!(Allele::classify("A."), Allele::Breakend("A."));
     }
 
-    fn typed_strings(alleles: &[&str]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for a in alleles {
-            crate::vcf::bcf_encoding::encode_typed_string(&mut bytes, a.as_bytes());
-        }
-        bytes
-    }
-
     // r[verify vcf_fields.site]
     #[test]
     fn to_alleles_finds_the_writers_shapes() {
         let typed = |alleles: &[&str]| {
-            let bytes = typed_strings(alleles);
-            let n = u16::try_from(alleles.len()).unwrap();
-            AllelesRef { bytes: &bytes, n }.to_alleles().unwrap()
+            let bytes = alleles.concat();
+            let mut spans = Vec::new();
+            let mut at = 0u32;
+            for a in alleles {
+                let len = u32::try_from(a.len()).unwrap();
+                spans.push(at..at + len);
+                at += len;
+            }
+            AllelesRef { bytes: bytes.as_bytes(), spans: &spans }.to_alleles().unwrap()
         };
         assert_eq!(typed(&["A"]), Alleles::reference(Base::A));
         assert_eq!(

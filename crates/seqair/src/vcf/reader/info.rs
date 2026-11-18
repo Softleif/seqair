@@ -64,7 +64,7 @@ impl<'a> InfoRef<'a> {
     pub fn get<V: ReadKind>(&self, key: &InfoKey<V>) -> Result<V::Out<'a>, VcfReadError> {
         let (bytes, file, at, span) = match self.0 {
             Source::Indexed(info) => {
-                let Some(file) = info.file.as_deref() else { return Ok(V::absent()) };
+                let file = &*info.file;
                 check_brand(&key.0, file)?;
                 let span = DictId::new(key.0.dict_idx)
                     .map(|id| Ok::<_, VcfReadError>(info.index(file)?.get(id).map(|e| e.span())))
@@ -101,7 +101,7 @@ impl<'a> InfoRef<'a> {
 pub struct Info {
     bytes: Vec<u8>,
     n: usize,
-    file: Option<Arc<FileShared>>,
+    file: Arc<FileShared>,
     at: RecordAt,
     index: LazyIndex,
 }
@@ -135,12 +135,9 @@ impl Info {
         impl Iterator<Item = Result<(&str, &InfoDef, DynValue<'_>), VcfReadError>>,
         VcfReadError,
     > {
-        let entries = match self.file.as_deref() {
-            Some(file) => self.index(file)?.entries(),
-            None => &[],
-        };
+        let file = &*self.file;
+        let entries = self.index(file)?.entries();
         Ok(entries.iter().filter_map(move |e| {
-            let file = self.file.as_deref()?;
             let name = file.header.string_map().name(e.id.get() as usize)?;
             let (name, def) = file.header.infos().get_key_value(name)?;
             Some(
@@ -187,8 +184,13 @@ impl Fields for Info {
     }
 
     fn new(plan: &(), raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
-        let mut info =
-            Self { bytes: Vec::new(), n: 0, file: None, at: raw.at(), index: LazyIndex::default() };
+        let mut info = Self {
+            bytes: Vec::new(),
+            n: 0,
+            file: Arc::clone(raw.file),
+            at: raw.at(),
+            index: LazyIndex::default(),
+        };
         info.fill(plan, raw)?;
         Ok(info)
     }

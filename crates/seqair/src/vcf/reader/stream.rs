@@ -5,7 +5,7 @@ use super::error::{RecordAt, RecordError, VcfReadError};
 use super::fields::{Fields, PlanError, ReadOptions, SampleSelection, Sections};
 use super::file::{DataStart, FileShared, Input, VcfFile};
 use super::raw::{BcfRecord, Fixed, RawRecord, Repr};
-use super::site::SiteSpans;
+use super::site::{SiteParts, bcf_info_start};
 use crate::bam::bgzf::{BgzfError, BgzfStream, Workers};
 use crate::vcf::header::VcfHeader;
 use rayon_core::ThreadPool;
@@ -95,7 +95,7 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             sections,
             stream,
             scratch: Vec::new(),
-            spans: SiteSpans::default(),
+            site: SiteParts::default(),
             ordinal: 0,
         };
         Ok(Reader { core, current: None })
@@ -147,7 +147,8 @@ struct Core<P> {
     stream: BgzfStream<Input>,
     /// A record that spans the stream's batches, copied together.
     scratch: Vec<u8>,
-    spans: SiteSpans,
+    /// The current record's site columns, decoded.
+    site: SiteParts,
     ordinal: u64,
 }
 
@@ -164,7 +165,7 @@ impl<P> Core<P> {
         }
         let at = RecordAt { ordinal: self.ordinal, offset: self.stream.virtual_offset() };
         self.ordinal = self.ordinal.saturating_add(1);
-        let Self { file, plan, sections, stream, scratch, spans, .. } = self;
+        let Self { file, plan, sections, stream, scratch, site, .. } = self;
 
         // The record header straight from the batch, or, cut by the batch's
         // end, read (and kept) here.
@@ -195,7 +196,7 @@ impl<P> Core<P> {
 
         // The whole record in the current batch: read it in place.
         if !head_read && let Some(record) = stream.fill()?.get(..end) {
-            let result = hand_out(file, plan, *sections, spans, at, record, shared_end, with);
+            let result = hand_out(file, plan, *sections, site, at, record, shared_end, with);
             stream.advance(end);
             return result.map(Some);
         }
@@ -214,7 +215,7 @@ impl<P> Core<P> {
         if !wants_indiv {
             skip_bytes(stream, u64::from(l_indiv)).map_err(framing)?;
         }
-        hand_out(file, plan, *sections, spans, at, scratch, shared_end, with).map(Some)
+        hand_out(file, plan, *sections, site, at, scratch, shared_end, with).map(Some)
     }
 }
 
@@ -225,7 +226,7 @@ fn hand_out<P, R>(
     file: &Arc<FileShared>,
     plan: &P,
     sections: Sections,
-    spans: &mut SiteSpans,
+    site: &mut SiteParts,
     at: RecordAt,
     record: &[u8],
     shared_end: usize,
@@ -240,11 +241,17 @@ fn hand_out<P, R>(
         .contigs
         .by_rid(fixed.rid)
         .ok_or_else(|| at.error(RecordError::UnknownContig { index: fixed.rid }))?;
-    if sections.site() || sections.info() {
-        *spans = SiteSpans::find(shared, fixed.n_allele).map_err(|e| at.error(e))?;
-    }
-    let bcf = BcfRecord { bytes: record, shared, indiv, fixed, spans };
-    let raw = RawRecord { file, contig, at, sections, repr: Repr::Bcf(bcf) };
+    let info_start = if sections.site() {
+        site.decode_bcf(shared, fixed.n_allele, fixed.qual, file)
+    } else if sections.info() {
+        bcf_info_start(shared, fixed.n_allele)
+    } else {
+        Ok(shared.len())
+    };
+    let info_start = info_start.map_err(|e| at.error(e))?;
+    let bcf = BcfRecord { bytes: record, shared, indiv, fixed, info_start };
+    let site = sections.site().then_some(&*site);
+    let raw = RawRecord { file, contig, at, sections, site, repr: Repr::Bcf(bcf) };
     with(plan, raw)
 }
 
