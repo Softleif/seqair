@@ -214,49 +214,64 @@ fn with_scratch<T: Scratch, R>(
     }
 }
 
-/// Order-1 counts in four tables, so that a run of one pair is four chains
-/// of increments rather than one, and the coding table, each indexed by the
-/// context and the symbol as a big-endian u16.
+/// The order-1 pair counts are split over this many tables, taking the
+/// pairs in turn, so that a run of one pair (a quality run) is this many
+/// chains of increments rather than one.
+const PAIR_TABLES: usize = 8;
+
+/// A pair table with 64 bytes of padding, so that one pair's count in two
+/// tables is not 4 KiB apart: a store to one would hold up the load from the
+/// other.
+const PAIR_STRIDE: usize = (1 << 16) + 16;
+
+/// Order-1 counts and the coding table, each indexed by the context and
+/// the symbol as a big-endian u16 ([`pair`]).
 struct Order1Scratch {
-    counts: [Vec<u32>; 4],
+    counts: Box<[[u32; PAIR_STRIDE]; PAIR_TABLES]>,
     /// The rows of `counts` the last block may have left non-zero.
     dirty: [bool; 256],
     /// Rows of contexts the current block lacks hold an earlier block's
     /// entries, which no position of this block reads.
-    enc: Vec<Enc>,
+    enc: Box<[Enc; 1 << 16]>,
 }
 
 impl Scratch for Order1Scratch {}
 
+/// A zeroed `Box<[T; N]>` straight from the allocator, never on the stack.
+fn zeroed_box<T: Clone, const N: usize>(zero: T) -> Box<[T; N]> {
+    let Ok(b) = vec![zero; N].into_boxed_slice().try_into() else {
+        unreachable!("a Vec of N elements converts to [T; N]")
+    };
+    b
+}
+
 impl Default for Order1Scratch {
     fn default() -> Self {
-        Self {
-            counts: std::array::from_fn(|_| vec![0; 1 << 16]),
-            dirty: [false; 256],
-            enc: vec![0; 1 << 16],
-        }
+        Self { counts: zeroed_box([0; PAIR_STRIDE]), dirty: [false; 256], enc: zeroed_box(0) }
     }
 }
 
-/// Order-0 counts, in four tables so that a run of one byte is four chains
-/// of increments rather than one.
+/// Order-0 counts, in [`PAIR_TABLES`] tables taking the bytes in turn, so
+/// that a run of one byte is that many chains of increments rather than one.
 #[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables")]
 fn count_order_0(data: &[u8]) -> [u32; 256] {
-    let mut c = [[0u32; 256]; 4];
-    let (quads, tail) = data.as_chunks::<4>();
-    for &[a, b, d, e] in quads {
-        c[0][usize::from(a)] = c[0][usize::from(a)].wrapping_add(1);
-        c[1][usize::from(b)] = c[1][usize::from(b)].wrapping_add(1);
-        c[2][usize::from(d)] = c[2][usize::from(d)].wrapping_add(1);
-        c[3][usize::from(e)] = c[3][usize::from(e)].wrapping_add(1);
+    let mut c = [[0u32; 256]; PAIR_TABLES];
+    let (rounds, tail) = data.as_chunks::<PAIR_TABLES>();
+    for round in rounds {
+        for (c, &b) in c.iter_mut().zip(round) {
+            c[usize::from(b)] = c[usize::from(b)].wrapping_add(1);
+        }
     }
-    for &a in tail {
-        c[0][usize::from(a)] = c[0][usize::from(a)].wrapping_add(1);
+    for &b in tail {
+        c[0][usize::from(b)] = c[0][usize::from(b)].wrapping_add(1);
     }
-    let [mut sum, c1, c2, c3] = c;
-    for (((s, a), b), d) in sum.iter_mut().zip(c1).zip(c2).zip(c3) {
-        // Each count is at most `data.len()` < 2^32.
-        *s = s.wrapping_add(a).wrapping_add(b).wrapping_add(d);
+    let (sum, others) = c.split_at_mut(1);
+    let mut sum = sum[0];
+    for c in others {
+        for (s, &n) in sum.iter_mut().zip(&*c) {
+            // Each count is at most `data.len()` < 2^32.
+            *s = s.wrapping_add(n);
+        }
     }
     sum
 }
@@ -290,7 +305,7 @@ fn fast_order_1(data: &[u8], raw_len: u32) -> Option<Vec<u8>> {
     }
     with_scratch(&ORDER_1, |o1| {
         let table = order_1_tables(o1, data);
-        let enc: &[Enc; 1 << 16] = o1.enc.as_slice().try_into().ok()?;
+        let enc = &*o1.enc;
         with_scratch(&WORDS, |scratch| {
             let mut words = Words::new(scratch, data.len())?;
             let states = code_order_1(data, enc, &mut words);
@@ -314,7 +329,7 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8]) -> Vec<u8> {
         }
         *dirty = false;
     }
-    let [c0, c1, c2, c3] = &mut o1.counts;
+    let counts = &mut *o1.counts;
     // Every context is a byte of `data`, or 0 at a quarter's start.
     let mut contexts = [false; 256];
     contexts[0] = true;
@@ -323,38 +338,42 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8]) -> Vec<u8> {
     }
     o1.dirty = contexts;
 
-    // The pairs take the four tables in turn.
     let Some((&first, rest)) = data.split_first() else {
         return Vec::new();
     };
-    c0[usize::from(first)] += 1;
-    let mut prev = usize::from(first);
-    let (quads, tail) = rest.as_chunks::<4>();
-    for &[a, b, c, d] in quads {
-        let (a, b, c, d) = (usize::from(a), usize::from(b), usize::from(c), usize::from(d));
-        c0[prev << 8 | a] += 1;
-        c1[a << 8 | b] += 1;
-        c2[b << 8 | c] += 1;
-        c3[c << 8 | d] += 1;
-        prev = d;
+    counts[0][pair(0, first)] += 1;
+    let mut prev = first;
+    let (rounds, tail) = rest.as_chunks::<PAIR_TABLES>();
+    for round in rounds {
+        // The pairs within the round as 16-bit windows of it read
+        // big-endian: two operations a pair rather than six.
+        let v = u64::from_be_bytes(*round);
+        let (first, others) = counts.split_at_mut(1);
+        first[0][pair(prev, round[0])] += 1;
+        for (k, c) in (1..).zip(others) {
+            #[allow(clippy::cast_possible_truncation, reason = "a 16-bit window")]
+            let p = (v >> (56 - 8 * k)) as u16;
+            c[usize::from(p)] += 1;
+        }
+        prev = round[PAIR_TABLES - 1];
     }
-    for &a in tail {
-        c0[prev << 8 | usize::from(a)] += 1;
-        prev = usize::from(a);
+    for &b in tail {
+        counts[0][pair(prev, b)] += 1;
+        prev = b;
     }
+    let (c0, others) = counts.split_at_mut(1);
+    let c0 = &mut c0[0];
     for ctx in (0..256).filter(|&c| contexts[c]) {
-        let rows =
-            [&mut c1[ctx << 8..][..256], &mut c2[ctx << 8..][..256], &mut c3[ctx << 8..][..256]];
-        for row in rows {
-            for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(row) {
+        for c in &mut *others {
+            for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(&mut c[ctx << 8..][..256]) {
                 *a += std::mem::take(b);
             }
         }
     }
     let quarter = data.len() / 4;
     for p in (1..4).map(|j| j * quarter) {
-        c0[usize::from(data[p - 1]) << 8 | usize::from(data[p])] -= 1;
-        c0[usize::from(data[p])] += 1;
+        c0[pair(data[p - 1], data[p])] -= 1;
+        c0[pair(0, data[p])] += 1;
     }
 
     let rows = c0.as_chunks::<256>().0;
