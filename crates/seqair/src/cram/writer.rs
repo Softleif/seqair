@@ -238,7 +238,7 @@ impl<W: Write> Counting<W> {
 }
 
 // r[impl cram_writer.scope]
-/// CRAM 3.0 writer. Build with [`CramWriterBuilder`], write coordinate-sorted
+/// CRAM 3.1 (or 3.0) writer. Build with [`CramWriterBuilder`], write coordinate-sorted
 /// records, then [`finish`](Self::finish).
 pub struct CramWriter<W: Write> {
     out: Counting<W>,
@@ -276,7 +276,7 @@ impl<W: Write> CramWriter<W> {
         let metrics = Arc::new(Metrics::new(options.exhaustive_codec_search));
         let mut codecs =
             container::Codecs::new(options.level, options.version, Arc::clone(&metrics));
-        // r[impl cram_writer.file_definition]
+        // r[impl cram_writer.file_definition+2]
         let mut def = Vec::with_capacity(26);
         def.extend_from_slice(b"CRAM\x03");
         def.push(match options.version {
@@ -587,8 +587,12 @@ pub enum CramProfile {
     /// htslib's default: rANS Nx16 and the name tokeniser.
     #[default]
     Normal,
-    /// Also the adaptive arithmetic coder, and fqzcomp for qualities: a few
-    /// percent smaller, slower to write and to read.
+    /// Also the adaptive arithmetic coder, and fqzcomp for qualities, in
+    /// slices of 100,000 records rather than 10,000, as htslib's archive
+    /// profile: a few percent smaller, slower to write and to read, with
+    /// coarser random access, and ten times the memory per slice (about
+    /// 25 MB for 150 bp reads, times the slices in flight with
+    /// `compression_threads`, up to 64).
     Archive,
 }
 
@@ -655,7 +659,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
         self
     }
 
-    // r[impl cram_writer.compression+2]
+    // r[impl cram_writer.compression+3]
     /// The gzip level blocks are tried at. Defaults to
     /// [`CompressionLevel::Level6`].
     #[must_use]

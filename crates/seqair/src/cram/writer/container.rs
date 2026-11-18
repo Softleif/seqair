@@ -283,7 +283,9 @@ pub(super) const MAX_RECORDS: u32 = 10_000;
 /// htslib's archive profile's `seqs_per_slice`.
 pub(super) const ARCHIVE_RECORDS: u32 = 100_000;
 const MAX_BASES: u64 = 5_000_000;
-/// htslib's bases per slice when it sets the records per slice.
+/// htslib's bases per slice when a profile sets the records per slice
+/// (`seqs_per_slice * 500`); never below `MAX_BASES`, so a test's small
+/// `records_per_slice` keeps the default bases cap.
 const BASES_PER_RECORD: u64 = 500;
 
 impl SliceBuilder {
@@ -540,7 +542,11 @@ impl SliceBuilder {
             .map(|(&(series, data), _)| (series.content_id(), data))
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
             .collect();
-        let quals = self.qual_records();
+        let quals = if codecs.version == CramVersion::V3_1(CramProfile::Archive) {
+            self.qual_records()
+        } else {
+            Vec::new()
+        };
         let mut external = Vec::new();
         let plan = codecs.metrics.plan(slice_index);
         for &(id, data) in &blocks {
@@ -624,6 +630,7 @@ impl SliceBuilder {
 
     /// Each record's share of the `QS` block and the flags fqzcomp models.
     fn qual_records(&self) -> Vec<QualRecord> {
+        debug_assert_eq!(self.qs_starts.len(), self.mates.len(), "one of each per record");
         let total = self.len(Series::Qs);
         let ends = self.qs_starts.iter().skip(1).copied().chain(std::iter::once(total));
         self.qs_starts
@@ -848,18 +855,20 @@ impl Codecs {
     }
 
     // r[impl cram_writer.profile]
-    /// Every method the version and profile have for `content`.
+    /// Every method the version and profile have for `content`, in
+    /// [`rank`]'s order, so a tie goes to the faster decode.
     fn methods(&self, content: Content<'_>) -> Vec<Method> {
-        let mut methods = vec![Method::Gzip];
+        let mut methods = Vec::new();
         let profile = match (content, self.version) {
-            (Content::Header, _) => return methods,
+            (Content::Header, _) => return vec![Method::Gzip],
             (_, CramVersion::V3_0) => {
-                methods.extend([Method::Rans4x8Order0, Method::Rans4x8Order1]);
+                methods.extend([Method::Rans4x8Order0, Method::Rans4x8Order1, Method::Gzip]);
                 return methods;
             }
             (_, CramVersion::V3_1(profile)) => profile,
         };
         methods.extend(NX16);
+        methods.push(Method::Gzip);
         if content == Content::Names {
             methods.push(Method::Tok3);
         }
@@ -904,7 +913,7 @@ impl Codecs {
         }
     }
 
-    // r[impl cram_writer.compression+2]
+    // r[impl cram_writer.compression+3]
     /// Append a block of `data`, stored by whichever of the methods `tried`
     /// names gives the fewest bytes, raw included.
     fn block(
@@ -1010,3 +1019,28 @@ pub(super) const EOF_CONTAINER: [u8; 38] = [
     0x00, 0x01, 0x00, 0x05, 0xbd, 0xd9, 0x4f, 0x00, 0x01, 0x00, 0x06, 0x06, 0x01, 0x00, 0x01, 0x00,
     0x01, 0x00, 0xee, 0x63, 0x01, 0x4b,
 ];
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "test code")]
+    use super::*;
+
+    // r[verify cram_writer.slicing+2]
+    /// A slice ends at its record cap, or before the read that would take it
+    /// past its bases cap: 5,000,000 at 10,000 records, 500 a record above.
+    #[test]
+    fn a_slice_ends_at_its_records_or_bases() {
+        let kind = SliceKind::Unplaced;
+        let mut slice = SliceBuilder::default();
+        assert!(!slice.ends_before(kind, 150, 10_000));
+        for _ in 0..3 {
+            slice.begin_record(kind, 0, 1_000_000);
+        }
+        assert!(slice.ends_before(kind, 2, 3));
+        assert!(!slice.ends_before(kind, 2_000_000, 4));
+        assert!(slice.ends_before(kind, 2_000_001, 4));
+        // 100,000 records: 50,000,000 bases.
+        assert!(!slice.ends_before(kind, 47_000_000, 100_000));
+        assert!(slice.ends_before(kind, 47_000_001, 100_000));
+    }
+}
