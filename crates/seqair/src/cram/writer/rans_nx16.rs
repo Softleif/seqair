@@ -205,7 +205,7 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
 #[allow(clippy::cast_possible_truncation, reason = "at most 16 symbols, so indices fit 4 bits")]
 #[allow(clippy::arithmetic_side_effects, reason = "8 / per_byte with per_byte ∈ {2, 4, 8}")]
-fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut present = [false; 256];
     for &b in data {
         present[usize::from(b)] = true;
@@ -555,7 +555,7 @@ fn finish(out: &mut Vec<u8>, states: &[u32], words: &[u16]) {
 }
 
 /// `v` as a uint7, or `None` when it does not fit 32 bits.
-fn put_uint7(out: &mut Vec<u8>, v: impl TryInto<u32>) -> Option<()> {
+pub(super) fn put_uint7(out: &mut Vec<u8>, v: impl TryInto<u32>) -> Option<()> {
     crate::cram::codec_io::write_uint7(out, v.try_into().ok()?);
     Some(())
 }

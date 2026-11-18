@@ -80,6 +80,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod arith;
 mod container;
 mod header;
 mod mates;
