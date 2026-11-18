@@ -36,7 +36,7 @@ struct Setup {
 
 fn make_setup() -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.filters();
     let _pass = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();

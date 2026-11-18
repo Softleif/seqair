@@ -196,7 +196,7 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
     let contig_ids = contigs
         .iter()
         .map(|(name, len)| {
-            let id = b.register_contig(name.as_str(), ContigDef { length: Some(*len) }).unwrap();
+            let id = b.register_contig(name.as_str(), ContigDef::new(Some(*len))).unwrap();
             (SmolStr::new(name), id)
         })
         .collect();

@@ -24,7 +24,7 @@ struct Setup {
 
 fn make_setup() -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -115,7 +115,7 @@ struct MultiSetup {
 
 fn make_multi_setup(samples: &[&str]) -> MultiSetup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.formats();
     let gt_fmt =
         builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();

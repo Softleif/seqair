@@ -53,8 +53,7 @@ const FULL_BLOCK: usize = 0xff00;
 /// below walks record sizes past every residue mod the block size.
 fn write_bcf(pad: usize) -> Written {
     let mut builder = VcfHeader::builder();
-    let contig =
-        builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN.into()) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN.into()))).unwrap();
     let mut infos = builder.infos();
     let sc: InfoString =
         infos.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "padding")).unwrap();

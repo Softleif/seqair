@@ -51,7 +51,7 @@ struct SimpleSetup {
 
 fn make_simple_setup() -> SimpleSetup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -181,7 +181,7 @@ fn filter_serialization_correct(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(999999));
     let filter_state = tc.draw(gs::integers::<u8>().max_value(2));
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     // Register filters before info (BCF string dict order: PASS, filters, info, format).
     let mut builder = builder.filters();
     let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();

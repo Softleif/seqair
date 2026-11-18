@@ -38,9 +38,8 @@ struct RichSetup {
 
 fn rich_setup() -> RichSetup {
     let mut builder = VcfHeader::builder();
-    let contig_chr1 =
-        builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
-    builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let contig_chr1 = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
+    builder.register_contig("chr2", ContigDef::new(Some(243_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
@@ -286,7 +285,7 @@ fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
     let dp = tc.draw(gs::integers::<i32>().min_value(0).max_value(9999));
     // Sites-only header (no samples) to avoid FORMAT column requirement
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info: InfoInt =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -326,7 +325,7 @@ fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
 
 fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();

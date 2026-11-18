@@ -65,7 +65,7 @@ struct InfoKeys {
 
 fn info_header() -> (Arc<VcfHeader>, ContigId, InfoKeys) {
     let mut b = VcfHeader::builder();
-    let contig = b.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
+    let contig = b.register_contig("chr1", ContigDef::new(Some(1_000_000))).unwrap();
     let mut b = b.infos();
     let dp =
         b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d")).unwrap();
@@ -175,7 +175,7 @@ struct FmtKeys {
 
 fn fmt_header() -> (Arc<VcfHeader>, ContigId, FmtKeys) {
     let mut b = VcfHeader::builder();
-    let contig = b.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
+    let contig = b.register_contig("chr1", ContigDef::new(Some(1_000_000))).unwrap();
     let mut b = b.formats();
     let dp = b
         .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d"))

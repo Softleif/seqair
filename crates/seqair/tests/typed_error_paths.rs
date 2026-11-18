@@ -898,7 +898,7 @@ struct VcfSetup {
 
 fn vcf_setup(samples: &[&str]) -> VcfSetup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -1030,9 +1030,9 @@ fn mixed_ploidy_names_the_sample_that_disagreed() {
 #[test]
 fn each_kind_of_duplicate_header_entry_has_its_own_variant() {
     let mut builder = VcfHeader::builder();
-    builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+    builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let err = builder
-        .register_contig("chr1", ContigDef { length: Some(1000) })
+        .register_contig("chr1", ContigDef::new(Some(1000)))
         .expect_err("chr1 is already declared");
     let VcfHeaderError::DuplicateContig { name } = err else {
         panic!("expected DuplicateContig, got {err:?}");

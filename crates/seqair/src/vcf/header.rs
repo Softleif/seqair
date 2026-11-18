@@ -85,12 +85,30 @@ impl ValueType {
     }
 }
 
+/// An attribute of a structured header line that the model does not
+/// interpret — `Source`/`Version` on INFO, `md5`/`assembly` on contig — kept
+/// in order so a parsed header writes it back out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub key: SmolStr,
+    /// Unescaped: a quoted value is written back with `"` and `\\` escaped.
+    pub value: SmolStr,
+    pub quoted: bool,
+}
+
 /// INFO field definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfoDef {
     pub number: Number,
     pub typ: ValueType,
     pub description: SmolStr,
+    pub attributes: Vec<Attribute>,
+}
+
+impl InfoDef {
+    pub fn new(number: Number, typ: ValueType, description: impl Into<SmolStr>) -> Self {
+        Self { number, typ, description: description.into(), attributes: Vec::new() }
+    }
 }
 
 /// FORMAT field definition.
@@ -99,18 +117,39 @@ pub struct FormatDef {
     pub number: Number,
     pub typ: ValueType,
     pub description: SmolStr,
+    pub attributes: Vec<Attribute>,
+}
+
+impl FormatDef {
+    pub fn new(number: Number, typ: ValueType, description: impl Into<SmolStr>) -> Self {
+        Self { number, typ, description: description.into(), attributes: Vec::new() }
+    }
 }
 
 /// FILTER definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterDef {
     pub description: SmolStr,
+    pub attributes: Vec<Attribute>,
+}
+
+impl FilterDef {
+    pub fn new(description: impl Into<SmolStr>) -> Self {
+        Self { description: description.into(), attributes: Vec::new() }
+    }
 }
 
 /// Contig definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContigDef {
     pub length: Option<u64>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl ContigDef {
+    pub fn new(length: Option<u64>) -> Self {
+        Self { length, attributes: Vec::new() }
+    }
 }
 
 // r[impl vcf_header.dict_capacity+2]
@@ -251,66 +290,34 @@ impl VcfHeader {
     pub fn to_vcf_text(&self) -> String {
         let mut out = String::new();
 
-        // fileformat first
         out.push_str("##fileformat=");
         out.push_str(&self.version.to_string());
         out.push('\n');
 
-        // PASS filter — always emitted immediately after fileformat, before metadata.
-        // This matches htslib's convention and ensures PASS gets BCF dict index 0.
-        if let Some(pass_def) = self.filters.get("PASS") {
-            out.push_str("##FILTER=<ID=PASS,Description=\"");
-            out.push_str(&pass_def.description);
-            out.push_str("\">\n");
+        // PASS right after fileformat, before metadata, as htslib does: it is
+        // dictionary index 0.
+        if let Some(def) = self.filters.get("PASS") {
+            push_def_line(&mut out, "FILTER", "PASS", None, &def.description, &def.attributes);
         }
 
-        // Other lines (metadata such as ##rastairVersion, ##rastairCommand) come next.
         for line in &self.other_lines {
             out.push_str("##");
             out.push_str(line);
             out.push('\n');
         }
 
-        // Remaining FILTER definitions (skip PASS, already emitted above).
-        // r[impl vcf_header.serialization]
-        for (id, def) in &self.filters {
-            if id == "PASS" {
-                continue;
-            }
-            out.push_str("##FILTER=<ID=");
-            out.push_str(id);
-            out.push_str(",Description=\"");
-            out.push_str(&def.description);
-            out.push_str("\">\n");
+        for (id, def) in self.filters.iter().filter(|(id, _)| *id != "PASS") {
+            push_def_line(&mut out, "FILTER", id, None, &def.description, &def.attributes);
         }
-
-        // INFO
         for (id, def) in &self.infos {
-            out.push_str("##INFO=<ID=");
-            out.push_str(id);
-            out.push_str(",Number=");
-            out.push_str(&def.number.as_str());
-            out.push_str(",Type=");
-            out.push_str(def.typ.as_str());
-            out.push_str(",Description=\"");
-            out.push_str(&def.description);
-            out.push_str("\">\n");
+            let kind = Some((def.number, def.typ));
+            push_def_line(&mut out, "INFO", id, kind, &def.description, &def.attributes);
         }
-
-        // FORMAT
         for (id, def) in &self.formats {
-            out.push_str("##FORMAT=<ID=");
-            out.push_str(id);
-            out.push_str(",Number=");
-            out.push_str(&def.number.as_str());
-            out.push_str(",Type=");
-            out.push_str(def.typ.as_str());
-            out.push_str(",Description=\"");
-            out.push_str(&def.description);
-            out.push_str("\">\n");
+            let kind = Some((def.number, def.typ));
+            push_def_line(&mut out, "FORMAT", id, kind, &def.description, &def.attributes);
         }
 
-        // contig
         for (name, def) in &self.contigs {
             out.push_str("##contig=<ID=");
             out.push_str(name);
@@ -318,10 +325,10 @@ impl VcfHeader {
                 out.push_str(",length=");
                 out.push_str(&len.to_string());
             }
+            push_attributes(&mut out, &def.attributes);
             out.push_str(">\n");
         }
 
-        // #CHROM line
         out.push_str("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO");
         if !self.samples.is_empty() {
             out.push_str("\tFORMAT");
@@ -334,6 +341,56 @@ impl VcfHeader {
 
         out
     }
+}
+
+/// `##KEY=<ID=id[,Number=n,Type=t],Description="d"[,attributes]>`.
+fn push_def_line(
+    out: &mut String,
+    key: &str,
+    id: &str,
+    kind: Option<(Number, ValueType)>,
+    description: &str,
+    attributes: &[Attribute],
+) {
+    out.push_str("##");
+    out.push_str(key);
+    out.push_str("=<ID=");
+    out.push_str(id);
+    if let Some((number, typ)) = kind {
+        out.push_str(",Number=");
+        out.push_str(&number.as_str());
+        out.push_str(",Type=");
+        out.push_str(typ.as_str());
+    }
+    out.push_str(",Description=");
+    push_quoted(out, description);
+    push_attributes(out, attributes);
+    out.push_str(">\n");
+}
+
+fn push_attributes(out: &mut String, attributes: &[Attribute]) {
+    for attr in attributes {
+        out.push(',');
+        out.push_str(&attr.key);
+        out.push('=');
+        if attr.quoted {
+            push_quoted(out, &attr.value);
+        } else {
+            out.push_str(&attr.value);
+        }
+    }
+}
+
+/// A double-quoted value with `"` and `\\` escaped, as the VCF spec requires.
+fn push_quoted(out: &mut String, value: &str) {
+    out.push('"');
+    for c in value.chars() {
+        if matches!(c, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
 }
 
 // ── Builder typestate phases ──────────────────────────────────────────
@@ -537,10 +594,7 @@ impl VcfHeaderBuilder<Contigs> {
     fn new() -> Self {
         // PASS is always the first filter and dict index 0.
         let mut filters = IndexMap::new();
-        filters.insert(
-            SmolStr::from("PASS"),
-            FilterDef { description: SmolStr::from("All filters passed") },
-        );
+        filters.insert(SmolStr::from("PASS"), FilterDef::new("All filters passed"));
         let mut string_map = StringMap::new();
         string_map.insert(SmolStr::from("PASS"));
 
@@ -596,7 +650,7 @@ impl VcfHeaderBuilder<Contigs> {
         let mut builder = Self::new();
         let mut contigs = Vec::new();
         for target in header.targets() {
-            let def = ContigDef { length: Some(target.length) };
+            let def = ContigDef::new(Some(target.length));
             contigs.push(builder.register_contig(target.name, def)?);
         }
         Ok(FromBamHeader { builder, contigs })
@@ -652,8 +706,8 @@ impl VcfHeaderBuilder<Filters> {
         def: &super::record_encoder::FilterFieldDef,
     ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        let dict_idx = self
-            .insert_filter(id.clone(), FilterDef { description: SmolStr::from(def.description) })?;
+        let dict_idx =
+            self.insert_filter(id.clone(), FilterDef::new(SmolStr::from(def.description)))?;
         Ok(super::record_encoder::FilterId { dict_idx, name: id })
     }
 
@@ -706,11 +760,7 @@ impl VcfHeaderBuilder<Infos> {
         let id = SmolStr::from(def.name);
         let dict_idx = self.insert_info(
             id.clone(),
-            InfoDef {
-                number: def.number,
-                typ: V::VALUE_TYPE,
-                description: SmolStr::from(def.description),
-            },
+            InfoDef::new(def.number, V::VALUE_TYPE, SmolStr::from(def.description)),
         )?;
         Ok(super::record_encoder::InfoKey(
             super::record_encoder::FieldId { dict_idx, name: id },
@@ -764,11 +814,7 @@ impl VcfHeaderBuilder<Formats> {
         let id = SmolStr::from(def.name);
         let dict_idx = self.insert_format(
             id.clone(),
-            FormatDef {
-                number: def.number,
-                typ: V::VALUE_TYPE,
-                description: SmolStr::from(def.description),
-            },
+            FormatDef::new(def.number, V::VALUE_TYPE, SmolStr::from(def.description)),
         )?;
         Ok(super::record_encoder::FormatKey(
             super::record_encoder::FieldId { dict_idx, name: id },
@@ -835,28 +881,14 @@ mod tests {
     #[test]
     fn basic_header_build() {
         let mut builder = VcfHeader::builder();
-        builder.add_contig("chr1", ContigDef { length: Some(248_956_422) }).unwrap();
+        builder.add_contig("chr1", ContigDef::new(Some(248_956_422))).unwrap();
         let mut builder = builder.infos();
         builder
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Total Depth"),
-                },
-            )
+            .add_info("DP", InfoDef::new(Number::Count(1), ValueType::Integer, "Total Depth"))
             .unwrap();
         let mut builder = builder.formats();
         builder
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
+            .add_format("GT", FormatDef::new(Number::Count(1), ValueType::String, "Genotype"))
             .unwrap();
         let mut builder = builder.samples();
         builder.add_sample("sample0").unwrap();
@@ -873,8 +905,8 @@ mod tests {
     #[test]
     fn rejects_duplicate_contig() {
         let mut builder = VcfHeader::builder();
-        builder.add_contig("chr1", ContigDef { length: None }).unwrap();
-        let result = builder.add_contig("chr1", ContigDef { length: None });
+        builder.add_contig("chr1", ContigDef::new(None)).unwrap();
+        let result = builder.add_contig("chr1", ContigDef::new(None));
         assert!(result.is_err());
     }
 
@@ -882,24 +914,9 @@ mod tests {
     #[test]
     fn rejects_duplicate_info() {
         let mut builder = VcfHeader::builder().infos();
-        builder
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("x"),
-                },
-            )
-            .unwrap();
-        let result = builder.add_info(
-            "DP",
-            InfoDef {
-                number: Number::Count(1),
-                typ: ValueType::Integer,
-                description: SmolStr::from("y"),
-            },
-        );
+        builder.add_info("DP", InfoDef::new(Number::Count(1), ValueType::Integer, "x")).unwrap();
+        let result =
+            builder.add_info("DP", InfoDef::new(Number::Count(1), ValueType::Integer, "y"));
         assert!(result.is_err());
     }
 
@@ -926,11 +943,7 @@ mod tests {
     fn full_dictionary() -> VcfHeaderBuilder<Infos> {
         let mut builder = VcfHeader::builder().infos();
         for i in 1..MAX_DICT_ENTRIES {
-            let def = InfoDef {
-                number: Number::Count(1),
-                typ: ValueType::Integer,
-                description: SmolStr::from("x"),
-            };
+            let def = InfoDef::new(Number::Count(1), ValueType::Integer, "x");
             builder.add_info(format!("I{i}"), def).unwrap();
         }
         builder
@@ -940,8 +953,7 @@ mod tests {
     #[test]
     fn dict_capacity_rejects_an_entry_past_the_limit() {
         let mut builder = full_dictionary();
-        let def =
-            InfoDef { number: Number::Count(1), typ: ValueType::Integer, description: "x".into() };
+        let def = InfoDef::new(Number::Count(1), ValueType::Integer, "x");
         let err = builder.add_info("overflow", def).unwrap_err();
         assert!(matches!(err, VcfHeaderError::TooManyFields { max: 65_536 }), "{err:?}");
     }
@@ -959,14 +971,7 @@ mod tests {
     fn string_map_pass_is_zero() {
         let mut builder = VcfHeader::builder().infos();
         builder
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Depth"),
-                },
-            )
+            .add_info("DP", InfoDef::new(Number::Count(1), ValueType::Integer, "Depth"))
             .unwrap();
         let header = builder.build().unwrap();
 
@@ -978,25 +983,13 @@ mod tests {
     #[test]
     fn flag_requires_number_zero() {
         let mut builder = VcfHeader::builder().infos();
-        let result = builder.add_info(
-            "DB",
-            InfoDef {
-                number: Number::Count(1),
-                typ: ValueType::Flag,
-                description: SmolStr::from("dbSNP"),
-            },
-        );
+        let result =
+            builder.add_info("DB", InfoDef::new(Number::Count(1), ValueType::Flag, "dbSNP"));
         assert!(result.is_err());
 
         // Number=0 + Flag should work
-        let result = builder.add_info(
-            "DB",
-            InfoDef {
-                number: Number::Count(0),
-                typ: ValueType::Flag,
-                description: SmolStr::from("dbSNP"),
-            },
-        );
+        let result =
+            builder.add_info("DB", InfoDef::new(Number::Count(0), ValueType::Flag, "dbSNP"));
         assert!(result.is_ok());
     }
 
@@ -1004,14 +997,8 @@ mod tests {
     #[test]
     fn format_rejects_flag() {
         let mut builder = VcfHeader::builder().formats();
-        let result = builder.add_format(
-            "X",
-            FormatDef {
-                number: Number::Count(0),
-                typ: ValueType::Flag,
-                description: SmolStr::from("bad"),
-            },
-        );
+        let result =
+            builder.add_format("X", FormatDef::new(Number::Count(0), ValueType::Flag, "bad"));
         assert!(result.is_err());
     }
 
@@ -1019,17 +1006,10 @@ mod tests {
     #[test]
     fn serialization_format() {
         let mut builder = VcfHeader::builder();
-        builder.add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        builder.add_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut builder = builder.infos();
         builder
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Depth"),
-                },
-            )
+            .add_info("DP", InfoDef::new(Number::Count(1), ValueType::Integer, "Depth"))
             .unwrap();
         let mut builder = builder.samples();
         builder.add_sample("S1").unwrap();
@@ -1041,6 +1021,29 @@ mod tests {
         assert!(text.contains("##FILTER=<ID=PASS,Description=\"All filters passed\">"));
         assert!(text.contains("##contig=<ID=chr1,length=1000>"));
         assert!(text.contains("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"));
+    }
+
+    // r[verify vcf_header.serialization]
+    /// A quote or backslash in a description is escaped, and attributes the
+    /// model does not interpret follow the description in order.
+    #[test]
+    fn serialization_escapes_descriptions_and_keeps_attributes() {
+        let mut builder = VcfHeader::builder();
+        let mut contig = ContigDef::new(Some(10));
+        contig.attributes.push(Attribute { key: "md5".into(), value: "abc".into(), quoted: false });
+        builder.add_contig("chr1", contig).unwrap();
+        let mut builder = builder.infos();
+        let mut def = InfoDef::new(Number::Count(1), ValueType::Integer, r#"a "b" \c"#);
+        def.attributes.push(Attribute { key: "Source".into(), value: "x,y".into(), quoted: true });
+        builder.add_info("DP", def).unwrap();
+        let text = builder.build().unwrap().to_vcf_text();
+        assert!(
+            text.contains(
+                r#"##INFO=<ID=DP,Number=1,Type=Integer,Description="a \"b\" \\c",Source="x,y">"#
+            ),
+            "{text}"
+        );
+        assert!(text.contains("##contig=<ID=chr1,length=10,md5=abc>\n"), "{text}");
     }
 
     // r[verify vcf_header.serialization]
@@ -1063,7 +1066,7 @@ mod tests {
         };
 
         let mut builder = VcfHeader::builder();
-        builder.add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        builder.add_contig("chr1", ContigDef::new(Some(1000))).unwrap();
 
         // Typestate enforces: Contigs → Filters → Infos → Formats → Samples
         let mut builder = builder.filters();

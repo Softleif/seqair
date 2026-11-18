@@ -48,7 +48,7 @@ struct SeqairSetup {
 
 fn seqair_setup() -> SeqairSetup {
     let mut b = VcfHeader::builder();
-    let contig = b.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = b.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
 
     let mut b = b.filters();
     let lowqual_filter = b.register_filter(&FilterFieldDef::new("LowQual", "Low quality")).unwrap();

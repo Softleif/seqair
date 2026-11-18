@@ -840,7 +840,7 @@ mod tests {
     impl TestSetup {
         fn new() -> Self {
             let mut builder = crate::vcf::header::VcfHeader::builder();
-            let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+            let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
             let mut builder = builder.infos();
             let dp_info =
                 builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn filter_fail_bcf_and_vcf_text() {
         let mut builder = crate::vcf::header::VcfHeader::builder();
-        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut builder = builder.filters();
         let low_dp = builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let header = Arc::new(builder.build().unwrap());
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn typestate_filter_fail() {
         let mut hb = crate::vcf::header::VcfHeader::builder();
-        let contig = hb.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let contig = hb.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut hb = hb.filters();
         let ld = hb.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let header = Arc::new(hb.build().unwrap());
@@ -1074,7 +1074,7 @@ mod tests {
     fn multi_sample_setup()
     -> (Arc<crate::vcf::header::VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
         let mut builder = crate::vcf::header::VcfHeader::builder();
-        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut builder = builder.infos();
         let dp_info =
             builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -1183,7 +1183,7 @@ mod tests {
     #[test]
     fn format_single_sample_helper_matches_nested_slice() {
         let mut builder = crate::vcf::header::VcfHeader::builder();
-        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut builder = builder.formats();
         let pl_fmt: FormatInts = builder
             .register_format(&FormatFieldDef::new("PL", Number::Genotypes, "Phred likelihoods"))
@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn format_single_sample_helper_rejects_multi_sample() {
         let mut hb = crate::vcf::header::VcfHeader::builder();
-        let contig = hb.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let contig = hb.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut hb = hb.formats();
         let af: FormatFloats =
             hb.register_format(&FormatFieldDef::new("AF", Number::Unknown, "Allele freq")).unwrap();

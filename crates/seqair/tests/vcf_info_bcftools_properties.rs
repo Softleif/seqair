@@ -54,7 +54,7 @@ struct Setup {
 
 fn setup() -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN))).unwrap();
     let mut b = builder.infos();
     let int1 = b.register_info(&InfoFieldDef::new("II", Number::Count(1), "int")).unwrap();
     let float1 = b.register_info(&InfoFieldDef::new("FF", Number::Count(1), "float")).unwrap();
@@ -533,7 +533,7 @@ struct OptSetup {
 
 fn opt_setup() -> OptSetup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN))).unwrap();
     let mut b = builder.infos();
     let opts = b
         .register_info(&InfoFieldDef::new("OI", Number::Unknown, "integers, some missing"))

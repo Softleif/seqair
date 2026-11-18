@@ -31,7 +31,7 @@
 //! // 1. Build header — typed field handles are resolved once at setup, not per record.
 //! // In production use VcfHeaderBuilder::from_bam_header() to copy contig info.
 //! let mut builder = VcfHeader::builder();
-//! let chr1 = builder.register_contig("chr1", ContigDef { length: Some(248_956_422) })?;
+//! let chr1 = builder.register_contig("chr1", ContigDef::new(Some(248_956_422)))?;
 //! let mut builder = builder.infos();
 //! let dp_info: InfoInt = builder.register_info(
 //!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Total read depth")
@@ -85,7 +85,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = VcfHeader::builder();
-//! let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+//! let contig = builder.register_contig("chr1", ContigDef::new(Some(1000)))?;
 //! let mut builder = builder.infos();
 //! let dp: InfoInt = builder.register_info(
 //!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth")
@@ -146,7 +146,7 @@
 //! // default header setup
 //! let mut builder = vcf::VcfHeader::builder();
 //! let contig =
-//!     builder.register_contig("chr1", vcf::ContigDef { length: Some(1000) })?;
+//!     builder.register_contig("chr1", vcf::ContigDef::new(Some(1000)))?;
 //! let mut builder = builder.infos();
 //! // register our field, keeping the typed key it resolves to
 //! let depth_key = builder.register_info(&DP_DEF)?;
@@ -191,8 +191,8 @@ pub(crate) mod writer;
 pub use alleles::Alleles;
 pub use error::{AllelesError, KeyError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
-    ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef, Infos,
-    Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
+    Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef,
+    Infos, Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
 };
 pub use record::Genotype;
 pub use record_encoder::{

@@ -56,7 +56,7 @@ pub struct WithSamples;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = VcfHeader::builder();
-/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000) })?;
+/// let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1_000)))?;
 /// let header = Arc::new(builder.build()?);
 ///
 /// let mut buf = Vec::new();
@@ -79,7 +79,7 @@ pub struct WithSamples;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = VcfHeader::builder();
-/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000) })?;
+/// let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1_000)))?;
 /// let alleles = Alleles::snv(Base::A, Base::T)?;
 /// let pos = Pos1::new(100).expect("100 is a valid 1-based position");
 ///
@@ -567,7 +567,7 @@ impl<W: Write> Writer<W, Ready> {
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = VcfHeader::builder();
-/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+/// let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1000)))?;
 /// let header = Arc::new(builder.build()?);
 ///
 /// let mut bcf = Vec::new();

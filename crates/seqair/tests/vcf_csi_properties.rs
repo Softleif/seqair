@@ -144,7 +144,7 @@ fn write_indexed(dir: &Path, layout: &Layout, format: OutputFormat) -> std::path
         .contigs
         .iter()
         .map(|(name, len)| {
-            builder.register_contig(name, ContigDef { length: Some(u64::from(*len)) }).unwrap()
+            builder.register_contig(name, ContigDef::new(Some(u64::from(*len)))).unwrap()
         })
         .collect();
     let header = Arc::new(builder.samples().build().unwrap());

@@ -43,7 +43,7 @@ fn setup() -> Setup {
 
 fn setup_with(n_info: usize, n_format: usize) -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(1_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(1_000))).unwrap();
     let mut builder = builder.infos();
     let infos = (0..n_info)
         .map(|k| {

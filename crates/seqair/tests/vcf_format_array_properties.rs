@@ -44,7 +44,7 @@ struct Setup {
 
 fn setup(n_samples: usize) -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(100_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(100_000))).unwrap();
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
     let ints = builder

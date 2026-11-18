@@ -37,7 +37,7 @@ struct TestSetup {
 
 fn make_setup() -> TestSetup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();

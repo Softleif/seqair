@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 fn write(format: OutputFormat, values: &[Option<f32>]) -> (Vec<u8>, Result<(), VcfError>) {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.infos().formats();
     let ml: FormatFloatOpts = builder
         .register_format(&FormatFieldDef::<OptArr<f32>>::new(

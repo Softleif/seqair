@@ -37,8 +37,8 @@ struct IndexSetup {
 
 fn make_index_setup() -> IndexSetup {
     let mut builder = VcfHeader::builder();
-    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
-    let chr2 = builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let chr1 = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
+    let chr2 = builder.register_contig("chr2", ContigDef::new(Some(243_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info: InfoInt = builder
         .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth"))
@@ -323,7 +323,7 @@ fn write_generated_vcf(
     alt_base: Base,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let mut builder = VcfHeader::builder();
-    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
+    let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info: InfoInt =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
@@ -584,7 +584,7 @@ fn write_large_vcf(
     format: OutputFormat,
 ) -> (std::path::PathBuf, seqair::io::IndexBuilder, Vec<seqair_types::SmolStr>) {
     let mut builder = VcfHeader::builder();
-    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(100_000_000) }).unwrap();
+    let chr1 = builder.register_contig("chr1", ContigDef::new(Some(100_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp: InfoInt =
         builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();

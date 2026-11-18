@@ -60,7 +60,7 @@ struct Setup {
 
 fn setup() -> Setup {
     let mut builder = VcfHeader::builder();
-    let contig = builder.register_contig("chr1", ContigDef { length: Some(100_000) }).unwrap();
+    let contig = builder.register_contig("chr1", ContigDef::new(Some(100_000))).unwrap();
     let mut builder = builder.infos();
     let info_int = builder
         .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Scalar integer"))
