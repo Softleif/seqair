@@ -82,6 +82,7 @@
 
 mod arith;
 mod container;
+mod fqzcomp;
 mod header;
 mod mates;
 mod metrics;

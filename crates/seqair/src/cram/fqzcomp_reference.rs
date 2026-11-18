@@ -554,7 +554,7 @@ pub fn decode(src: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 #[path = "../../tests/support/htscodecs_fqz.rs"]
-mod htscodecs_fqz;
+pub(crate) mod htscodecs_fqz;
 
 #[cfg(test)]
 #[allow(

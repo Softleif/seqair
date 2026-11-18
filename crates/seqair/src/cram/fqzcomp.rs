@@ -18,25 +18,27 @@
 )]
 
 use super::codec_io::{Uint7Error, read_u8, read_u16_le, read_uint7, split_off};
-use super::range_coder::{AdaptiveModel, RangeDecoder, SymFreq, decode_symbol};
+use super::range_coder::{
+    AdaptiveModel, RangeDecoder, RangeEncoder, SymFreq, decode_symbol, encode_symbol,
+};
 use super::reader::{CramError, check_codec_output};
 
 /// The only fqzcomp stream version htscodecs reads or writes (`FQZ_VERS`).
-const VERSION: u8 = 5;
+pub(crate) const VERSION: u8 = 5;
 
 /// Global flags.
 const GFLAG_MULTI_PARAM: u8 = 1;
-const GFLAG_HAVE_STAB: u8 = 2;
-const GFLAG_DO_REV: u8 = 4;
+pub(crate) const GFLAG_HAVE_STAB: u8 = 2;
+pub(crate) const GFLAG_DO_REV: u8 = 4;
 
 /// Parameter block flags. Bit 1 is reserved and ignored.
-const PFLAG_DO_DEDUP: u8 = 2;
+pub(crate) const PFLAG_DO_DEDUP: u8 = 2;
 /// The record length is stored once and reused (htscodecs' `fixed_len`).
-const PFLAG_FIXED_LEN: u8 = 4;
-const PFLAG_DO_SEL: u8 = 8;
-const PFLAG_HAVE_QMAP: u8 = 16;
-const PFLAG_HAVE_PTAB: u8 = 32;
-const PFLAG_HAVE_DTAB: u8 = 64;
+pub(crate) const PFLAG_FIXED_LEN: u8 = 4;
+pub(crate) const PFLAG_DO_SEL: u8 = 8;
+pub(crate) const PFLAG_HAVE_QMAP: u8 = 16;
+pub(crate) const PFLAG_HAVE_PTAB: u8 = 32;
+pub(crate) const PFLAG_HAVE_DTAB: u8 = 64;
 const PFLAG_HAVE_QTAB: u8 = 128;
 
 /// The quality context is 16 bits wide.
@@ -92,7 +94,7 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
 
 /// The global parameters and every parameter block.
 #[derive(Debug)]
-struct Params {
+pub(crate) struct Params {
     do_rev: bool,
     /// Map the selector through `stab` (else the selector is the block index).
     have_stab: bool,
@@ -106,7 +108,7 @@ struct Params {
 
 /// One parameter block, with `ptab` and `dtab` pre-shifted into place.
 #[derive(Debug)]
-struct ParamBlock {
+pub(crate) struct ParamBlock {
     context: u16,
     fixed_len: bool,
     do_dedup: bool,
@@ -126,7 +128,7 @@ struct ParamBlock {
 
 impl Params {
     // r[impl cram.codec.fqzcomp.params]
-    fn parse(src: &mut &[u8]) -> Result<Self, CramError> {
+    pub(crate) fn parse(src: &mut &[u8]) -> Result<Self, CramError> {
         let truncated = || CramError::Truncated { context: "fqzcomp parameters" };
         // htscodecs' `fqz_read_parameters` wants 10 bytes before it starts.
         if src.len() < 10 {
@@ -163,6 +165,18 @@ impl Params {
         }
 
         Ok(Self { do_rev: gflags & GFLAG_DO_REV != 0, have_stab, max_sel, stab, blocks, max_sym })
+    }
+
+    /// The first parameter block, which drives every record's context.
+    pub(crate) fn first(&self) -> Option<&ParamBlock> {
+        self.blocks.first()
+    }
+}
+
+impl QualState {
+    /// The state at the start of a record of `len` qualities.
+    pub(crate) fn new(len: u32) -> Self {
+        Self { p: len, ..Self::default() }
     }
 }
 
@@ -340,7 +354,7 @@ fn read_array(src: &mut &[u8], out: &mut [u16], table: &'static str) -> Result<(
 /// initialises all 2^16 models (67 MB at 256 symbols) up front.
 // r[impl cram.codec.fqzcomp.models]
 #[derive(Debug)]
-struct QualModels {
+pub(crate) struct QualModels {
     /// Per context, the arena offset just past its model; 0 if not created.
     ends: Vec<u32>,
     arena: Vec<SymFreq>,
@@ -348,13 +362,31 @@ struct QualModels {
 }
 
 impl QualModels {
-    fn new(nsym: u16) -> Self {
+    pub(crate) fn new(nsym: u16) -> Self {
         Self { ends: vec![0; CONTEXTS], arena: Vec::new(), nsym }
     }
 
     /// Decode one quality with the model for `ctx`.
     #[inline]
     fn decode(&mut self, ctx: u16, rc: &mut RangeDecoder<'_>) -> Option<u16> {
+        self.with_model(ctx, |total, syms| decode_symbol(rc, total, syms))
+    }
+
+    /// Encode quality symbol `sym` with the model for `ctx`, as
+    /// [`decode`](Self::decode) reads it back. `None` past the model's symbols.
+    #[inline]
+    pub(crate) fn encode(&mut self, ctx: u16, rc: &mut RangeEncoder, sym: u16) -> Option<()> {
+        self.with_model(ctx, |total, syms| encode_symbol(rc, total, syms, sym))
+    }
+
+    /// Run `code` on the model for `ctx` (its total and symbols), creating
+    /// the model first if `ctx` has none.
+    #[inline(always)]
+    fn with_model<T>(
+        &mut self,
+        ctx: u16,
+        code: impl FnOnce(&mut u32, &mut [SymFreq]) -> Option<T>,
+    ) -> Option<T> {
         let stride = usize::from(self.nsym).wrapping_add(1);
         let end = match *self.ends.get(usize::from(ctx))? {
             0 => self.create(ctx)?,
@@ -363,9 +395,9 @@ impl QualModels {
         let model = self.arena.get_mut(end.checked_sub(stride)?..end)?;
         let (head, syms) = model.split_first_mut()?;
         let mut total = u32::from(head.freq);
-        let sym = decode_symbol(rc, &mut total, syms)?;
+        let out = code(&mut total, syms)?;
         head.freq = u16::try_from(total).ok()?;
-        Some(sym)
+        Some(out)
     }
 
     /// Append a fresh model for `ctx` (every symbol at frequency 1) and
@@ -383,7 +415,7 @@ impl QualModels {
 
 /// The per-record state the quality context is computed from.
 #[derive(Debug, Default)]
-struct QualState {
+pub(crate) struct QualState {
     qctx: u32,
     /// Qualities left in the record, counted before the current one is taken off.
     p: u32,
@@ -395,7 +427,7 @@ impl ParamBlock {
     /// Fold quality `q` into the state and return the next context.
     // r[impl cram.codec.fqzcomp.context]
     #[inline]
-    fn update(&self, st: &mut QualState, q: u8, sel: u32) -> u16 {
+    pub(crate) fn update(&self, st: &mut QualState, q: u8, sel: u32) -> u16 {
         let qi = usize::from(q);
         st.qctx = st
             .qctx
@@ -529,7 +561,7 @@ impl<'p> Decoder<'p> {
         sel: u32,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        let mut st = QualState { p: len, ..QualState::default() };
+        let mut st = QualState::new(len);
         let mut ctx = context;
         for _ in 0..len {
             // Quality models have max_sym + 1 <= 256 symbols.
