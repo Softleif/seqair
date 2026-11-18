@@ -27,6 +27,8 @@ mod raw;
 mod samples;
 mod site;
 mod stream;
+#[cfg_attr(not(test), expect(dead_code, reason = "the VCF text reader (next commit)"))]
+mod text_keys;
 #[cfg_attr(not(test), expect(dead_code, reason = "the VCF text backend (next phase)"))]
 pub(crate) mod text_value;
 pub(crate) mod values;
