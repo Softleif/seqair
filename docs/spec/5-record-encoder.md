@@ -159,6 +159,9 @@ r[record_encoder.format_state_queries]
 r[record_encoder.format_dedup+2]
 If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_format_*` semantics — for VCF text this means rewriting the corresponding colon-delimited subfield of every sample. The deduplication tracker SHOULD reuse its allocations across records. Detecting a duplicate SHOULD cost O(1) on the common path where each field is written once — a `FieldSet` keyed by `dict_idx` (`r[vcf_header.field_set]`), as `FieldTracker` keeps for INFO — rather than a name comparison against every key already written; the text path's per-record FORMAT key list SHOULD clone the header's names rather than rebuild them from `&str`.
 
+r[record_encoder.format_count_limit]
+A record MUST NOT hold more than 255 distinct FORMAT fields: BCF stores the count in 8 bits (`n_fmt`), and htslib rejects more on read in VCF text as well (`MAX_N_FMT`). Since the dictionary holds far more than 255 ids (`r[vcf_header.dict_capacity+2]`), the header alone no longer bounds this. Encoding a 256th distinct FORMAT field into one record MUST return `VcfError::ValueOverflow` (field `n_fmt`, target `u8`), in VCF text and BCF alike, before writing any of its bytes, so the record stays valid and can still be emitted. Rewriting a field already present (`r[record_encoder.format_dedup+2]`) is always allowed.
+
 ## Emit
 
 r[record_encoder.emit]
