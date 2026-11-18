@@ -116,6 +116,18 @@ name = "fuzz_cram_arith"
 path = "fuzz_targets/fuzz_cram_arith.rs"
 doc = false
 
+# CRAM writer's arithmetic coder encoder: every combination round-trips
+[[bin]]
+name = "fuzz_cram_arith_encode"
+path = "fuzz_targets/fuzz_cram_arith_encode.rs"
+doc = false
+
+# CRAM writer's fqzcomp encoder: every strategy round-trips
+[[bin]]
+name = "fuzz_cram_fqzcomp_encode"
+path = "fuzz_targets/fuzz_cram_fqzcomp_encode.rs"
+doc = false
+
 # CRAM name tokeniser: production vs spec-literal reference decoder
 [[bin]]
 name = "fuzz_cram_tok3"
