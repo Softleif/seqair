@@ -55,6 +55,7 @@ impl CramHeader {
     pub(super) fn new(
         header: &BamHeader,
         fasta: &mut IndexedFastaReader,
+        threads: usize,
     ) -> Result<(Self, Option<Hashed>), CramWriteError> {
         let text = header.header_text();
         let mut targets: Vec<Target> = header
@@ -66,11 +67,26 @@ impl CramHeader {
             String::with_capacity(text.len().saturating_add(targets.len().saturating_mul(80)));
         let mut bases = Vec::new();
         let mut kept = None;
+        // r[impl cram_writer.header_m5.threads]
+        let mut hashed = FxHashMap::default();
+        if threads > 1 {
+            let sq: Vec<&str> = text.lines().filter(|l| l.starts_with("@SQ")).collect();
+            let needs: Vec<usize> = (0..targets.len())
+                .filter(|&i| {
+                    let line_m5 = sq.get(i).and_then(|l| field(l, "M5"));
+                    let target = targets.get(i);
+                    let in_fasta = target.and_then(|t| fasta.index().get(&t.name));
+                    line_m5.is_none()
+                        && in_fasta.zip(target).is_some_and(|(e, t)| e.length == t.length)
+                })
+                .collect();
+            (hashed, kept) = hash_all(&targets, &needs, fasta, threads)?;
+        }
         let mut sq_lines = 0usize;
         // Without `@SQ` lines, they go after a leading `@HD`, else first.
         let mut synthesized = has_sq;
         if !synthesized && !text.starts_with("@HD") {
-            synthesize(&mut out, &mut targets, fasta, &mut bases, &mut kept)?;
+            synthesize(&mut out, &mut targets, fasta, &mut bases, &mut kept, &hashed)?;
             synthesized = true;
         }
         for line in text.lines() {
@@ -85,15 +101,16 @@ impl CramHeader {
                         target: header_target_name(header, sq_lines),
                     });
                 };
+                let line_m5 = field(line, "M5");
                 let (reference, m5) =
-                    describe(target, sq_lines, field(line, "M5"), fasta, &mut bases, &mut kept)?;
+                    describe(target, sq_lines, line_m5, fasta, &mut bases, &mut kept, &hashed)?;
                 target.reference = reference;
                 push_m5(&mut out, m5);
                 sq_lines = sq_lines.saturating_add(1);
             }
             out.push('\n');
             if !synthesized {
-                synthesize(&mut out, &mut targets, fasta, &mut bases, &mut kept)?;
+                synthesize(&mut out, &mut targets, fasta, &mut bases, &mut kept, &hashed)?;
                 synthesized = true;
             }
         }
@@ -192,13 +209,14 @@ fn synthesize(
     fasta: &mut IndexedFastaReader,
     bases: &mut Vec<u8>,
     kept: &mut Option<(usize, Vec<u8>)>,
+    hashed: &FxHashMap<usize, SmolStr>,
 ) -> Result<(), CramWriteError> {
     for (index, target) in targets.iter_mut().enumerate() {
         out.push_str("@SQ\tSN:");
         out.push_str(&target.name);
         out.push_str("\tLN:");
         out.push_str(itoa::Buffer::new().format(target.length));
-        let (reference, m5) = describe(target, index, None, fasta, bases, kept)?;
+        let (reference, m5) = describe(target, index, None, fasta, bases, kept, hashed)?;
         target.reference = reference;
         push_m5(out, m5);
         out.push('\n');
@@ -217,6 +235,7 @@ fn describe(
     fasta: &mut IndexedFastaReader,
     scratch: &mut Vec<u8>,
     kept: &mut Option<(usize, Vec<u8>)>,
+    hashed: &FxHashMap<usize, SmolStr>,
 ) -> Result<(Option<TargetReference>, Option<SmolStr>), CramWriteError> {
     let Some(entry) = fasta.index().get(&target.name) else { return Ok((None, None)) };
     if entry.length != target.length {
@@ -230,6 +249,10 @@ fn describe(
         Some(m5) => {
             Ok((Some(TargetReference { m5: Mutex::new(M5::Unchecked(SmolStr::new(m5))) }), None))
         }
+        None if hashed.contains_key(&index) => {
+            let m5 = hashed.get(&index).cloned();
+            Ok((Some(TargetReference { m5: Mutex::new(M5::Verified) }), m5))
+        }
         None => {
             // r[impl cram_writer.header_m5.reuse]
             let m5 = if kept.is_none() {
@@ -239,19 +262,81 @@ fn describe(
                 *kept = Some((index, whole));
                 m5
             } else {
-                let mut md5 = md5::Context::new();
-                let mut start = 0;
-                while start < target.length {
-                    let end = start.saturating_add(HASH_CHUNK).min(target.length);
-                    fetch_upper(&target.name, start..end, fasta, scratch)?;
-                    md5.consume(&scratch);
-                    start = end;
-                }
-                SmolStr::new(format!("{:x}", md5.finalize()))
+                md5_chunked(target, fasta, scratch)?
             };
             Ok((Some(TargetReference { m5: Mutex::new(M5::Verified) }), Some(m5)))
         }
     }
+}
+
+/// The MD5s of targets `needs` (indices into `targets`, in order), on
+/// `threads` threads each with its own FASTA handle; the first one's bases
+/// kept whole (`r[cram_writer.header_m5.reuse]`), the others hashed a chunk
+/// at a time.
+#[allow(clippy::type_complexity, reason = "the two results of one pass")]
+fn hash_all(
+    targets: &[Target],
+    needs: &[usize],
+    fasta: &IndexedFastaReader,
+    threads: usize,
+) -> Result<(FxHashMap<usize, SmolStr>, Option<(usize, Vec<u8>)>), CramWriteError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new((FxHashMap::default(), None));
+    let failed: Mutex<Option<CramWriteError>> = Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(needs.len()) {
+            scope.spawn(|| {
+                let run = || -> Result<(), CramWriteError> {
+                    let mut fasta = fasta.fork()?;
+                    let mut scratch = Vec::new();
+                    loop {
+                        let job = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&index) = needs.get(job) else { return Ok(()) };
+                        let Some(target) = targets.get(index) else { continue };
+                        if job == 0 {
+                            let mut whole = Vec::new();
+                            fetch_upper(&target.name, 0..target.length, &mut fasta, &mut whole)?;
+                            let m5 = md5_hex(&whole);
+                            let mut r = results.lock().unwrap_or_else(PoisonError::into_inner);
+                            r.0.insert(index, m5);
+                            r.1 = Some((index, whole));
+                        } else {
+                            let m5 = md5_chunked(target, &mut fasta, &mut scratch)?;
+                            let mut r = results.lock().unwrap_or_else(PoisonError::into_inner);
+                            r.0.insert(index, m5);
+                        }
+                    }
+                };
+                if let Err(err) = run() {
+                    // Stop the other threads; keep the first error.
+                    next.store(usize::MAX, Ordering::Relaxed);
+                    failed.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(err);
+                }
+            });
+        }
+    });
+    if let Some(err) = failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        return Err(err);
+    }
+    Ok(results.into_inner().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// The MD5 of `target`'s uppercased bases, read a chunk at a time.
+fn md5_chunked(
+    target: &Target,
+    fasta: &mut IndexedFastaReader,
+    scratch: &mut Vec<u8>,
+) -> Result<SmolStr, CramWriteError> {
+    let mut md5 = md5::Context::new();
+    let mut start = 0;
+    while start < target.length {
+        let end = start.saturating_add(HASH_CHUNK).min(target.length);
+        fetch_upper(&target.name, start..end, fasta, scratch)?;
+        md5.consume(&scratch);
+        start = end;
+    }
+    Ok(SmolStr::new(format!("{:x}", md5.finalize())))
 }
 
 /// The bases of a reference not kept are hashed this many at a time.

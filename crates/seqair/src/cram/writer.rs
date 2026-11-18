@@ -319,7 +319,7 @@ impl<W: Write> CramWriter<W> {
         mut fasta: IndexedFastaReader,
         options: Options,
     ) -> Result<Self, CramWriteError> {
-        let (header, hashed) = CramHeader::new(header, &mut fasta)?;
+        let (header, hashed) = CramHeader::new(header, &mut fasta, options.threads)?;
         let mut out = Counting { inner, written: 0 };
         let metrics = Arc::new(Metrics::new(options.exhaustive_codec_search));
         let mut codecs =
