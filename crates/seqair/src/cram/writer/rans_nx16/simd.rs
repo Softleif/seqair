@@ -9,7 +9,7 @@ use super::{
     Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize_into, order_1_header,
     order_1_shift, target, write_row,
 };
-use fearless_simd::{Level, dispatch, prelude::*, u8x16, u16x8, u32x4, u64x2};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u8x32, u16x8, u32x4, u64x2};
 use fearless_simd_macros::simd;
 use std::cell::RefCell;
 use std::thread::LocalKey;
@@ -604,6 +604,70 @@ fn code_o1<S: Simd, const M: usize>(
     words.at = local.at;
 }
 
+/// The bytes `data` holds, or `None` once it holds more than 16: what PACK
+/// needs, found without counting. Each 32 bytes are compared with the
+/// symbols seen so far, and only bytes that match none are looked at one
+/// by one.
+pub(super) fn pack_symbols(level: Level, data: &[u8]) -> Option<[bool; 256]> {
+    let mut seen = Seen { present: [false; 256], symbols: [0; 16], len: 0 };
+    let (body, tail) = data.as_chunks::<32>();
+    if !dispatch!(level, simd => pack_symbols_kernel(simd, body, &mut seen)) {
+        return None;
+    }
+    seen.add(tail).then_some(seen.present)
+}
+
+/// The symbols found so far, in the order found.
+struct Seen {
+    present: [bool; 256],
+    symbols: [u8; 16],
+    len: usize,
+}
+
+impl Seen {
+    /// `bytes` added; false once there are more than 16 symbols.
+    #[inline(always)]
+    #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
+    fn add(&mut self, bytes: &[u8]) -> bool {
+        for &b in bytes {
+            if !self.present[usize::from(b)] {
+                let Some(slot) = self.symbols.get_mut(self.len) else {
+                    return false;
+                };
+                *slot = b;
+                self.len = self.len.saturating_add(1);
+                self.present[usize::from(b)] = true;
+            }
+        }
+        true
+    }
+}
+
+#[simd]
+#[allow(clippy::indexing_slicing, reason = "known ≤ 16 symbols, one at least")]
+fn pack_symbols_kernel<S: Simd>(simd: S, chunks: &[[u8; 32]], seen: &mut Seen) -> bool {
+    let Some((first, rest)) = chunks.split_first() else { return true };
+    if !seen.add(first) {
+        return false;
+    }
+    let mut splats = [u8x32::splat(simd, seen.symbols[0]); 16];
+    let mut known = 0;
+    for chunk in rest {
+        for (splat, &s) in splats.iter_mut().zip(&seen.symbols).take(seen.len).skip(known) {
+            *splat = u8x32::splat(simd, s);
+        }
+        known = seen.len;
+        let v = u8x32::from_slice(simd, chunk);
+        let mut hit = v.simd_eq(splats[0]);
+        for &s in &splats[1..known] {
+            hit |= v.simd_eq(s);
+        }
+        if !hit.all_true() && !seen.add(chunk) {
+            return false;
+        }
+    }
+    true
+}
 /// The parent's `pack_indices` a vector at a time: `data`'s symbols, each
 /// one of `syms` (in order, at most 16), as their indices `per_byte` (2, 4
 /// or 8) a byte, the first in the lowest bits; `code` maps a symbol to its
