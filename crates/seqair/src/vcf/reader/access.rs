@@ -212,14 +212,21 @@ fn check_ploidy(n: usize) -> Result<(), FieldError> {
     Ok(())
 }
 
+/// `v`, or no elements if it is missing as a whole: VCF text spells an
+/// empty vector `.`, so the formats agree only on this.
+fn whole<T: super::values::Number>(v: OptValues<'_, T>) -> OptValues<'_, T> {
+    if v.is_missing() { OptValues::text(TextVec::empty()) } else { v }
+}
+
 // r[impl vcf_values.dynamic]
 /// A field's value read by its header declaration, for tools that handle
 /// every field alike (`convert`, `view`).
 #[derive(Debug, Clone)]
 pub enum DynValue<'a> {
-    /// `Type=Integer`; missing elements are `None`.
+    /// `Type=Integer`; missing elements are `None`, and a vector missing as
+    /// a whole (`.`, BCF's empty vector or lone missing value) is empty.
     Int(OptValues<'a, i32>),
-    /// `Type=Float`; missing elements are `None`.
+    /// `Type=Float`, as `Int`.
     Float(OptValues<'a, f32>),
     /// `Type=Flag` (INFO only), present.
     Flag,
@@ -241,8 +248,8 @@ impl<'a> DynValue<'a> {
             return Ok(Self::Gt(Gt::decode(value, cx)?));
         }
         Ok(match declared {
-            ValueType::Integer => Self::Int(ints(value)?),
-            ValueType::Float => Self::Float(floats(value)?),
+            ValueType::Integer => Self::Int(whole(ints(value)?)),
+            ValueType::Float => Self::Float(whole(floats(value)?)),
             ValueType::Flag => Self::Flag,
             ValueType::String | ValueType::Character => Self::Str(Str::decode(value, cx)?),
         })

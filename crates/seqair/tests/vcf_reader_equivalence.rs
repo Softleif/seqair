@@ -1,6 +1,7 @@
-//! seqair's writer as the reader's generator (`r[vcf_values.equivalence]`,
-//! BCF half): random headers and records written as BCF read back, through
-//! `FullRecord`, as what was written.
+//! seqair's writer as the reader's generator (`r[vcf_values.equivalence]`):
+//! random headers and records written as VCF text, BGZF VCF and BCF read
+//! back, through `FullRecord`, as what was written, and the same through
+//! every accessor in all three.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -14,10 +15,10 @@
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
-    Allele, Alleles, Arr, ContigDef, ContigId, FilterId, FilterStatus, Flag, FormatFloatOpts,
-    FormatFloats, FormatGt, FormatInt, FormatString, FullRecord, Genotype, Gt, InfoFlag, InfoFloat,
-    InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString, Number, OptArr, OutputFormat, Scalar,
-    Str, VcfFile, VcfHeader, VcfPos, Writer,
+    Allele, Alleles, Arr, ContigDef, ContigId, DynValue, FilterId, FilterStatus, Flag,
+    FormatFloatOpts, FormatFloats, FormatGt, FormatInt, FormatString, FullRecord, Genotype, Gt,
+    InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString, Number, OptArr,
+    OutputFormat, Scalar, Str, VcfFile, VcfHeader, VcfPos, Writer,
 };
 use seqair_types::{Pos1, SmallVec, SmolStr};
 
@@ -292,9 +293,9 @@ fn record(tc: &TestCase, s: &Setup) -> Record {
     }
 }
 
-fn write(s: &Setup, records: &[Record]) -> Vec<u8> {
+fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut w = Writer::new(&mut out, OutputFormat::Bcf).write_header(&s.header).unwrap();
+    let mut w = Writer::new(&mut out, format).write_header(&s.header).unwrap();
     let k = &s.keys;
     for r in records {
         let alleles = Alleles::complex(
@@ -376,8 +377,35 @@ fn missing<T>(v: &[Option<T>]) -> bool {
     v.is_empty() || (v.len() == 1 && v[0].is_none())
 }
 
-fn check(s: &Setup, written: &Record, read: &FullRecord) {
-    let at = format!("{written:?}");
+/// What a written float reads back as: itself from BCF; from VCF text,
+/// what C's `%g` (6 significant digits, as the writer prints) parses to.
+fn as_read(v: f32, text: bool) -> f32 {
+    if text { format!("{:.5e}", f64::from(v)).parse().unwrap() } else { v }
+}
+
+/// What a written record reads back as from `format`.
+fn as_read_record(w: &Record, format: OutputFormat) -> Record {
+    let text = format != OutputFormat::Bcf;
+    let f = |v: f32| as_read(v, text);
+    let mut r = w.clone();
+    r.qual = r.qual.map(f);
+    r.info.f1 = r.info.f1.map(f);
+    if let Some(v) = &mut r.info.fa {
+        v.iter_mut().for_each(|x| *x = f(*x));
+    }
+    if let Some(v) = &mut r.format.af {
+        v.iter_mut().flatten().for_each(|x| *x = f(*x));
+    }
+    if let Some(v) = &mut r.format.fo {
+        v.iter_mut().flatten().flatten().for_each(|x| *x = f(*x));
+    }
+    r
+}
+
+fn check(s: &Setup, written: &Record, read: &FullRecord, format: OutputFormat) {
+    let text = format != OutputFormat::Bcf;
+    let at = format!("{format:?}: {written:?}");
+    let written = &as_read_record(written, format);
     let locus = read.locus();
     assert_eq!(locus.contig(), &s.contigs[written.contig], "{at}");
     let start = written.pos;
@@ -452,8 +480,9 @@ fn check(s: &Setup, written: &Record, read: &FullRecord) {
     for (i, idx) in s.header.sample_indices().enumerate() {
         let sample = samples.sample(idx);
         if let Some(key) = &k.gt {
-            // A missing allele is written as 0, without the phase bit of the
-            // separator before it (`r[vcf_record.gt_first_phase+3]`).
+            // shortcut: the BCF writer still encodes a missing allele as 0,
+            // without the phase bit `r[vcf_record.gt_first_phase+3]` now asks
+            // for; VCF text keeps it. Drop the BCF arm once the writer does.
             let expected =
                 f.gt.as_ref()
                     .map(|g| &g[i])
@@ -463,7 +492,7 @@ fn check(s: &Setup, written: &Record, read: &FullRecord) {
                             .phased
                             .iter()
                             .zip(&g.alleles[1..])
-                            .map(|(&p, a)| p && a.is_some())
+                            .map(|(&p, a)| p && (text || a.is_some()))
                             .collect();
                         Genotype { alleles: g.alleles.clone(), phased }
                     });
@@ -504,40 +533,122 @@ fn check(s: &Setup, written: &Record, read: &FullRecord) {
     assert_eq!(read.header_id(), s.header.id());
 }
 
+/// Every value every accessor reads from a record, as text: floats by the
+/// bits of `float(value)`, a genotype's phases only before an allele that
+/// is present (see the shortcut in `check`) unless `exact`.
+fn digest(
+    header: &VcfHeader,
+    rec: &FullRecord,
+    exact: bool,
+    float: impl Fn(f32) -> f32,
+) -> Vec<String> {
+    let bits = |v: Option<f32>| v.map(|v| float(v).to_bits());
+    let mut out = Vec::new();
+    let l = rec.locus();
+    out.push(format!("{} {:?} {:?}", l.contig().name(), l.start(), l.end()));
+    let site = rec.site();
+    out.push(format!("{:?} {:?}", site.ids().collect::<Vec<_>>(), site.alleles().reference()));
+    out.push(format!("{:?}", site.alleles().alts().collect::<Vec<_>>()));
+    let filter = match site.filters().status() {
+        FilterStatus::Pass => "PASS".to_owned(),
+        FilterStatus::Missing => ".".to_owned(),
+        FilterStatus::Failed(f) => f.map(FilterId::name).collect::<Vec<_>>().join(";"),
+    };
+    out.push(format!("{:?} {filter}", bits(site.qual())));
+    let dyn_value = |v: &DynValue<'_>| match v {
+        DynValue::Int(v) => format!("{:?}", v.clone().collect::<Vec<_>>()),
+        DynValue::Float(v) => format!("{:?}", v.clone().map(bits).collect::<Vec<_>>()),
+        DynValue::Flag => "flag".to_owned(),
+        DynValue::Str(s) => format!("{s:?}"),
+        DynValue::Gt(g) => format!(
+            "{:?}",
+            g.as_ref().map(|g| g
+                .alleles()
+                .enumerate()
+                .map(|(i, a)| (
+                    a.allele,
+                    (exact || a.allele.is_some()) && (i > 0 || exact) && a.phased
+                ))
+                .collect::<Vec<_>>())
+        ),
+    };
+    for field in rec.info().iter().unwrap() {
+        let (name, _, v) = field.unwrap();
+        out.push(format!("INFO {name} {}", dyn_value(&v)));
+    }
+    for idx in header.sample_indices() {
+        for field in rec.samples().sample(idx).iter().unwrap() {
+            let (name, _, v) = field.unwrap();
+            out.push(format!("{} {name} {}", idx.index(), dyn_value(&v)));
+        }
+    }
+    out
+}
+
+/// The writer's records read back from `format` with the keys of the
+/// header the reader parsed.
+fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec<FullRecord>) {
+    let file = VcfFile::from_bytes(write(s, records, format), None).unwrap();
+    let expected = match format {
+        OutputFormat::Bcf => seqair::vcf::reader::VcfFormat::Bcf,
+        OutputFormat::VcfGz => seqair::vcf::reader::VcfFormat::VcfGz,
+        _ => seqair::vcf::reader::VcfFormat::Vcf,
+    };
+    assert_eq!(file.format(), expected);
+    let read: Vec<FullRecord> =
+        file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
+    // The reader's header is the writer's, re-parsed: keys resolve against it.
+    let s = Setup {
+        contigs: reresolve_contigs(&file, s),
+        filters: reresolve_filters(&file, s),
+        keys: rekey(&file, &s.keys),
+        header: file.header().clone(),
+        n_samples: s.n_samples,
+    };
+    (s, read)
+}
+
 // r[verify vcf_values.equivalence]
 // r[verify vcf_values.access]
 // r[verify vcf_values.bcf_sentinels]
+// r[verify vcf_values.text_numbers]
+// r[verify vcf_values.text_strings]
 // r[verify vcf_values.gt]
 // r[verify vcf_values.qual]
 // r[verify vcf_fields.site]
 // r[verify vcf_fields.info]
 // r[verify vcf_fields.samples]
-/// Random headers and records, written with seqair's writer as BCF, read
-/// back through `FullRecord` as written: every value kind, missing elements,
-/// flags, strings, genotypes of every ploidy and phase, several samples,
-/// every FILTER state and missing QUAL.
+// r[verify vcf_reader.formats]
+// r[verify vcf_reader.oracles]
+/// Random headers and records, written with seqair's writer as VCF text,
+/// BGZF VCF and BCF, read back through `FullRecord` as written (floats as
+/// the writer's 6-digit `%g` reads back, in text): every value kind,
+/// missing elements, flags, strings, genotypes of every ploidy and phase,
+/// several samples, every FILTER state and missing QUAL. Every accessor
+/// then reads the same from all three.
 #[hegel::test]
-fn bcf_written_by_the_writer_reads_back_as_written(tc: TestCase) {
+fn every_format_written_by_the_writer_reads_back_as_written(tc: TestCase) {
     let s = setup(&tc);
     let n = tc.draw(gs::integers::<usize>().max_value(12));
     let mut records: Vec<Record> = (0..n).map(|_| record(&tc, &s)).collect();
     records.sort_by_key(|r| (r.contig, r.pos));
-    let bytes = write(&s, &records);
-    // The reader's header is the writer's, re-parsed: keys resolve against it.
-    let file = VcfFile::from_bytes(bytes, None).unwrap();
-    let s = Setup {
-        contigs: reresolve_contigs(&file, &s),
-        filters: reresolve_filters(&file, &s),
-        keys: rekey(&file, &s.keys),
-        header: file.header().clone(),
-        n_samples: s.n_samples,
-    };
-    let read: Vec<FullRecord> =
-        file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
-    assert_eq!(read.len(), records.len());
-    for (w, r) in records.iter().zip(&read) {
-        check(&s, w, r);
+    let mut digests = Vec::new();
+    for format in [OutputFormat::Bcf, OutputFormat::Vcf, OutputFormat::VcfGz] {
+        let (read_setup, read) = read_back(&s, &records, format);
+        assert_eq!(read.len(), records.len(), "{format:?}");
+        for (w, r) in records.iter().zip(&read) {
+            check(&read_setup, w, r, format);
+        }
+        // BCF holds the floats VCF text rounds: compare BCF's rounded.
+        let rounded = |v: f32| as_read(v, format == OutputFormat::Bcf);
+        let h = &read_setup.header;
+        let exact: Vec<_> = read.iter().map(|r| digest(h, r, true, |v| v)).collect();
+        let loose: Vec<_> = read.iter().map(|r| digest(h, r, false, rounded)).collect();
+        digests.push((exact, loose));
     }
+    let [(_, bcf), (vcf, vcf_loose), (gz, _)] = &digests[..] else { unreachable!() };
+    assert_eq!(vcf, gz, "VCF text and BGZF VCF read differently");
+    assert_eq!(vcf_loose, bcf, "VCF text and BCF read differently");
 }
 
 fn reresolve_contigs(file: &VcfFile, s: &Setup) -> Vec<ContigId> {
