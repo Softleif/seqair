@@ -191,25 +191,22 @@ impl CsiIndex {
     pub fn from_path(path: &Path) -> Result<Self, CsiError> {
         let raw = std::fs::read(path)
             .map_err(|source| CsiError::Read { path: path.to_path_buf(), source })?;
-
-        // CSI files may be BGZF-compressed (samtools always compresses them).
-        // Detect by checking for gzip magic (0x1f 0x8b) vs CSI magic (CSI\x01).
-        let data = if raw.starts_with(&[0x1f, 0x8b]) {
-            decompress_bgzf_file(&raw).map_err(|e| match e {
-                BaiError::Bgzf { source } => CsiError::Bgzf { source },
-                _ => CsiError::Truncated,
-            })?
-        } else {
-            raw
-        };
-
-        Self::from_bytes_inner(&data)
+        Self::from_bytes(&raw)
     }
 
-    /// Parse CSI index data from raw bytes.
-    #[cfg(feature = "fuzz")]
-    pub fn from_bytes(data: &[u8]) -> Result<Self, CsiError> {
-        Self::from_bytes_inner(data)
+    /// Parse a CSI index held in memory, BGZF-compressed (as samtools and
+    /// bcftools write it) or not.
+    pub fn from_bytes(raw: &[u8]) -> Result<Self, CsiError> {
+        // Detect by checking for gzip magic (0x1f 0x8b) vs CSI magic (CSI\x01).
+        if raw.starts_with(&[0x1f, 0x8b]) {
+            let data = decompress_bgzf_file(raw).map_err(|e| match e {
+                BaiError::Bgzf { source } => CsiError::Bgzf { source },
+                _ => CsiError::Truncated,
+            })?;
+            Self::from_bytes_inner(&data)
+        } else {
+            Self::from_bytes_inner(raw)
+        }
     }
 
     fn from_bytes_inner(data: &[u8]) -> Result<Self, CsiError> {
