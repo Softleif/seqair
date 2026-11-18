@@ -7,4 +7,5 @@
 #![cfg_attr(not(test), expect(dead_code, reason = "used by the VCF reader in a later commit"))]
 
 pub(crate) mod bcf_value;
+pub(crate) mod text_value;
 pub(crate) mod values;
