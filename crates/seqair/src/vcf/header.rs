@@ -20,8 +20,8 @@ pub enum Number {
     Genotypes,
     /// One per possible base modification (M). **VCF 4.5**: "one value for each
     /// possible base modification for the corresponding `ChEBI` ID" — not the
-    /// "4.2+ extension" this comment used to claim. Headers declare 4.5
-    /// ([`VcfHeader::FILE_FORMAT`]), so it is covered.
+    /// "4.2+ extension" this comment used to claim. Built headers declare 4.5
+    /// ([`VcfHeader::WRITE_VERSION`]), so it is covered.
     ///
     /// Note that a strict reader may still refuse it: noodles, and so every
     /// tool built on it, rejects a header carrying `Number=M` regardless of the
@@ -133,12 +133,42 @@ impl StringMap {
     }
 }
 
-// r[impl vcf_header.file_format]
+// r[impl vcf_header.file_format+2]
+/// A VCF version, as a header's `##fileformat=VCFv{major}.{minor}` line declares it.
+///
+/// Ordered, so "is this header new enough" is a comparison:
+/// `header.version() >= VcfVersion::V4_4`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VcfVersion {
+    pub major: u8,
+    pub minor: u8,
+}
+
+impl VcfVersion {
+    pub const V4_0: Self = Self::new(4, 0);
+    pub const V4_1: Self = Self::new(4, 1);
+    pub const V4_2: Self = Self::new(4, 2);
+    pub const V4_3: Self = Self::new(4, 3);
+    pub const V4_4: Self = Self::new(4, 4);
+    pub const V4_5: Self = Self::new(4, 5);
+
+    pub const fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+}
+
+impl std::fmt::Display for VcfVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VCFv{}.{}", self.major, self.minor)
+    }
+}
+
 // r[impl vcf_header.ordered_maps]
 // r[impl vcf_header.smolstr]
 /// VCF header with typed field definitions in insertion order.
 #[derive(Debug, Clone)]
 pub struct VcfHeader {
+    version: VcfVersion,
     infos: IndexMap<SmolStr, InfoDef>,
     formats: IndexMap<SmolStr, FormatDef>,
     filters: IndexMap<SmolStr, FilterDef>,
@@ -149,21 +179,23 @@ pub struct VcfHeader {
 }
 
 impl VcfHeader {
-    // r[impl vcf_header.file_format]
-    /// The VCF version seqair writes. There is no setter: a cardinality is
-    /// versioned (`Number=M` is 4.5 and nothing earlier), so a header that
-    /// could declare an older version could promise a grammar it then violates.
-    /// Emitting one version removes the question.
-    pub const FILE_FORMAT: &'static str = "VCFv4.5";
+    // r[impl vcf_header.file_format.single_version+2]
+    /// The VCF version a built header declares. There is no setter: a
+    /// cardinality is versioned (`Number=M` is 4.5 and nothing earlier), so a
+    /// header that could declare an older version could promise a grammar it
+    /// then violates. Emitting one version removes the question.
+    pub const WRITE_VERSION: VcfVersion = VcfVersion::V4_5;
 
     /// Start building a new header.
     pub fn builder() -> VcfHeaderBuilder {
         VcfHeaderBuilder::new()
     }
 
-    /// The VCF version this header declares — always [`Self::FILE_FORMAT`].
-    pub fn file_format(&self) -> &'static str {
-        Self::FILE_FORMAT
+    // r[impl vcf_header.file_format+2]
+    /// The VCF version this header declares: [`Self::WRITE_VERSION`] for a
+    /// built header, the file's own for a parsed one.
+    pub fn version(&self) -> VcfVersion {
+        self.version
     }
 
     pub fn infos(&self) -> &IndexMap<SmolStr, InfoDef> {
@@ -205,7 +237,7 @@ impl VcfHeader {
 
         // fileformat first
         out.push_str("##fileformat=");
-        out.push_str(Self::FILE_FORMAT);
+        out.push_str(&self.version.to_string());
         out.push('\n');
 
         // PASS filter — always emitted immediately after fileformat, before metadata.
@@ -471,6 +503,7 @@ impl<P> VcfHeaderBuilder<P> {
     #[must_use = "build() returns the header; ignoring it discards all configuration"]
     pub fn build(self) -> Result<VcfHeader, VcfHeaderError> {
         Ok(VcfHeader {
+            version: VcfHeader::WRITE_VERSION,
             infos: self.infos,
             formats: self.formats,
             filters: self.filters,
@@ -778,7 +811,7 @@ mod tests {
     }
 
     // r[verify vcf_header.builder]
-    // r[verify vcf_header.file_format]
+    // r[verify vcf_header.file_format+2]
     #[test]
     fn basic_header_build() {
         let mut builder = VcfHeader::builder();
@@ -809,7 +842,7 @@ mod tests {
         builder.add_sample("sample0").unwrap();
         let header = builder.build().unwrap();
 
-        assert_eq!(header.file_format(), "VCFv4.5");
+        assert_eq!(header.version(), VcfVersion::V4_5);
         assert!(header.contigs().contains_key("chr1"));
         assert!(header.infos().contains_key("DP"));
         assert!(header.formats().contains_key("GT"));

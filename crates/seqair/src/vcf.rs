@@ -192,7 +192,7 @@ pub use alleles::Alleles;
 pub use error::{AllelesError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
     ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef, Infos,
-    Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder,
+    Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
 };
 pub use record::Genotype;
 pub use record_encoder::{
