@@ -248,7 +248,7 @@ pub fn read_ltf8_from(cursor: &mut &[u8]) -> Option<u64> {
     Some(val)
 }
 
-// r[impl cram_writer.blocks]
+// r[impl cram_writer.blocks+2]
 /// Append `val` as ITF8; a negative value as its two's complement, as CRAM
 /// stores `-1` and other negatives.
 pub(crate) fn write_itf8(out: &mut Vec<u8>, val: i32) {

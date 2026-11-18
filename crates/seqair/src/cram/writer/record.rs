@@ -487,12 +487,12 @@ impl Features<'_, '_> {
             }
             self.matches(run_start, g);
             run_start = g.saturating_add(1);
-            // r[impl cram_writer.substitution]
+            // r[impl cram_writer.substitution+2]
             // r[impl cram_writer.past_reference_end]
-            match ref_base.and_then(|rb| substitution_code(rb, base)) {
-                Some(code) => {
+            match ref_base.and_then(|rb| substitution(rb, base)) {
+                Some((row, alt)) => {
                     self.feature(b'X', r);
-                    self.slice.byte(Series::Bs, code);
+                    self.slice.substitution(row, alt);
                     if let Some(md) = self.md.as_deref_mut() {
                         md.substitution(ref_base);
                     }
@@ -521,12 +521,12 @@ impl Features<'_, '_> {
     }
 }
 
-/// The `BS` code of `read` substituting reference base `ref_base`, under
-/// the writer's matrix: `None` where a `B` feature must store it. Only a
-/// literal `ACGTN` reference base takes a substitution, so every decoder
-/// picks the same matrix row.
-fn substitution_code(ref_base: u8, read: IupacBase) -> Option<u8> {
-    let row = match ref_base {
+/// The matrix row of reference base `ref_base` (`ACGTN`), and the index of
+/// `read` among that row's other bases in `ACGTN` order: `None` where a `B`
+/// feature must store it. Only a literal `ACGTN` reference base takes a
+/// substitution, so every decoder picks the same matrix row.
+fn substitution(ref_base: u8, read: IupacBase) -> Option<(u8, u8)> {
+    let row: u8 = match ref_base {
         b'A' => 0,
         b'C' => 1,
         b'G' => 2,
@@ -534,7 +534,7 @@ fn substitution_code(ref_base: u8, read: IupacBase) -> Option<u8> {
         b'N' => 4,
         _ => return None,
     };
-    let bases = SubstitutionMatrix::READ_BASES.get(row)?;
-    let code = bases.iter().position(|&b| b == read.to_ascii())?;
-    u8::try_from(code).ok()
+    let bases = SubstitutionMatrix::READ_BASES.get(usize::from(row))?;
+    let alt = bases.iter().position(|&b| b == read.to_ascii())?;
+    Some((row, u8::try_from(alt).ok()?))
 }
