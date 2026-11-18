@@ -12,7 +12,7 @@ It was written around improved memory locality and I/O:
 
 It supports reading SAM, BAM, as well as CRAM v3.0/v3.1,
 with SIMD-opimtized custom implementations (for both ARM64 NEON and X86 with AVX2 or AVX512).
-In the same style we also provide SAM/BAM writers
+In the same style we also provide SAM/BAM and CRAM v3.0/v3.1 writers
 as well as a VCF/BCF writer,
 which uses pre-resolved typed handles to write directly into output buffers.
 
