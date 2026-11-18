@@ -58,31 +58,26 @@ impl Iterator for BcfEntries<'_> {
 }
 
 /// Index a BCF INFO or FORMAT section: every key must be a declared field of
-/// its kind (`r[vcf_reader.undeclared]`), and the entries must fill it.
+/// its kind (`r[vcf_reader.field_table]`), and the entries must fill it.
 pub(crate) fn index_bcf(
     index: &mut FieldIndex,
     mut entries: BcfEntries<'_>,
     kind: KeyKind,
     file: &FileShared,
 ) -> Result<(), RecordError> {
-    let (part, declared) = match kind {
-        KeyKind::Format => (RecordPart::Format, &file.format_ids),
-        KeyKind::Info | KeyKind::Filter => (RecordPart::Info, &file.info_ids),
-    };
+    let part = if kind == KeyKind::Format { RecordPart::Format } else { RecordPart::Info };
     for entry in &mut entries {
         let (key, span) = entry.map_err(|source| RecordError::Value { part, source })?;
         let id = u32::try_from(key)
             .ok()
-            .filter(|&k| declared.contains(k))
             .and_then(DictId::new)
+            .filter(|&id| file.fields.declared(kind, id).is_some())
             .ok_or(RecordError::UnknownKey { index: key, kind })?;
         let (Ok(start), Ok(end)) = (u32::try_from(span.start), u32::try_from(span.end)) else {
             return Err(RecordError::TooLarge { size: span.end as u64, max: u64::from(u32::MAX) });
         };
         if !index.push(Entry { id, start, end }) {
-            file.warn_duplicate(
-                file.header.string_map().name(id.get() as usize).unwrap_or_default(),
-            );
+            file.warn_duplicate(file.fields.name(&file.header, id).unwrap_or_default());
         }
     }
     let len = entries.bytes.len().saturating_sub(entries.end());
@@ -191,11 +186,11 @@ fn span32(r: Range<usize>) -> Result<(u32, u32), RecordError> {
     }
 }
 
-// r[impl vcf_reader.undeclared]
+// r[impl vcf_reader.field_table]
 // r[impl vcf_values.duplicates]
-/// Index a VCF text INFO column: each declared key's span is what follows
-/// it (empty, or `=` and the value). Undeclared keys are ignored with one
-/// warning per file; `.` and empty entries hold nothing.
+/// Index a VCF text INFO column: each key's span is what follows it (empty,
+/// or `=` and the value). A key the field table does not hold yet is
+/// added to it; `.` and empty entries hold nothing.
 pub(crate) fn index_text_info(
     index: &mut FieldIndex,
     info: &[u8],
@@ -209,8 +204,7 @@ pub(crate) fn index_text_info(
         if key.is_empty() {
             return ControlFlow::Continue(());
         }
-        let Some(id) = file.keys.get(key).filter(|id| file.info_ids.contains(id.get())) else {
-            file.warn_undeclared(KeyKind::Info, key);
+        let Some(id) = file.fields.text_id(KeyKind::Info, key) else {
             return ControlFlow::Continue(());
         };
         let end = entry.value.map_or(entry.key.end, |v| v.end);
@@ -231,7 +225,7 @@ pub(crate) fn index_text_info(
 }
 
 // r[impl vcf_fields.samples]
-// r[impl vcf_reader.undeclared]
+// r[impl vcf_reader.field_table]
 /// Index VCF text FORMAT data: `keys` (the FORMAT column) and `samples`
 /// (`n_samples` TAB-separated columns), in one pass over the samples. A
 /// sample may drop trailing fields; one with more fields than FORMAT has
@@ -249,8 +243,7 @@ pub(crate) fn index_text_format(
     let mut n_keys = 0usize;
     for (k, key) in keys.split(|&b| b == b':').enumerate() {
         n_keys = k.saturating_add(1);
-        let Some(id) = file.keys.get(key).filter(|id| file.format_ids.contains(id.get())) else {
-            file.warn_undeclared(KeyKind::Format, key);
+        let Some(id) = file.fields.text_id(KeyKind::Format, key) else {
             continue;
         };
         let (start, end) = span32(k..n_keys)?;

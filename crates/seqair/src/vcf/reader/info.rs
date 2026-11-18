@@ -13,10 +13,10 @@ use crate::vcf::record_encoder::{FieldId, InfoKey};
 use seqair_types::SmolStr;
 use std::sync::Arc;
 
-// r[impl vcf_values.header_brand]
+// r[impl vcf_values.header_brand+2]
 /// Fail with `ForeignKey` unless `key` was resolved from `file`'s header.
 pub(crate) fn check_brand(key: &FieldId, file: &FileShared) -> Result<(), VcfReadError> {
-    if key.header == file.header.id() {
+    if key.header == file.header.id() || key.header == file.fields.id {
         Ok(())
     } else {
         Err(VcfReadError::ForeignKey { name: key.name.clone() })
@@ -173,14 +173,13 @@ impl<'a> InfoRef<'a> {
         VcfReadError,
     > {
         let this = *self;
-        let header = &self.file.header;
+        let file = self.file;
         Ok(self.index()?.entries().iter().filter_map(move |e| {
-            let name = header.string_map().name(e.id.get() as usize)?;
-            let (name, def) = header.infos().get_key_value(name)?;
+            let (name, def) = file.fields.info_def(&file.header, e.id)?;
             let value = this
                 .value(e.span())
-                .and_then(|v| dyn_decode(v, name, def.typ, false, this.file, this.at));
-            Some(value.map(|v| (name.as_str(), def, v)))
+                .and_then(|v| dyn_decode(v, name, def.typ, false, file, this.at));
+            Some(value.map(|v| (name, def, v)))
         }))
     }
 }

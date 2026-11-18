@@ -25,6 +25,7 @@ mod info;
 mod keys;
 mod locus;
 mod raw;
+mod reserved;
 mod rlen;
 mod samples;
 mod site;

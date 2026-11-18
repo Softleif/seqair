@@ -322,11 +322,10 @@ impl<'a> SampleRef<'a> {
         let id = i32::try_from(entry.id.get()).unwrap_or(i32::MAX);
         let unknown =
             || at.error(file, RecordError::UnknownKey { index: id, kind: KeyKind::Format });
-        let name = file.header.string_map().name(entry.id.get() as usize).ok_or_else(unknown)?;
-        let (name, def) = file.header.formats().get_key_value(name).ok_or_else(unknown)?;
+        let (name, def) = file.fields.format_def(&file.header, entry.id).ok_or_else(unknown)?;
         let value = self.view.field_at(index, entry)?.sample(self.column).ok_or_else(unknown)?;
         let value = dyn_decode(value, name, def.typ, name == "GT", file, at)?;
-        Ok((name.as_str(), def, value))
+        Ok((name, def, value))
     }
 }
 
@@ -347,7 +346,7 @@ impl std::fmt::Debug for SamplesRef<'_> {
                     .keys
                     .entries()
                     .iter()
-                    .filter_map(|e| self.view.file.header.string_map().name(e.id.get() as usize))
+                    .filter_map(|e| self.view.file.fields.name(&self.view.file.header, e.id))
                     .collect();
                 d.field("fields", &names)
             }

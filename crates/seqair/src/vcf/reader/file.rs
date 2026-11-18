@@ -1,15 +1,13 @@
 //! [`VcfFile`]: a VCF/BCF file opened once — format, header, index and the
 //! tables every reader of it shares (`r[vcf_reader.file]`).
 
-use super::error::KeyKind;
 use super::error::{VcfFormat, VcfReadError};
 use super::fields::Fields;
+use super::keys::FieldTable;
 use super::rlen::RlenKeys;
 use super::stream::ReaderBuilder;
-use super::text_keys::TextKeys;
 use crate::bam::bgzf::{BgzfStream, VirtualOffset, find_bsize};
 use crate::bam::csi_index::CsiIndex;
-use crate::vcf::field_set::FieldSet;
 use crate::vcf::header::{MAX_HEADER_TEXT, VcfHeader, VcfVersion};
 use crate::vcf::record_encoder::{ContigId, FilterId};
 use seqair_types::SmolStr;
@@ -30,7 +28,7 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 const FILE_BUFFER: usize = 128 * 1024;
 
 // r[impl vcf_reader.file]
-// r[impl vcf_reader.file.shared]
+// r[impl vcf_reader.file.shared+2]
 /// A VCF or BCF file: its header, index and contig table, parsed once and
 /// shared by every reader opened from it.
 ///
@@ -115,13 +113,10 @@ pub(crate) struct FileShared {
     pub(crate) header_lines: u64,
     /// FILTER ids by dictionary index; `None` where the index names no FILTER.
     pub(crate) filters: Vec<Option<FilterId>>,
-    /// Dictionary indices the header declares as INFO / FORMAT fields.
-    pub(crate) info_ids: FieldSet,
-    pub(crate) format_ids: FieldSet,
+    /// The INFO/FORMAT keys records can name, by id and (VCF text) by name.
+    pub(crate) fields: FieldTable,
     /// Whether a GT's first phase bit is read (VCF 4.4 and later).
     pub(crate) first_phase_is_read: bool,
-    /// VCF text: FILTER/INFO/FORMAT names to dictionary ids.
-    pub(crate) keys: TextKeys,
     /// VCF text: which of END, SVLEN and LEN set the reference length.
     pub(crate) rlen_keys: RlenKeys,
     warned_duplicate: AtomicBool,
@@ -171,16 +166,15 @@ impl FileShared {
         self.format != VcfFormat::Bcf
     }
 
-    // r[impl vcf_reader.undeclared]
-    /// Log, once per file, that a record uses `key`, which the header does
-    /// not declare as a `kind` field.
-    pub(crate) fn warn_undeclared(&self, kind: KeyKind, key: &[u8]) {
+    // r[impl vcf_reader.undeclared.filter]
+    /// Log, once per file, that a record names a FILTER the header does not
+    /// declare.
+    pub(crate) fn warn_undeclared_filter(&self, name: &[u8]) {
         if !self.warned_undeclared.swap(true, Ordering::Relaxed) {
             warn!(
-                %kind,
-                key = std::str::from_utf8(key).ok(),
-                "a record uses a key the header does not declare; it is ignored \
-                 (further undeclared keys in this file are ignored too, unreported)"
+                filter = std::str::from_utf8(name).ok(),
+                "a record names a FILTER the header does not declare; the record fails it \
+                 (further undeclared FILTERs in this file are not reported)"
             );
         }
     }
@@ -228,15 +222,14 @@ impl VcfFile {
 
     fn new(source: Source, index: Option<CsiIndex>) -> Result<Self, VcfReadError> {
         let (format, header, data_start, header_lines) = read_header(source.open()?)?;
+        let fields = FieldTable::new(&header, format != VcfFormat::Bcf);
         let shared = FileShared {
-            info_ids: declared(&header, header.infos().keys()),
-            format_ids: declared(&header, header.formats().keys()),
+            rlen_keys: RlenKeys::new(&fields),
+            fields,
             contigs: ContigTable::new(&header),
             filters: filter_table(&header),
             first_phase_is_read: header.version() >= VcfVersion::V4_4,
             header_lines,
-            keys: TextKeys::new(header.string_map().iter()),
-            rlen_keys: RlenKeys::new(&header),
             warned_duplicate: AtomicBool::new(false),
             warned_undeclared: AtomicBool::new(false),
             format,
@@ -269,17 +262,6 @@ impl VcfFile {
     pub fn reader<F: Fields>(&self) -> ReaderBuilder<'_, F> {
         ReaderBuilder::new(self)
     }
-}
-
-/// The dictionary indices of `names`.
-fn declared<'h>(header: &VcfHeader, names: impl Iterator<Item = &'h SmolStr>) -> FieldSet {
-    let mut set = FieldSet::default();
-    for id in names.filter_map(|n| header.string_map().get(n)) {
-        if let Ok(id) = u32::try_from(id) {
-            set.insert(id);
-        }
-    }
-    set
 }
 
 /// FILTER ids by dictionary index.

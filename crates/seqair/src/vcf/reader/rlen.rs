@@ -9,8 +9,10 @@
 //! it), so a reader that computes another end misses records.
 
 use super::file::FileShared;
+use super::keys::FieldTable;
 use super::text_value::parse_i32;
 use crate::io::text_scan::{for_each_byte, for_each_info_entry};
+use crate::vcf::error::KeyKind;
 use seqair_types::SmallVec;
 use std::ops::ControlFlow;
 
@@ -24,11 +26,14 @@ pub(crate) struct RlenKeys {
 }
 
 impl RlenKeys {
-    pub(crate) fn new(header: &crate::vcf::VcfHeader) -> Self {
+    // r[impl vcf_values.rlen+2]
+    /// Those the field table gives `Type=Integer`: declared so or, in VCF
+    /// text, not declared at all (VCF reserves them as integers).
+    pub(crate) fn new(fields: &FieldTable) -> Self {
         use crate::vcf::ValueType::Integer;
-        let info = |name| header.infos().get(name).is_some_and(|d| d.typ == Integer);
-        let format = header.formats().get("LEN").is_some_and(|d| d.typ == Integer);
-        Self { end: info("END"), svlen: info("SVLEN"), len: format }
+        let info = |name| fields.declared_name(KeyKind::Info, name) == Some(Integer);
+        let len = fields.declared_name(KeyKind::Format, "LEN") == Some(Integer);
+        Self { end: info("END"), svlen: info("SVLEN"), len }
     }
 }
 
@@ -59,7 +64,7 @@ pub(crate) struct RlenColumns<'a> {
     pub(crate) format: &'a [u8],
 }
 
-// r[impl vcf_values.rlen]
+// r[impl vcf_values.rlen+2]
 /// The reference length htslib gives a VCF text record at 0-based `pos`.
 pub(crate) fn text_rlen(cols: &RlenColumns<'_>, file: &FileShared, pos: i64) -> i64 {
     let keys = file.rlen_keys;

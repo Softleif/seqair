@@ -410,7 +410,7 @@ impl<W: Write> Writer<W, Ready> {
         alleles: &Alleles,
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
-        // r[impl vcf_values.header_brand]
+        // r[impl vcf_values.header_brand+2]
         if self.header != Some(contig.header) {
             return Err(VcfError::ForeignKey { name: contig.name.clone() });
         }

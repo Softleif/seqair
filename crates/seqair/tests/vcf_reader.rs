@@ -415,7 +415,7 @@ fn digest(rec: &FullRecord) -> (Locus, Vec<u8>) {
 }
 
 // r[verify vcf_reader.fork_equivalence]
-// r[verify vcf_reader.file.shared]
+// r[verify vcf_reader.file.shared+2]
 // r[verify vcf_reader.reader.threads]
 /// Readers of one `VcfFile` (and of clones of it) on several threads at
 /// once, some decompressing on a thread pool, read what one reader reads.
@@ -660,7 +660,7 @@ impl Fields for BadKey {
 
 // ── Keys of another header ──────────────────────────────────────────────
 
-// r[verify vcf_values.header_brand]
+// r[verify vcf_values.header_brand+2]
 // r[verify vcf_fields.sample_idx]
 #[test]
 fn keys_and_samples_of_another_header_are_refused() {
@@ -895,7 +895,7 @@ fn a_bcf_alt_dot_is_no_alt() {
 
 // r[verify vcf_reader.limits]
 // r[verify vcf_reader.errors+2]
-// r[verify vcf_reader.undeclared]
+// r[verify vcf_reader.field_table]
 #[test]
 fn malformed_records_are_typed_errors_with_their_place() {
     let ok = Rec::default();
@@ -938,7 +938,7 @@ fn malformed_records_are_typed_errors_with_their_place() {
 }
 
 // r[verify vcf_fields.lazy]
-// r[verify vcf_reader.undeclared]
+// r[verify vcf_reader.field_table]
 /// An INFO key the dictionary does not declare fails the lazily built index,
 /// and every access returns the same error; the record's other parts read.
 #[test]
@@ -1131,12 +1131,13 @@ fn text_records_read_their_columns() {
 // r[verify vcf_fields.samples]
 // r[verify vcf_values.access]
 // r[verify vcf_values.duplicates]
-// r[verify vcf_reader.undeclared]
+// r[verify vcf_reader.field_table]
 // r[verify vcf_reader.undeclared.filter]
 /// A sample may drop trailing FORMAT fields (they read as missing); a
-/// repeated key reads its first value; an undeclared INFO or FORMAT key is
-/// ignored; a flag given a value is set; an integer key without a value is
-/// absent; an undeclared FILTER fails the record without being listed.
+/// repeated key reads its first value; an undeclared INFO or FORMAT key
+/// reads as a String; a flag given a value is set; an integer key without a
+/// value is absent; an undeclared FILTER fails the record without being
+/// listed.
 #[test]
 fn text_edge_cases_read_as_htslib_reads_them() {
     let file = text_file(&[
@@ -1156,15 +1157,21 @@ fn text_edge_cases_read_as_htslib_reads_them() {
     let info = recs[0].info();
     assert_eq!(info.get(&dp).unwrap(), Some(1), "the first DP wins");
     assert!(info.get(&db).unwrap(), "a flag with a value is set");
-    let names: Vec<&str> = info.iter().unwrap().map(|f| f.unwrap().0).collect();
-    assert_eq!(names, ["DP", "DB"], "XX is undeclared, the second DP a duplicate");
+    let fields: Vec<_> = info.iter().unwrap().map(|f| f.unwrap()).collect();
+    let names: Vec<&str> = fields.iter().map(|f| f.0).collect();
+    assert_eq!(names, ["DP", "XX", "DB"], "the second DP is a duplicate");
+    assert!(
+        matches!(fields[1], (_, def, DynValue::Str(Some("3"))) if def.number == seqair::vcf::Number::Unknown)
+    );
     let one = recs[0].samples().sample(s1);
     assert!(one.get(&gt).unwrap().is_some());
     assert_eq!(one.get(&fdp).unwrap(), None, "dropped trailing fields are missing");
     assert_eq!(one.get(&ad).unwrap().map(|v| v.count()), None);
     let fields: Vec<&str> = one.iter().unwrap().map(|f| f.unwrap().0).collect();
-    assert_eq!(fields, ["GT", "DP", "AD"], "ZZ is undeclared");
+    assert_eq!(fields, ["GT", "DP", "ZZ", "AD"]);
     let two = recs[0].samples().sample(s2);
+    let zz = two.iter().unwrap().map(|f| f.unwrap()).find(|f| f.0 == "ZZ").unwrap().2;
+    assert!(matches!(zz, DynValue::Str(Some("q"))), "{zz:?}");
     assert_eq!(two.get(&ad).unwrap().map(Iterator::collect::<Vec<_>>), Some(vec![2, 3]));
 
     assert_eq!(recs[1].info().get(&dp).unwrap(), None, "a key without a value holds nothing");

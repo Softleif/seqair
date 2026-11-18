@@ -228,12 +228,12 @@ impl SiteParts {
         if self.filter != FilterColumn::Missing {
             for name in filter.split(|&b| b == b';') {
                 let declared = file
-                    .keys
+                    .fields
                     .get(name)
                     .filter(|id| file.filters.get(id.get() as usize).is_some_and(Option::is_some));
                 match declared {
                     Some(id) => self.filter_ids.push(id),
-                    None => file.warn_undeclared(KeyKind::Filter, name),
+                    None => file.warn_undeclared_filter(name),
                 }
             }
         }
@@ -412,7 +412,7 @@ impl<'a> FiltersRef<'a> {
         }
     }
 
-    // r[impl vcf_values.header_brand]
+    // r[impl vcf_values.header_brand+2]
     /// Whether the record lists `filter` (`PASS` only when it passed).
     ///
     /// # Errors

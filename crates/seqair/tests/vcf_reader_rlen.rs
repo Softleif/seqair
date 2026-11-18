@@ -123,7 +123,7 @@ fn ends(file: &VcfFile) -> Vec<Result<(VcfPos, VcfPos), String>> {
     }
 }
 
-// r[verify vcf_values.rlen]
+// r[verify vcf_values.rlen+2]
 // r[verify vcf_reader.oracles]
 /// Every generated record ends where the BCF bcftools writes from the same
 /// text says it ends.
@@ -163,7 +163,7 @@ fn text_ends_are_the_rlen_bcftools_writes(tc: TestCase) {
     }
 }
 
-// r[verify vcf_values.rlen]
+// r[verify vcf_values.rlen+2]
 /// htslib reads SVLEN's eighth element against ALT 0's bit (REF, never
 /// set), so an eighth-ALT `<DEL>` does not extend the record, a seventh
 /// does. Ends as `bcftools query -f '%END'` prints them.

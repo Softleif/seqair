@@ -55,7 +55,7 @@ pub enum VcfReadError {
     #[error("malformed record {at}")]
     Record { at: Box<RecordPlace>, source: RecordError },
 
-    // r[impl vcf_values.header_brand]
+    // r[impl vcf_values.header_brand+2]
     #[error("{name} was resolved from another header than this record's")]
     ForeignKey { name: SmolStr },
 
@@ -215,7 +215,7 @@ pub enum RecordError {
     #[error("malformed {part}")]
     Text { part: RecordPart, source: TextValueError },
 
-    // r[impl vcf_reader.undeclared]
+    // r[impl vcf_reader.field_table]
     #[error("dictionary index {index} names no {kind} field of the header")]
     UnknownKey { index: i32, kind: KeyKind },
 

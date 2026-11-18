@@ -14,7 +14,7 @@ struct Slot {
     id: DictId,
 }
 
-// r[impl vcf_values.text_resolution]
+// r[impl vcf_values.text_resolution+2]
 /// Every FILTER/INFO/FORMAT id of a header, by name: open addressing at
 /// most half full, linear probing. A key of up to 8 bytes is told apart by
 /// its prefix and length alone; a longer one is checked against the flat
@@ -147,7 +147,7 @@ mod tests {
         format!("{stem}{tail}")
     }
 
-    // r[verify vcf_values.text_resolution]
+    // r[verify vcf_values.text_resolution+2]
     /// Against a `HashMap`: every name finds its id, every other key none.
     #[hegel::test]
     fn the_table_finds_exactly_the_declared_names(tc: TestCase) {

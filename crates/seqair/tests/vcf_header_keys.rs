@@ -108,7 +108,7 @@ fn filters_contigs_and_samples_resolve() {
 }
 
 // r[verify vcf_header.brand+2]
-// r[verify vcf_values.header_brand]
+// r[verify vcf_values.header_brand+2]
 // r[verify vcf_fields.sample_idx]
 /// Two parses of the same text are two headers: their keys, contigs and
 /// samples differ, though name and index agree; a clone's are the same.

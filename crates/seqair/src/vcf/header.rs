@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     // r[verify vcf_header.brand+2]
-    // r[verify vcf_values.header_brand]
+    // r[verify vcf_values.header_brand+2]
     #[test]
     fn the_writer_refuses_a_contig_of_another_header() {
         use crate::vcf::{Alleles, OutputFormat, VcfError, Writer};

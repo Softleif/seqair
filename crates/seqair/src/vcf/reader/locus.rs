@@ -51,7 +51,7 @@ impl VcfPos {
     }
 }
 
-// r[impl vcf_values.rlen]
+// r[impl vcf_values.rlen+2]
 /// A record's start and inclusive end from its 0-based position (−1 for the
 /// telomere) and reference length: the end is `start + rlen − 1`.
 pub(crate) fn span_of(pos: i64, rlen: i64) -> Result<(VcfPos, VcfPos), RecordError> {
