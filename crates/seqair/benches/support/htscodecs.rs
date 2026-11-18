@@ -32,6 +32,13 @@ mod ffi {
             nlengths: c_int,
         ) -> *mut c_char;
 
+        pub(super) fn rans_compress(
+            input: *mut u8,
+            in_size: c_uint,
+            out_size: *mut c_uint,
+            order: c_int,
+        ) -> *mut u8;
+
         pub(super) fn rans_compress_to_4x16(
             input: *mut u8,
             in_size: c_uint,
@@ -141,6 +148,26 @@ pub fn rans_compress_4x16(input: &[u8], order: u8) -> Option<MallocBuf> {
             input.as_ptr().cast_mut(),
             in_size,
             std::ptr::null_mut(),
+            &raw mut out_size,
+            std::ffi::c_int::from(order),
+        )
+    };
+    let len = usize::try_from(out_size).expect("a u32 fits a usize");
+    // SAFETY: a non-null return is the malloc'd output of `out_size` bytes.
+    unsafe { MallocBuf::from_raw(ptr, len) }
+}
+
+/// `rans_compress` (rANS 4×8), which mallocs the output; `None` if it fails.
+pub fn rans_compress_4x8(input: &[u8], order: u8) -> Option<MallocBuf> {
+    let in_size = c_uint::try_from(input.len()).ok()?;
+    let mut out_size: c_uint = 0;
+    // SAFETY: `input` is live for the call and `in_size` bytes long;
+    // htscodecs only reads it despite the non-const signature, mallocs the
+    // output and stores its length in `out_size`.
+    let ptr = unsafe {
+        ffi::rans_compress(
+            input.as_ptr().cast_mut(),
+            in_size,
             &raw mut out_size,
             std::ffi::c_int::from(order),
         )
