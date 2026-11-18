@@ -76,6 +76,18 @@ pub fn read_uint7(src: &mut &[u8]) -> Result<u32, Uint7Error> {
     Err(Uint7Error::Overflow)
 }
 
+/// Append `v` as a uint7: 7 bits a byte, most significant first, the high
+/// bit set on all but the last; the inverse of [`read_uint7`].
+#[allow(clippy::cast_possible_truncation, reason = "masked to 7 bits")]
+#[allow(clippy::arithmetic_side_effects, reason = "g < 5")]
+pub(crate) fn write_uint7(out: &mut Vec<u8>, v: u32) {
+    let groups = (0..5u32).rev().skip_while(|&g| g > 0 && v >> (7 * g) == 0);
+    for g in groups {
+        let bits = ((v >> (7 * g)) & 0x7f) as u8;
+        out.push(if g == 0 { bits } else { bits | 0x80 });
+    }
+}
+
 /// Interleave STRIPE substreams, as rANS Nx16 and the arithmetic coder
 /// both lay them out: `out[i * n + j] = parts[j][i]` for the `n` parts, as
 /// far as each part reaches (a well-formed part `j` holds `out.len() / n`

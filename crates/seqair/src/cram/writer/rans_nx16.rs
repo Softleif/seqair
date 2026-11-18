@@ -315,7 +315,7 @@ fn encode_order_0(data: &[u8], n: usize) -> Option<Vec<u8>> {
     let total = u32::try_from(data.len().next_power_of_two()).ok()?.min(1 << ORDER_0_BITS);
     let freqs = normalize(&counts, total);
     let mut out = Vec::new();
-    write_alphabet(&mut out, &freqs.map(|f| f > 0));
+    super::rans::write_runs(&mut out, &freqs.map(|f| f > 0), |_, _| {});
     for &f in freqs.iter().filter(|&&f| f > 0) {
         put_uint7(&mut out, f)?;
     }
@@ -407,7 +407,7 @@ fn order_1_tables(data: &[u8], n: usize) -> Order1Tables {
 fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
     let Order1Tables { shift, alphabet, rows } = order_1_tables(data, n);
     let mut table = Vec::new();
-    write_alphabet(&mut table, &alphabet);
+    super::rans::write_runs(&mut table, &alphabet, |_, _| {});
     let mut syms = vec![[Symbol::default(); 256]; 256];
     for ((row, on), s) in rows.iter().zip(alphabet).zip(syms.iter_mut()) {
         if !on {
@@ -554,40 +554,9 @@ fn finish(out: &mut Vec<u8>, states: &[u32], words: &[u16]) {
     }
 }
 
-/// The present symbols, run-length coded as htscodecs' `encode_alphabet`
-/// writes them: a symbol following a present one starts a run, the count
-/// of present symbols right after it; then 0.
-#[allow(clippy::cast_possible_truncation, reason = "symbols and run lengths are below 256")]
-fn write_alphabet(out: &mut Vec<u8>, present: &[bool; 256]) {
-    let mut run = 0usize;
-    for j in 0..256usize {
-        if !present.get(j).copied().unwrap_or(false) {
-            continue;
-        }
-        if run > 0 {
-            run = run.saturating_sub(1);
-        } else {
-            out.push(j as u8);
-            if j > 0 && present.get(j.wrapping_sub(1)).copied().unwrap_or(false) {
-                run = present.iter().skip(j.saturating_add(1)).take_while(|&&p| p).count();
-                out.push(run as u8);
-            }
-        }
-    }
-    out.push(0);
-}
-
-/// uint7: 7 bits a byte, most significant first, the high bit set on all
-/// but the last.
-#[allow(clippy::cast_possible_truncation, reason = "masked to 7 bits")]
-#[allow(clippy::arithmetic_side_effects, reason = "g < 5")]
+/// `v` as a uint7, or `None` when it does not fit 32 bits.
 fn put_uint7(out: &mut Vec<u8>, v: impl TryInto<u32>) -> Option<()> {
-    let v: u32 = v.try_into().ok()?;
-    let groups = (0..5u32).rev().skip_while(|&g| g > 0 && v >> (7 * g) == 0);
-    for g in groups {
-        let bits = ((v >> (7 * g)) & 0x7f) as u8;
-        out.push(if g == 0 { bits } else { bits | 0x80 });
-    }
+    crate::cram::codec_io::write_uint7(out, v.try_into().ok()?);
     Some(())
 }
 

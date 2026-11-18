@@ -1633,6 +1633,33 @@ fn resolve_mates(
     }
 }
 
+/// The extent of a chain of mates on one reference: its leftmost start and
+/// rightmost (exclusive) end, and how many records start and end there.
+pub(crate) struct ChainExtent {
+    pub left: i64,
+    pub right: i64,
+    pub left_cnt: u32,
+    pub right_cnt: u32,
+}
+
+impl ChainExtent {
+    /// The TLEN of the chain's first record, at `pos..end`, as htslib's
+    /// `cram_decode_slice_xref` computes it: the span, negated unless the
+    /// record is leftmost (and on a tie at both ends, unless it is READ1).
+    /// The CRAM writer attaches mates by this same function.
+    pub(crate) fn first_tlen(&self, pos: i64, end: i64, read1: bool) -> i64 {
+        let span = self.right.saturating_sub(self.left);
+        let leftmost = pos == self.left;
+        if leftmost && (end < self.right || self.left_cnt <= 1) {
+            span
+        } else if leftmost && end == self.right && self.left_cnt > 1 && self.right_cnt > 1 {
+            if read1 { span } else { span.saturating_neg() }
+        } else {
+            span.saturating_neg()
+        }
+    }
+}
+
 /// Follow the chain of downstream mates from `rec`, close it into a ring
 /// (the last record's mate is `rec`) and give each record its TLEN; `false`
 /// if a link does not point forward, as htslib rejects.
@@ -1670,20 +1697,15 @@ fn close_chain(infos: &mut [SliceMateInfo], tlen: &mut [Option<i64>], rec: usize
         }
     }
 
-    let span = aright.saturating_sub(aleft);
     let first = &infos[rec];
-    let first_tlen = if !same_ref {
-        0
-    } else if first.pos == aleft && (first.end_pos < aright || left_cnt <= 1) {
-        span
-    } else if first.pos == aleft && first.end_pos == aright && left_cnt > 1 && right_cnt > 1 {
-        if BamFlags::from(first.bam_flags).is_first_in_template() {
-            span
-        } else {
-            span.saturating_neg()
-        }
+    let first_tlen = if same_ref {
+        ChainExtent { left: aleft, right: aright, left_cnt, right_cnt }.first_tlen(
+            first.pos,
+            first.end_pos,
+            BamFlags::from(first.bam_flags).is_first_in_template(),
+        )
     } else {
-        span.saturating_neg()
+        0
     };
     tlen[rec] = Some(first_tlen);
     let mut id = rec;

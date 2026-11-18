@@ -288,6 +288,13 @@ impl SliceBuilder {
     }
 
     fn buf(&mut self, series: Series) -> &mut Vec<u8> {
+        debug_assert!(
+            !matches!(
+                series,
+                Series::Cf | Series::Mf | Series::Ns | Series::Np | Series::Ts | Series::Nf
+            ),
+            "{series:?} is written by mates::series when the slice is assembled"
+        );
         let index = series as usize;
         debug_assert!(index < SERIES.len());
         #[allow(clippy::indexing_slicing, reason = "every Series is an index of `series`")]
@@ -424,7 +431,9 @@ impl SliceBuilder {
             &self.mates,
             self.series.get(Series::Rn as usize).map_or(&[], Vec::as_slice),
         );
-        // The external blocks with data, series first, then tags.
+        // The external blocks, series first, then tags: every series the
+        // compression header lists, empty or not, as noodles wants a block
+        // for each series a record reads, even when it reads nothing.
         let blocks: Vec<(i32, &[u8])> = SERIES
             .into_iter()
             .filter_map(|series| {
@@ -440,7 +449,6 @@ impl SliceBuilder {
                 Some((series.content_id(), data.as_slice()))
             })
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
-            .filter(|(_, data)| !data.is_empty())
             .collect();
         let mut external = Vec::new();
         for &(id, data) in &blocks {

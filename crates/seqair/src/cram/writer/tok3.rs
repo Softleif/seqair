@@ -88,18 +88,6 @@ fn compress_stream(token_type: u8, data: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| super::rans_nx16::encode_cat(data))
 }
 
-/// `v` as a uint7: 7 bits a byte, most significant first, the high bit
-/// set on every byte but the last.
-#[allow(clippy::cast_possible_truncation, reason = "masked to 7 bits")]
-fn put_uint7(out: &mut Vec<u8>, v: u32) {
-    for shift in [28, 21, 14, 7] {
-        if v >> shift != 0 {
-            out.push(((v >> shift) & 0x7f) as u8 | 0x80);
-        }
-    }
-    out.push((v & 0x7f) as u8);
-}
-
 /// A token of an encoded name, kept for the names diffed against it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Token<'a> {
@@ -362,7 +350,7 @@ fn write_streams(positions: &[Position], out: &mut Vec<u8>) -> Option<()> {
                 out.extend_from_slice(&[flags | COPY, *from_p, *from_ty]);
             } else {
                 out.push(flags);
-                put_uint7(out, u32::try_from(stream.len()).ok()?);
+                crate::cram::codec_io::write_uint7(out, u32::try_from(stream.len()).ok()?);
                 out.extend_from_slice(&stream);
                 written.push((p, ty, stream));
             }

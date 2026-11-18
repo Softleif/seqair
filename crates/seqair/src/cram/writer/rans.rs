@@ -211,7 +211,7 @@ fn write_frequencies(out: &mut Vec<u8>, symbols: &Table) {
 /// the count of present symbols right after it. `value` writes each one's
 /// payload. The list ends with 0.
 #[allow(clippy::cast_possible_truncation, reason = "symbols and run lengths are below 256")]
-fn write_runs(
+pub(super) fn write_runs(
     out: &mut Vec<u8>,
     present: &[bool; 256],
     mut value: impl FnMut(&mut Vec<u8>, usize),
