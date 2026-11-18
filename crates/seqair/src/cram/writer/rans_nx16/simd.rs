@@ -1,0 +1,410 @@
+//! The rANS Nx16 encoder's fast path (`r[cram_writer.rans_nx16.simd]`):
+//! histograms that do not serialize on repeated symbols, order-1 tables for
+//! the alphabet's rows only, and SIMD kernels for the interleaved states, as
+//! htscodecs' `rANS_static32x16pr_neon.c` codes them. Every function here
+//! has a scalar counterpart in the parent module, the reference it must
+//! match byte for byte.
+
+use super::{
+    Coder, LOWER_BOUND, ORDER_0_BITS, Symbol, context, normalize, order_1_header, order_1_shift,
+    row_target, symbols, write_row,
+};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4, u64x2};
+use fearless_simd_macros::simd;
+use std::cell::RefCell;
+
+// r[impl cram_writer.rans_nx16.simd]
+
+/// A symbol as the kernels code it: the reciprocal `m` in the low half, and
+/// in the high half the start (bits 0–11), the frequency (12–24) and the
+/// shift `s` (25–28). 0 for a symbol without frequency, never looked up.
+type Enc = u64;
+
+/// htscodecs' `RansEncSymbolInit` reciprocal, with the state doubled
+/// instead of the shift lowered by one so that `f = 1` needs no bias:
+/// `q = ⌊2x·m / 2^32⌋ >> s = ⌊x·m / 2^(31+s)⌋` with `s = ⌈log2 f⌉` and
+/// `m = ⌈2^(31+s) / f⌉`, exact for every `x < 2^31` (Alverson; the error
+/// `m·f − 2^(31+s) < f ≤ 2^s` times `x` stays below `2^(31+s)`).
+#[allow(clippy::arithmetic_side_effects, reason = "1 ≤ f ≤ 4096, so s ≤ 12 and m < 2^32")]
+#[allow(clippy::cast_possible_truncation, reason = "m < 2^32")]
+pub(super) fn enc(sym: Symbol) -> Enc {
+    let f = sym.freq;
+    if f == 0 {
+        return 0;
+    }
+    let s = 32 - (f - 1).leading_zeros();
+    let m = ((1u64 << (31 + s)) + u64::from(f) - 1) / u64::from(f);
+    debug_assert!(m <= u64::from(u32::MAX) && sym.start < 1 << 12 && f <= 1 << 12);
+    u64::from(m as u32) | (u64::from(sym.start | f << 12 | s << 25) << 32)
+}
+
+/// The renormalization words, written backwards from the end of `buf` so
+/// that `buf[at..]` holds them in decode order. Every symbol emits at most
+/// one word, so a buffer of 16 bytes plus 2 a symbol never runs out, and
+/// keeps `at ≥ 16` for the kernels' 16-byte stores below it.
+struct Words<'a> {
+    buf: &'a mut [u8],
+    at: usize,
+}
+
+impl<'a> Words<'a> {
+    /// Room for `symbols` symbols' words in `scratch`, whose old contents
+    /// are overwritten before they are read.
+    #[allow(clippy::arithmetic_side_effects, reason = "len ≤ i32::MAX")]
+    fn new(scratch: &'a mut Vec<u8>, symbols: usize) -> Self {
+        scratch.resize(16 + 2 * symbols, 0);
+        Self { at: scratch.len(), buf: scratch }
+    }
+
+    #[allow(clippy::indexing_slicing, reason = "at ≤ buf.len()")]
+    fn decode_order(&self) -> &[u8] {
+        &self.buf[self.at..]
+    }
+}
+
+thread_local! {
+    /// [`Words`]' buffer, kept between blocks: a fresh one per block is a
+    /// page fault per 4 KiB of words.
+    static WORDS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The order-1 tables, kept between blocks for the same reason: zeroing
+    /// their 1.5 MiB cost a 4 KiB block several times its coding.
+    static ORDER_1: RefCell<Order1Scratch> = RefCell::new(Order1Scratch::new());
+}
+
+/// Order-1 counts, in two tables so that a run of one pair is two chains of
+/// increments rather than one, and the coding table, each indexed by the
+/// context and the symbol as a big-endian u16.
+struct Order1Scratch {
+    counts: [Vec<u32>; 2],
+    /// The rows of `counts` the last block may have left non-zero.
+    dirty: [bool; 256],
+    /// Rows outside the current alphabet hold an earlier block's entries,
+    /// which no position of this block reads.
+    enc: Vec<Enc>,
+}
+
+impl Order1Scratch {
+    fn new() -> Self {
+        Self {
+            counts: [vec![0; 1 << 16], vec![0; 1 << 16]],
+            dirty: [false; 256],
+            enc: vec![0; 1 << 16],
+        }
+    }
+}
+
+/// One state step on a scalar, with [`enc`]'s reciprocal.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "at ≥ 2 while symbols remain (see `Words`)")]
+#[allow(clippy::arithmetic_side_effects, reason = "as in `put`; q·(M − f) + x % f + start < 2^31")]
+#[allow(clippy::cast_possible_truncation, reason = "the low word; the high half of a u64 product")]
+fn put(x: u32, e: Enc, bits: u32, words: &mut Words<'_>) -> u32 {
+    let info = (e >> 32) as u32;
+    let f = (info >> 12) & 0x1FFF;
+    let mut x = x;
+    if x >> (31 - bits) >= f {
+        words.at -= 2;
+        let at = words.at;
+        words.buf[at..at + 2].copy_from_slice(&(x as u16).to_le_bytes());
+        x >>= 16;
+    }
+    let q = ((u64::from(x + x) * (e & 0xFFFF_FFFF)) >> 32) as u32 >> (info >> 25);
+    x + (info & 0xFFF) + q * ((1 << bits) - f)
+}
+
+/// For each 4-lane renormalization mask, the byte shuffle that moves the
+/// low u16 of each lane that renormalizes to the top of 16 bytes, in lane
+/// order: stored ending at the write position, they are in decode order.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "const table build: m < 16, lane < 4, k ≤ 4"
+)]
+const EMIT4: [[u8; 16]; 16] = {
+    let mut t = [[0x80u8; 16]; 16];
+    let mut m = 0;
+    while m < 16 {
+        let k = (m as u32).count_ones() as usize;
+        let mut slot = 16 - 2 * k;
+        let mut lane = 0;
+        while lane < 4 {
+            if m & (1 << lane) != 0 {
+                t[m][slot] = (4 * lane) as u8;
+                t[m][slot + 1] = (4 * lane + 1) as u8;
+                slot += 2;
+            }
+            lane += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+/// Bytes emitted for a 4-lane mask: 2 · popcount.
+const EMITTED: [u8; 16] = [0, 2, 2, 4, 2, 4, 4, 6, 2, 4, 4, 6, 4, 6, 6, 8];
+
+/// Four states' steps at once: [`put`] lane by lane, the words of the lanes
+/// that renormalize stored in lane order below the ones before.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "the mask of 4 lanes is < 16; at ≥ 16 (see `Words`)")]
+#[allow(clippy::cast_possible_truncation, reason = "the mask of 4 lanes is < 16")]
+#[allow(clippy::arithmetic_side_effects, reason = "vector lanes wrap; as in `put`")]
+fn step4<S: Simd>(
+    simd: S,
+    x: u32x4<S>,
+    e: &[Enc; 4],
+    bits: u32,
+    words: &mut Words<'_>,
+) -> u32x4<S> {
+    let a: u32x4<S> = u64x2::from_slice(simd, &e[..2]).bitcast();
+    let b: u32x4<S> = u64x2::from_slice(simd, &e[2..]).bitcast();
+    let (m, info) = (a.unzip_low(b), a.unzip_high(b));
+    let f = (info >> 12) & 0x1FFF;
+    let renorm = (x >> (31 - bits)).simd_ge(f);
+    let mask = (renorm.to_bitmask() & 0xF) as usize;
+    let at = words.at;
+    let low: u8x16<S> = x.bitcast();
+    low.swizzle_dyn(u8x16::from_slice(simd, &EMIT4[mask])).store_slice(&mut words.buf[at - 16..at]);
+    words.at = at - usize::from(EMITTED[mask]);
+    let x = renorm.select(x >> 16, x);
+    let (lo, hi) = (x + x).widening_mul(m);
+    let q = lo.bitcast::<u32x4<S>>().unzip_high(hi.bitcast::<u32x4<S>>()) >> (info >> 25);
+    x + (info & 0xFFF) + q * (u32x4::splat(simd, 1 << bits) - f)
+}
+
+/// Order-0 counts in four sub-tables, so that a run of one symbol is four
+/// chains of increments rather than one.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables")]
+#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
+pub(super) fn histogram(data: &[u8]) -> [u32; 256] {
+    let mut c = [[0u32; 256]; 4];
+    let (quads, rest) = data.as_chunks::<4>();
+    for q in quads {
+        c[0][usize::from(q[0])] += 1;
+        c[1][usize::from(q[1])] += 1;
+        c[2][usize::from(q[2])] += 1;
+        c[3][usize::from(q[3])] += 1;
+    }
+    for &b in rest {
+        c[0][usize::from(b)] += 1;
+    }
+    let [mut sum, c1, c2, c3] = c;
+    for (((s, a), b), d) in sum.iter_mut().zip(c1).zip(c2).zip(c3) {
+        *s += a + b + d;
+    }
+    sum
+}
+
+/// The parent's `encode_order_0` coding loop: `n` states, the table already
+/// in `out`; the states and words follow.
+#[allow(clippy::arithmetic_side_effects, reason = "i % n ≤ i")]
+#[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table; l < n ≤ 32")]
+pub(super) fn code_order_0(
+    level: Level,
+    data: &[u8],
+    table: &[Symbol; 256],
+    n: usize,
+    out: &mut Vec<u8>,
+) {
+    let enc_table = table.map(enc);
+    let whole = data.len() - data.len() % n;
+    let body = &data[..whole];
+    let mut states = [LOWER_BOUND; 32];
+    WORDS.with_borrow_mut(|scratch| {
+        let mut words = Words::new(scratch, data.len());
+        // The last, partial round of `n`: byte `i` with state `i % n`.
+        for (l, &b) in data[whole..].iter().enumerate().rev() {
+            states[l] = put(states[l], enc_table[usize::from(b)], ORDER_0_BITS, &mut words);
+        }
+        if let Some(s) = states.first_chunk_mut::<32>().filter(|_| n == 32) {
+            dispatch!(level, simd => code_o0(simd, body.as_chunks::<32>().0, &enc_table, s, &mut words));
+        } else if let Some(s) = states.first_chunk_mut::<4>() {
+            dispatch!(level, simd => code_o0(simd, body.as_chunks::<4>().0, &enc_table, s, &mut words));
+        }
+        finish(out, &states[..n], words.decode_order());
+    });
+}
+
+/// Order 0 over whole rounds of `N` bytes, last round first, each state's
+/// step in groups of four lanes, the highest first (the order the scalar
+/// encoder pushes words in).
+#[simd]
+#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table")]
+fn code_o0<S: Simd, const N: usize>(
+    simd: S,
+    rounds: &[[u8; N]],
+    enc_table: &[Enc; 256],
+    states: &mut [u32; N],
+    words: &mut Words<'_>,
+) {
+    for round in rounds.iter().rev() {
+        let groups = states.as_chunks_mut::<4>().0.iter_mut().zip(round.as_chunks::<4>().0);
+        for (xs, bytes) in groups.rev() {
+            let e = [
+                enc_table[usize::from(bytes[0])],
+                enc_table[usize::from(bytes[1])],
+                enc_table[usize::from(bytes[2])],
+                enc_table[usize::from(bytes[3])],
+            ];
+            step4(simd, u32x4::from_slice(simd, xs), &e, ORDER_0_BITS, words).store_slice(xs);
+        }
+    }
+}
+
+/// The parent's `encode_order_1` with the fast path's counts and tables
+/// and the SIMD coding loop. `data` holds at least 8 bytes.
+#[allow(clippy::indexing_slicing, reason = "u8s and u16s index 256- and 65536-entry tables")]
+#[allow(clippy::arithmetic_side_effects, reason = "j·chunk ≤ len; n ≥ 1")]
+pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<u8>> {
+    let chunk = data.len() / n;
+    ORDER_1.with_borrow_mut(|o1| {
+        let (shift, table) = order_1_tables(o1, data, n)?;
+        let enc_table: &[Enc; 1 << 16] = o1.enc.as_slice().try_into().ok()?;
+        let mut out = order_1_header(shift, &table, Coder::Simd(level))?;
+        let mut states = [LOWER_BOUND; 32];
+        WORDS.with_borrow_mut(|scratch| {
+            let mut words = Words::new(scratch, data.len());
+            // The bytes after the last whole stretch, with the last state.
+            for p in (chunk * n..data.len()).rev() {
+                let ctx = context(data, chunk, n, p);
+                let e = enc_table[usize::from(ctx) << 8 | usize::from(data[p])];
+                states[n - 1] = put(states[n - 1], e, shift, &mut words);
+            }
+            if chunk > 0 {
+                let body = &data[..chunk * n];
+                if let Some(s) = states.first_chunk_mut::<32>().filter(|_| n == 32) {
+                    dispatch!(level, simd => code_o1(simd, body, chunk, enc_table, shift, s, &mut words));
+                } else if let Some(s) = states.first_chunk_mut::<4>() {
+                    dispatch!(level, simd => code_o1(simd, body, chunk, enc_table, shift, s, &mut words));
+                }
+            }
+            finish(&mut out, &states[..n], words.decode_order());
+        });
+        Some(out)
+    })
+}
+
+/// The parent's `order_1_tables` and the table writing of its
+/// `encode_order_1`, over the alphabet's rows only: the shift and the
+/// tables as written, with `o1.enc` filled for every context of the
+/// alphabet.
+#[allow(clippy::indexing_slicing, reason = "u8s and u16s index 256- and 65536-entry tables")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "counts ≤ data.len(); each stretch start was counted once as a pair; \
+              shift ≥ log2 of a row total"
+)]
+fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32, Vec<u8>)> {
+    let [c0, c1] = &mut o1.counts;
+    for (ctx, dirty) in o1.dirty.iter_mut().enumerate().filter(|(_, d)| **d) {
+        c0[ctx << 8..][..256].fill(0);
+        c1[ctx << 8..][..256].fill(0);
+        *dirty = false;
+    }
+    let mut alphabet = [false; 256];
+    alphabet[0] = true;
+    for &b in data {
+        alphabet[usize::from(b)] = true;
+    }
+    o1.dirty = alphabet;
+
+    // Every byte with the one before it (the first with context 0), the
+    // pairs alternating between the two tables.
+    let (&first, rest) = data.split_first()?;
+    c0[usize::from(first)] += 1;
+    let mut prev = usize::from(first);
+    let (pairs, last) = rest.as_chunks::<2>();
+    for &[a, b] in pairs {
+        let (a, b) = (usize::from(a), usize::from(b));
+        c0[prev << 8 | a] += 1;
+        c1[a << 8 | b] += 1;
+        prev = b;
+    }
+    if let Some(&a) = last.first() {
+        c0[prev << 8 | usize::from(a)] += 1;
+    }
+    for ctx in (0..256).filter(|&c| alphabet[c]) {
+        for (a, b) in c0[ctx << 8..][..256].iter_mut().zip(&mut c1[ctx << 8..][..256]) {
+            *a += std::mem::take(b);
+        }
+    }
+    // Each stretch start but the first moved to context 0, which `context`
+    // gives it.
+    let chunk = data.len() / n;
+    if chunk > 0 {
+        for p in (1..n).map(|j| j * chunk) {
+            c0[usize::from(data[p - 1]) << 8 | usize::from(data[p])] -= 1;
+            c0[usize::from(data[p])] += 1;
+        }
+    }
+
+    let mut rows: Vec<(usize, &mut [u32; 256])> = c0
+        .as_chunks_mut::<256>()
+        .0
+        .iter_mut()
+        .enumerate()
+        .filter(|(ctx, _)| alphabet[*ctx])
+        .collect();
+    for (_, row) in &mut rows {
+        if row.iter().all(|&c| c == 0) {
+            row[0] = 1;
+        }
+    }
+    let shift = order_1_shift(rows.iter().map(|(_, row)| row_target(row)));
+
+    let mut table = Vec::new();
+    super::super::rans::write_runs(&mut table, &alphabet, |_, _| {});
+    for (ctx, row) in &rows {
+        let freqs = normalize(row, row_target(row));
+        write_row(&mut table, &alphabet, &freqs)?;
+        let total: u32 = freqs.iter().sum();
+        let syms = symbols(&freqs, shift - total.trailing_zeros());
+        for (e, &s) in o1.enc[ctx << 8..][..256].iter_mut().zip(&syms) {
+            *e = enc(s);
+        }
+    }
+    Some((shift, table))
+}
+
+/// Order 1 over `N` stretches of `chunk` bytes, position by position from
+/// the last, the states in groups of four lanes, the highest first. A
+/// stretch's first byte has context 0.
+#[simd]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "j·chunk + i < N·chunk = data.len(); u16s index the table"
+)]
+#[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i < data.len(); i ≥ 1 in i - 1")]
+fn code_o1<S: Simd, const N: usize>(
+    simd: S,
+    data: &[u8],
+    chunk: usize,
+    enc_table: &[Enc; 1 << 16],
+    bits: u32,
+    states: &mut [u32; N],
+    words: &mut Words<'_>,
+) {
+    for i in (0..chunk).rev() {
+        let mut j = N;
+        for xs in states.as_chunks_mut::<4>().0.iter_mut().rev() {
+            j -= 4;
+            let mut e = [0 as Enc; 4];
+            for (l, e) in e.iter_mut().enumerate() {
+                let p = (j + l) * chunk + i;
+                let ctx = if i == 0 { 0 } else { data[p - 1] };
+                *e = enc_table[usize::from(u16::from_be_bytes([ctx, data[p]]))];
+            }
+            step4(simd, u32x4::from_slice(simd, xs), &e, bits, words).store_slice(xs);
+        }
+    }
+}
+
+/// The states, then the words, already in decode order.
+fn finish(out: &mut Vec<u8>, states: &[u32], words: &[u8]) {
+    out.reserve(states.len().saturating_mul(4).saturating_add(words.len()));
+    for s in states {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out.extend_from_slice(words);
+}
