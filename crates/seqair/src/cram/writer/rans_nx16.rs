@@ -4,6 +4,7 @@
 
 use super::rans::Order;
 use fearless_simd::Level;
+use std::cell::OnceCell;
 
 mod simd;
 
@@ -90,13 +91,41 @@ enum Coder {
 /// `data` as a rANS Nx16 stream, or `None` when it is too large for the
 /// format's sizes (htscodecs refuses more than `i32::MAX` bytes).
 pub(super) fn encode(data: &[u8], flags: Nx16Flags) -> Option<Vec<u8>> {
+    encode_prepared(&Prepared::new(data), flags)
+}
+
+/// [`encode`] of a block several combinations are tried on: what they
+/// share is computed once.
+pub(super) fn encode_prepared(data: &Prepared<'_>, flags: Nx16Flags) -> Option<Vec<u8>> {
     encode_with(data, flags, Coder::Simd(Level::new()))
 }
 
-fn encode_with(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>> {
-    check_len(data)?;
-    if flags.stripe && data.len() > STRIPE_MIN {
-        encode_stripe(data, flags, coder)
+/// A block's bytes with what more than one combination computes from them,
+/// computed on first use: the order-0 counts and PACK's output.
+pub(super) struct Prepared<'a> {
+    data: &'a [u8],
+    histogram: OnceCell<[u32; 256]>,
+    packed: OnceCell<Option<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl<'a> Prepared<'a> {
+    pub(super) fn new(data: &'a [u8]) -> Self {
+        Self { data, histogram: OnceCell::new(), packed: OnceCell::new() }
+    }
+
+    fn histogram(&self) -> &[u32; 256] {
+        self.histogram.get_or_init(|| histogram(self.data))
+    }
+
+    fn packed(&self) -> Option<&(Vec<u8>, Vec<u8>)> {
+        self.packed.get_or_init(|| pack_with(self.data, self.histogram())).as_ref()
+    }
+}
+
+fn encode_with(data: &Prepared<'_>, flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>> {
+    check_len(data.data)?;
+    if flags.stripe && data.data.len() > STRIPE_MIN {
+        encode_stripe(data.data, flags, coder)
     } else {
         encode_stream(data, flags, true, coder)
     }
@@ -108,7 +137,19 @@ fn encode_with(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>> {
 #[doc(hidden)]
 pub fn encode_for_bench(data: &[u8], method: u8, scalar: bool) -> Option<Vec<u8>> {
     let coder = if scalar { Coder::Scalar } else { Coder::Simd(Level::new()) };
-    encode_with(data, Nx16Flags::from_byte(method), coder)
+    encode_with(&Prepared::new(data), Nx16Flags::from_byte(method), coder)
+}
+
+/// [`encode_prepared`] for benchmarks: the sizes of `data` under each of
+/// `methods` (as [`encode_for_bench`] reads them), sharing their work as
+/// the writer's block does.
+#[doc(hidden)]
+pub fn encode_methods_for_bench(data: &[u8], methods: &[u8]) -> Option<Vec<usize>> {
+    let prepared = Prepared::new(data);
+    methods
+        .iter()
+        .map(|&m| Some(encode_prepared(&prepared, Nx16Flags::from_byte(m))?.len()))
+        .collect()
 }
 
 /// `data` stored as it is: a CAT stream, as a name tokeniser's tiny
@@ -128,30 +169,38 @@ fn check_len(data: &[u8]) -> Option<()> {
 
 /// One stream without STRIPE: PACK, then RLE, then the entropy coder, the
 /// body stored as CAT when coding does not shrink it.
-fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Option<Vec<u8>> {
+fn encode_stream(
+    data: &Prepared<'_>,
+    flags: Nx16Flags,
+    sized: bool,
+    coder: Coder,
+) -> Option<Vec<u8>> {
     let n = if flags.n32 { 32 } else { 4 };
     let mut byte = if flags.n32 { FLAG_N32 } else { 0 };
     let mut out = vec![0];
     if sized {
-        put_uint7(&mut out, data.len())?;
+        put_uint7(&mut out, data.data.len())?;
     } else {
         byte |= FLAG_NO_SIZE;
     }
 
-    let packed = if flags.pack { pack(data) } else { None };
+    let packed = if flags.pack { data.packed() } else { None };
+    let packed_body;
     let mut body = data;
-    if let Some((meta, packed)) = &packed {
+    if let Some((meta, packed)) = packed {
         byte |= FLAG_PACK;
         out.extend_from_slice(meta);
         put_uint7(&mut out, packed.len())?;
-        body = packed;
+        packed_body = Prepared::new(packed);
+        body = &packed_body;
     }
 
     let rle = if flags.rle { rle(body) } else { None };
+    let literals_body;
     if let Some((meta, literals)) = &rle {
         byte |= FLAG_RLE;
         let meta_len = meta.len().checked_mul(2)?;
-        match encode_order_0(meta, n, coder) {
+        match encode_order_0(meta, &histogram(meta), n, coder) {
             Some(coded) if coded.len() < meta.len() => {
                 put_uint7(&mut out, meta_len)?;
                 put_uint7(&mut out, literals.len())?;
@@ -164,17 +213,18 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
                 out.extend_from_slice(meta);
             }
         }
-        body = literals;
+        literals_body = Prepared::new(literals);
+        body = &literals_body;
     }
 
-    let order_1 = matches!(flags.order, Order::One) && body.len() >= ORDER_1_MIN;
+    let order_1 = matches!(flags.order, Order::One) && body.data.len() >= ORDER_1_MIN;
     let coded = match (order_1, coder) {
-        (true, Coder::Scalar) => encode_order_1(body, n),
-        (true, Coder::Simd(level)) => simd::encode_order_1(body, n, level),
-        (false, _) => encode_order_0(body, n, coder),
+        (true, Coder::Scalar) => encode_order_1(body.data, n),
+        (true, Coder::Simd(level)) => simd::encode_order_1(body.data, body.histogram(), n, level),
+        (false, _) => encode_order_0(body.data, body.histogram(), n, coder),
     };
     match coded {
-        Some(coded) if coded.len() < body.len() => {
+        Some(coded) if coded.len() < body.data.len() => {
             if order_1 {
                 byte |= FLAG_ORDER;
             }
@@ -182,7 +232,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
         }
         _ => {
             byte |= FLAG_CAT;
-            out.extend_from_slice(body);
+            out.extend_from_slice(body.data);
         }
     }
     if let Some(first) = out.first_mut() {
@@ -211,6 +261,7 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
     let mut parts = Vec::with_capacity(STRIPES);
     for j in 0..STRIPES {
         let part: Vec<u8> = data.iter().skip(j).step_by(STRIPES).copied().collect();
+        let part = Prepared::new(&part);
         let mut best: Option<Vec<u8>> = None;
         for f in candidates.iter().flatten() {
             let coded = encode_stream(&part, *f, false, coder)?;
@@ -231,17 +282,18 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
 /// htscodecs' `hts_pack`: the symbol map (count, then the symbols in
 /// order) and the packed bytes, each symbol's index into the map, lowest
 /// bits first. `None` for more than 16 symbols.
+pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    pack_with(data, &histogram(data))
+}
+
+/// [`pack`] of `data` with its order-0 counts.
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
 #[allow(clippy::cast_possible_truncation, reason = "at most 16 symbols, so indices fit 4 bits")]
 #[allow(clippy::arithmetic_side_effects, reason = "8 / per_byte with per_byte ∈ {2, 4, 8}")]
-pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let mut present = [false; 256];
-    for &b in data {
-        present[usize::from(b)] = true;
-    }
+fn pack_with(data: &[u8], counts: &[u32; 256]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut code = [0u8; 256];
     let mut meta = vec![0];
-    for (sym, _) in (0u8..=255).zip(present).filter(|(_, p)| *p) {
+    for (sym, _) in (0u8..=255).zip(counts).filter(|(_, c)| **c > 0) {
         code[usize::from(sym)] = (meta.len() - 1) as u8;
         meta.push(sym);
     }
@@ -272,8 +324,9 @@ pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     reason = "256 symbols are written as 0, as htscodecs does"
 )]
 #[allow(clippy::arithmetic_side_effects, reason = "i + run + 1 ≤ data.len()")]
-fn rle(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let saved = rle_saved(data);
+fn rle(data: &Prepared<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let saved = rle_saved(data.data, data.histogram());
+    let data = data.data;
     let mut is_run = [false; 256];
     let mut meta = vec![0];
     for ((sym, &s), r) in (0u8..=255).zip(&saved).zip(&mut is_run) {
@@ -343,8 +396,7 @@ fn histogram(data: &[u8]) -> [u32; 256] {
 /// of one counter.
 #[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 4")]
 #[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
-fn rle_saved(data: &[u8]) -> [i64; 256] {
-    let total = histogram(data);
+fn rle_saved(data: &[u8], total: &[u32; 256]) -> [i64; 256] {
     let mut runs = [[0u32; 256]; 4];
     if let Some((&first, rest)) = data.split_first() {
         runs[0][usize::from(first)] += 1;
@@ -405,13 +457,12 @@ struct Symbol {
 /// words. `None` when `data` is empty (htscodecs writes no table then).
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table; i % n < n")]
 #[allow(clippy::arithmetic_side_effects, reason = "i % n with n ∈ {4, 32}")]
-fn encode_order_0(data: &[u8], n: usize, coder: Coder) -> Option<Vec<u8>> {
+fn encode_order_0(data: &[u8], counts: &[u32; 256], n: usize, coder: Coder) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
     }
-    let counts = histogram(data);
     let total = u32::try_from(data.len().next_power_of_two()).ok()?.min(1 << ORDER_0_BITS);
-    let freqs = normalize(&counts, total);
+    let freqs = normalize(counts, total);
     let mut out = Vec::new();
     super::rans::write_runs(&mut out, &freqs.map(|f| f > 0), |_, _| {});
     for &f in freqs.iter().filter(|&&f| f > 0) {
@@ -557,7 +608,8 @@ fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
 fn order_1_header(shift: u32, table: &[u8], coder: Coder) -> Option<Vec<u8>> {
     let header = (shift as u8) << 4;
     let mut out = Vec::new();
-    let coded = if table.len() > 1000 { encode_order_0(table, 4, coder) } else { None };
+    let coded =
+        if table.len() > 1000 { encode_order_0(table, &histogram(table), 4, coder) } else { None };
     match coded {
         Some(coded) if coded.len().saturating_add(6) < table.len().saturating_add(1) => {
             out.push(header | 1);
@@ -779,9 +831,9 @@ mod tests {
     /// `Fallback` included, against the scalar encoder.
     fn assert_every_level_is_scalar(data: &[u8]) {
         for flags in every_flags() {
-            let want = encode_with(data, flags, Coder::Scalar);
+            let want = encode_with(&Prepared::new(data), flags, Coder::Scalar);
             for level in crate::simd_levels::levels() {
-                let got = encode_with(data, flags, Coder::Simd(level));
+                let got = encode_with(&Prepared::new(data), flags, Coder::Simd(level));
                 assert!(got == want, "{flags:?} at {level:?} of {} bytes", data.len());
             }
         }
@@ -875,7 +927,7 @@ mod tests {
             want[usize::from(b)] += if last == Some(b) { 1 } else { -1 };
             last = Some(b);
         }
-        assert_eq!(rle_saved(&data), want);
+        assert_eq!(rle_saved(&data, &histogram(&data)), want);
     }
 
     /// PACK's bytes, each built symbol by symbol from the lowest bits.

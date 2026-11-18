@@ -361,13 +361,19 @@ fn store_states<S: Simd, const M: usize>(xs: &[u32x4<S>; M], states: &mut [[u32;
 }
 
 /// The parent's `encode_order_1` with the fast path's counts and tables
-/// and the SIMD coding loop. `data` holds at least 8 bytes.
+/// and the SIMD coding loop. `data` holds at least 8 bytes, `counts`
+/// its order-0 counts.
 #[allow(clippy::indexing_slicing, reason = "u8s and u16s index 256- and 65536-entry tables")]
 #[allow(clippy::arithmetic_side_effects, reason = "j·chunk ≤ len; n ≥ 1")]
-pub(super) fn encode_order_1(data: &[u8], n: usize, level: Level) -> Option<Vec<u8>> {
+pub(super) fn encode_order_1(
+    data: &[u8],
+    counts: &[u32; 256],
+    n: usize,
+    level: Level,
+) -> Option<Vec<u8>> {
     let chunk = data.len() / n;
     with_scratch(&ORDER_1, |o1| {
-        let (shift, table) = order_1_tables(o1, data, n)?;
+        let (shift, table) = order_1_tables(o1, data, counts, n)?;
         let enc_table: &[Enc; 1 << 16] = o1.enc.as_slice().try_into().ok()?;
         let mut out = order_1_header(shift, &table, Coder::Simd(level))?;
         let mut states = [LOWER_BOUND; 32];
@@ -410,7 +416,12 @@ const GATHERED: usize = 32;
               shift ≥ log2 of a row total; a row's starts sum to its total ≤ 4096"
 )]
 #[allow(clippy::cast_possible_truncation, reason = "an index into a 256-symbol alphabet")]
-fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32, Vec<u8>)> {
+fn order_1_tables(
+    o1: &mut Order1Scratch,
+    data: &[u8],
+    counts: &[u32; 256],
+    n: usize,
+) -> Option<(u32, Vec<u8>)> {
     if o1.dirty {
         for c in &mut o1.counts {
             c.fill(0);
@@ -418,11 +429,8 @@ fn order_1_tables(o1: &mut Order1Scratch, data: &[u8], n: usize) -> Option<(u32,
     }
     o1.dirty = true;
     let [c0, c1, c2, c3] = &mut o1.counts;
-    let mut alphabet = [false; 256];
+    let mut alphabet = counts.map(|c| c > 0);
     alphabet[0] = true;
-    for &b in data {
-        alphabet[usize::from(b)] = true;
-    }
     // The alphabet in order, and each symbol's place in it (0 is first).
     let syms: Vec<usize> = (0..256).filter(|&s| alphabet[s]).collect();
     let mut index = [0u8; 256];

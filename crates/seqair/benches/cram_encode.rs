@@ -8,7 +8,7 @@
 use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair::cram::rans_nx16::decode;
-use seqair::cram::writer::rans_nx16_encode;
+use seqair::cram::writer::{rans_nx16_encode, rans_nx16_encode_methods};
 use seqair_types::Pos0;
 use std::hint::black_box;
 
@@ -95,6 +95,11 @@ fn rans_nx16_encode_bench(c: &mut Criterion) {
                 });
             });
         }
+        // The same, with the work the combinations share done once, as the
+        // writer's block does.
+        group.bench_function(BenchmarkId::new("shared", "profile"), |b| {
+            b.iter(|| rans_nx16_encode_methods(black_box(data), &profile).unwrap());
+        });
         group.bench_function(BenchmarkId::new("htscodecs", "profile"), |b| {
             b.iter(|| {
                 profile.map(|m| {
