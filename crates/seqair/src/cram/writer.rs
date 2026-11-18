@@ -83,6 +83,7 @@
 mod container;
 mod header;
 mod mates;
+mod metrics;
 mod pool;
 mod rans;
 mod rans_nx16;
@@ -91,6 +92,7 @@ mod tok3;
 
 use self::container::{Assembled, SliceBuilder, SliceKind};
 use self::header::CramHeader;
+use self::metrics::Metrics;
 use self::pool::{Done, Pool};
 use self::record::{RecordView, Scratch};
 use super::index::{CraiEntry, CramIndex};
@@ -108,6 +110,7 @@ use seqair_types::{BaseQuality, Pos0, SmolStr};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub use self::record::Placement;
@@ -244,6 +247,8 @@ pub struct CramWriter<W: Write> {
     slice: SliceBuilder,
     last: Option<Placement>,
     record_counter: u64,
+    /// Data containers so far.
+    slices: u64,
     index: Option<Vec<CraiEntry>>,
     codecs: container::Codecs,
     /// Compression workers, with `compression_threads`.
@@ -266,7 +271,9 @@ impl<W: Write> CramWriter<W> {
     ) -> Result<Self, CramWriteError> {
         let header = CramHeader::new(header, &mut fasta)?;
         let mut out = Counting { inner, written: 0 };
-        let mut codecs = container::Codecs::new(options.level, options.version);
+        let metrics = Arc::new(Metrics::new(options.exhaustive_codec_search));
+        let mut codecs =
+            container::Codecs::new(options.level, options.version, Arc::clone(&metrics));
         // r[impl cram_writer.file_definition]
         let mut def = Vec::with_capacity(26);
         def.extend_from_slice(b"CRAM\x03");
@@ -285,10 +292,11 @@ impl<W: Write> CramWriter<W> {
             slice: SliceBuilder::default(),
             last: None,
             record_counter: 0,
+            slices: 0,
             index: options.write_index.then(Vec::new),
             codecs,
             pool: (options.threads > 0)
-                .then(|| Pool::new(options.threads, options.level, options.version))
+                .then(|| Pool::new(options.threads, options.level, options.version, &metrics))
                 .transpose()?,
             spare: Vec::new(),
             records_per_slice: options.records_per_slice,
@@ -447,7 +455,8 @@ impl<W: Write> CramWriter<W> {
             SliceKind::Mapped { tid, .. } => self.header.target_len(tid),
             SliceKind::Unplaced => 0,
         };
-        let frame = self.slice.frame(self.record_counter, length, reference);
+        let frame = self.slice.frame(self.slices, self.record_counter, length, reference);
+        self.slices = self.slices.saturating_add(1);
         self.record_counter = self.record_counter.saturating_add(u64::from(self.slice.n_records()));
         match &mut self.pool {
             None => {
@@ -536,6 +545,7 @@ struct Options {
     threads: usize,
     records_per_slice: u32,
     version: CramVersion,
+    exhaustive_codec_search: bool,
 }
 
 // r[impl cram_writer.version]
@@ -601,6 +611,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
                 threads: 0,
                 records_per_slice: container::MAX_RECORDS,
                 version: CramVersion::default(),
+                exhaustive_codec_search: false,
             },
         }
     }
@@ -613,7 +624,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
         self
     }
 
-    // r[impl cram_writer.compression]
+    // r[impl cram_writer.compression+2]
     /// The gzip level blocks are tried at. Defaults to
     /// [`CompressionLevel::Level6`].
     #[must_use]
@@ -622,7 +633,7 @@ impl<'a, T> CramWriterBuilder<'a, T> {
         self
     }
 
-    // r[impl cram_writer.threads]
+    // r[impl cram_writer.threads+2]
     /// Compress containers on `threads` worker threads while the calling
     /// thread encodes the next slice. Defaults to `0`: compress on the
     /// calling thread. The output is the same either way.
@@ -646,6 +657,16 @@ impl<'a, T> CramWriterBuilder<'a, T> {
     #[must_use]
     pub fn records_per_slice(mut self, records: u32) -> Self {
         self.options.records_per_slice = records.max(1);
+        self
+    }
+
+    // r[impl cram_writer.compression.learning]
+    /// Try every codec on every block rather than the ones that did best on
+    /// the trial slices, for tests and measurements.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn exhaustive_codec_search(mut self, exhaustive: bool) -> Self {
+        self.options.exhaustive_codec_search = exhaustive;
         self
     }
 }

@@ -3,11 +3,23 @@
 
 use super::CramWriteError;
 use super::mates::{self, MateRecord};
+use super::metrics::{Method, Metrics, Plan, Trial};
 use super::{CramVersion, rans, rans_nx16, tok3};
 use crate::cram::varint::{write_itf8, write_ltf8};
 use crate::io::CompressionLevel;
 use crate::reader::Tid;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+/// Every entry of [`rans_nx16::normal_profile`].
+const NX16: [Method; 6] = [
+    Method::Nx16(0),
+    Method::Nx16(1),
+    Method::Nx16(2),
+    Method::Nx16(3),
+    Method::Nx16(4),
+    Method::Nx16(5),
+];
 
 /// The data series, in the order a record's decode first reads them. Each is
 /// stored `EXTERNAL` in a block of its own, whose content id is its index
@@ -384,6 +396,7 @@ impl SliceBuilder {
     /// bases) over its extent when it is stored against them.
     pub(super) fn frame(
         &self,
+        slice_index: u64,
         record_counter: u64,
         length: u64,
         reference: Option<&[u8]>,
@@ -397,7 +410,7 @@ impl SliceBuilder {
             }
             _ => [0; 16],
         };
-        Frame { record_counter, length, md5 }
+        Frame { slice_index, record_counter, length, md5 }
     }
 
     // r[impl cram_writer.container_header]
@@ -409,7 +422,11 @@ impl SliceBuilder {
         frame: &Frame,
         codecs: &mut Codecs,
     ) -> Result<Assembled, CramWriteError> {
-        let &Frame { record_counter, length, md5 } = frame;
+        let &Frame { slice_index, record_counter, length, md5 } = frame;
+        // First, so a trial slice that fails anywhere still releases the
+        // slices waiting on it.
+        let mut trial =
+            TrialGuard { metrics: Arc::clone(&codecs.metrics), slice_index, trials: Vec::new() };
         let kind = self.kind.unwrap_or(SliceKind::Unplaced);
         let (start, span) = self.extent(length);
         let ref_id = match kind {
@@ -451,11 +468,22 @@ impl SliceBuilder {
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
             .collect();
         let mut external = Vec::new();
+        let plan = codecs.metrics.plan(slice_index);
         for &(id, data) in &blocks {
             let content =
                 if id == Series::Rn.content_id() { Content::Names } else { Content::Data };
-            codecs.block(&mut external, 4, id, data, content)?;
+            let tried = match &plan {
+                Plan::Trial => Tried::Record(&mut trial.trials),
+                Plan::Learned(choices) => {
+                    match choices.get(&id).and_then(|c| c.methods(data.len())) {
+                        Some(methods) => Tried::Only(methods),
+                        None => Tried::All,
+                    }
+                }
+            };
+            codecs.block(&mut external, 4, id, data, content, tried)?;
         }
+        drop(trial);
         let n_external = blocks.len();
 
         let mut compression_header = Vec::new();
@@ -593,6 +621,8 @@ pub(super) const SUBSTITUTION_MATRIX_BYTE: u8 = 0x1B;
 
 /// What assembling a slice needs from the writer.
 pub(super) struct Frame {
+    /// The data container's index in the file, from 0.
+    slice_index: u64,
     record_counter: u64,
     length: u64,
     md5: [u8; 16],
@@ -629,6 +659,33 @@ pub(super) struct Codecs {
     version: CramVersion,
     gzip: libdeflater::Compressor,
     scratch: Vec<u8>,
+    metrics: Arc<Metrics>,
+}
+
+/// Which methods [`Codecs::block`] tries.
+pub(super) enum Tried<'a> {
+    /// Every one, recording their sizes.
+    Record(&'a mut Vec<Trial>),
+    /// Every one.
+    All,
+    /// The learned ones (raw always).
+    Only([Option<Method>; 2]),
+}
+
+/// Records a trial slice's sizes when it is dropped, so a slice that fails
+/// or panics part way still releases the slices that wait for it.
+struct TrialGuard {
+    metrics: Arc<Metrics>,
+    slice_index: u64,
+    trials: Vec<Trial>,
+}
+
+impl Drop for TrialGuard {
+    fn drop(&mut self) {
+        if self.metrics.is_trial(self.slice_index) {
+            self.metrics.record(self.slice_index, std::mem::take(&mut self.trials));
+        }
+    }
 }
 
 /// Blocks shorter than this are stored raw: no codec's header pays for
@@ -636,16 +693,56 @@ pub(super) struct Codecs {
 const MIN_COMPRESSED: usize = 32;
 
 impl Codecs {
-    pub(super) fn new(level: CompressionLevel, version: CramVersion) -> Self {
+    pub(super) fn new(
+        level: CompressionLevel,
+        version: CramVersion,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let gzip_level = libdeflater::CompressionLvl::new(i32::from(level.get()))
             .unwrap_or_else(|_| libdeflater::CompressionLvl::default());
-        Self { level, version, gzip: libdeflater::Compressor::new(gzip_level), scratch: Vec::new() }
+        Self {
+            level,
+            version,
+            gzip: libdeflater::Compressor::new(gzip_level),
+            scratch: Vec::new(),
+            metrics,
+        }
     }
 
-    // r[impl cram_writer.compression]
-    /// Append a block of `data`, stored by whichever codec gives the fewest
-    /// bytes: gzip, and rANS 4×8 (CRAM 3.0) or rANS Nx16 with htslib's
-    /// normal profile and, for names, the name tokeniser (CRAM 3.1).
+    /// Every method the version has for `content`.
+    fn methods(&self, content: Content) -> impl Iterator<Item = Method> + use<> {
+        let (rans, tok3): (&[Method], bool) = match (content, self.version) {
+            (Content::Header, _) => (&[], false),
+            (_, CramVersion::V3_0) => (&[Method::Rans4x8Order0, Method::Rans4x8Order1], false),
+            (_, CramVersion::V3_1) => (&NX16, content == Content::Names),
+        };
+        std::iter::once(Method::Gzip)
+            .chain(rans.iter().copied())
+            .chain(tok3.then_some(Method::Tok3))
+    }
+
+    /// `data` stored by `method`, or `None` where it does not apply.
+    fn encode(&mut self, method: Method, data: &[u8]) -> Option<(u8, Vec<u8>)> {
+        match method {
+            Method::Raw => None,
+            Method::Gzip => {
+                self.scratch.resize(self.gzip.gzip_compress_bound(data.len()), 0);
+                let n = self.gzip.gzip_compress(data, &mut self.scratch).ok()?;
+                Some((1, self.scratch.get(..n)?.to_vec()))
+            }
+            Method::Rans4x8Order0 => Some((4, rans::encode(data, rans::Order::Zero)?)),
+            Method::Rans4x8Order1 => Some((4, rans::encode(data, rans::Order::One)?)),
+            Method::Nx16(i) => {
+                let flags = *rans_nx16::normal_profile(data.len()).get(usize::from(i))?;
+                Some((5, rans_nx16::encode(data, flags)?))
+            }
+            Method::Tok3 => Some((8, tok3::encode(data)?)),
+        }
+    }
+
+    // r[impl cram_writer.compression+2]
+    /// Append a block of `data`, stored by whichever of the methods `tried`
+    /// names gives the fewest bytes, raw included.
     fn block(
         &mut self,
         out: &mut Vec<u8>,
@@ -653,41 +750,34 @@ impl Codecs {
         content_id: i32,
         data: &[u8],
         content: Content,
+        tried: Tried<'_>,
     ) -> Result<(), CramWriteError> {
         if data.len() < MIN_COMPRESSED || self.level == CompressionLevel::Level0 {
             return Self::raw_block(out, content_type, content_id, data);
         }
         let mut best: Option<(u8, Vec<u8>)> = None;
-        let mut consider = |method: u8, bytes: Vec<u8>| {
-            if bytes.len() < best.as_ref().map_or(data.len(), |(_, b)| b.len()) {
-                best = Some((method, bytes));
-            }
+        let mut sizes = Vec::new();
+        let methods: Vec<Method> = match tried {
+            Tried::Only(methods) => methods.into_iter().flatten().collect(),
+            Tried::All | Tried::Record(_) => self.methods(content).collect(),
         };
-        self.scratch.resize(self.gzip.gzip_compress_bound(data.len()), 0);
-        if let Ok(n) = self.gzip.gzip_compress(data, &mut self.scratch) {
-            consider(1, self.scratch.get(..n).unwrap_or_default().to_vec());
+        let mut declined = true;
+        for method in methods {
+            let Some((id, bytes)) = self.encode(method, data) else { continue };
+            declined = false;
+            sizes.push((method, bytes.len()));
+            if bytes.len() < best.as_ref().map_or(data.len(), |(_, b)| b.len()) {
+                best = Some((id, bytes));
+            }
         }
-        match (content, self.version) {
-            (Content::Header, _) => {}
-            (_, CramVersion::V3_0) => {
-                for order in [rans::Order::Zero, rans::Order::One] {
-                    if let Some(bytes) = rans::encode(data, order) {
-                        consider(4, bytes);
-                    }
-                }
-            }
-            (_, CramVersion::V3_1) => {
-                for flags in rans_nx16::normal_profile(data.len()) {
-                    if let Some(bytes) = rans_nx16::encode(data, flags) {
-                        consider(5, bytes);
-                    }
-                }
-                if content == Content::Names
-                    && let Some(bytes) = tok3::encode(data)
-                {
-                    consider(8, bytes);
-                }
-            }
+        if declined && matches!(tried, Tried::Only([Some(m), _]) if m != Method::Raw) {
+            // The learned methods did not apply to this block (as htslib,
+            // which redoes the trial): try them all.
+            return self.block(out, content_type, content_id, data, content, Tried::All);
+        }
+        if let Tried::Record(trials) = tried {
+            sizes.push((Method::Raw, data.len()));
+            trials.push(Trial { content_id, len: data.len(), sizes });
         }
         match best {
             Some((method, bytes)) => {
@@ -733,7 +823,7 @@ pub(super) fn header_container(text: &str, codecs: &mut Codecs) -> Result<Vec<u8
     data.extend_from_slice(&len_i32("header text", text.len())?.to_le_bytes());
     data.extend_from_slice(text.as_bytes());
     let mut block = Vec::new();
-    codecs.block(&mut block, 0, 0, &data, Content::Header)?;
+    codecs.block(&mut block, 0, 0, &data, Content::Header, Tried::All)?;
 
     let mut bytes = Vec::with_capacity(block.len().saturating_add(32));
     bytes.extend_from_slice(&len_i32("container length", block.len())?.to_le_bytes());
