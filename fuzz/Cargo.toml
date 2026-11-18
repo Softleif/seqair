@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustc-hash = "2.1.1"
+tempfile = "3.27.0"
 
 [lib]
 name = "seqair_fuzz"
@@ -249,3 +250,16 @@ doc = false
 
 [dev-dependencies]
 flate2 = "1"
+
+# Drawn reads -> CRAM writer -> CRAM stream reader: every record reads back
+# as written (under the documented normalizations), and twice is a fixpoint
+[[bin]]
+name = "fuzz_cram_write_roundtrip"
+path = "fuzz_targets/fuzz_cram_write_roundtrip.rs"
+doc = false
+
+# Arbitrary BAM bytes -> streamed records -> CRAM writer -> reader -> SAM
+[[bin]]
+name = "fuzz_bam_to_cram"
+path = "fuzz_targets/fuzz_bam_to_cram.rs"
+doc = false

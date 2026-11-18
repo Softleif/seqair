@@ -52,6 +52,8 @@ to catch — several entries in [Bugs found](#bugs-found) were OOMs.
 | `fuzz_bgzf`       | BGZF block decompression                       | BGZF blocks      |
 | `fuzz_bgzf_stream` | `BgzfStream`: serial and threaded inflation agree, poison after error | BGZF streams |
 | `fuzz_bam_stream` | `BamStreamReader` → `RawBamRecord` accessors → `write_raw` round trip | small BAMs (htslib test SAMs) |
+| `fuzz_bam_to_cram` | `BamStreamReader` → `CramWriter::write_raw` → `CramStreamReader` → SAM; every record reads back as written (`r[cram_writer.fidelity]`), a second write is a fixed point | a small BAM |
+| `fuzz_cram_write_roundtrip` | drawn reads against a drawn reference → `CramWriter` (threads, small slices, a contig the FASTA lacks) → `CramStreamReader`; same checks | none (structured) |
 | `fuzz_sam_header` | `BamHeader::from_sam_text`                     | SAM header lines |
 
 ### CRAM parsers

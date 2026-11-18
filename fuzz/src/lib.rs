@@ -1,5 +1,6 @@
 //! Shared types for fuzz targets and seed generation.
 
+pub mod cram_roundtrip;
 pub mod indexed_reader;
 
 use seqair::bam::header::BamHeader;
