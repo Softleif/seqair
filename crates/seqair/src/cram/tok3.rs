@@ -9,7 +9,7 @@
 //! arena, so a later name's MATCH copies those bytes and DELTA adds to that
 //! value. `docs/spec/2-cram-1-reader.md` has the rules, including where they
 //! differ from the pseudocode and from htscodecs; the production decoder
-//! must agree with [`super::tok3_reference`] on every input.
+//! must agree with `super::tok3_reference` (test and fuzz builds only) on every input.
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
 // `drop_in_place<CramError>` off the per-record path.
