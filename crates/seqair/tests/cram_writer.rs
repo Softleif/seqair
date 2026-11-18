@@ -301,7 +301,9 @@ fn read(tc: &TestCase, refs: Vec<Vec<u8>>, n: usize) -> Line {
         let n = tc.draw(gs::integers::<usize>().max_value(40));
         let seq: Vec<u8> = (0..n).map(|_| rng.pick(b"ACGTNACGTRYKM")).collect();
         if tc.draw(gs::booleans()) {
-            (CONTIGS[contig].0.to_string(), pos + 1, 0, "*".to_string(), seq, (contig, pos))
+            // Some aligners give unmapped reads a MAPQ, which CRAM drops.
+            let mapq = tc.draw(gs::sampled_from(vec![0, 0, 37]));
+            (CONTIGS[contig].0.to_string(), pos + 1, mapq, "*".to_string(), seq, (contig, pos))
         } else {
             let pos1 = tc.draw(gs::sampled_from(vec![0, 1, 1, 17]));
             ("*".to_string(), pos1, 0, "*".to_string(), seq, (usize::MAX, 0))
