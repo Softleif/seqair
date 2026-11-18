@@ -30,5 +30,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let dir = tempfile::tempdir().unwrap();
     let fasta = cram_roundtrip::write_fasta(dir.path(), &contigs);
-    cram_roundtrip::check(&header, &fasta, &records, 0, 10_000, CramVersion::V3_1(CramProfile::Normal));
+    cram_roundtrip::check(
+        &header,
+        &fasta,
+        &records,
+        0,
+        10_000,
+        CramVersion::V3_1(CramProfile::Normal),
+    );
 });

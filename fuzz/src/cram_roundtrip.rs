@@ -3,9 +3,9 @@
 //! normalizations `r[cram_writer.fidelity]` lists. Shared by the CRAM
 //! write fuzz targets.
 
+use seqair::bam::RawBamRecord;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
-use seqair::bam::RawBamRecord;
 use seqair::cram::stream::CramStreamReader;
 use seqair::cram::writer::{CramVersion, CramWriteError, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
