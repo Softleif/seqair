@@ -2,6 +2,7 @@
 //! frames them: compression header, slice header, blocks.
 
 use super::CramWriteError;
+use super::embed::Held;
 use super::fqzcomp::QualRecord;
 use super::mates::{self, MateRecord};
 use super::metrics::{Method, Metrics, Plan, Trial};
@@ -269,6 +270,11 @@ pub(super) struct SliceBuilder {
     qs_starts: Vec<usize>,
     tag_lines: Vec<Vec<u8>>,
     line_ids: FxHashMap<Vec<u8>, i32>,
+    /// Records on a reference the FASTA lacks, encoded when the slice is
+    /// complete (`r[cram_writer.embedded_reference]`).
+    held: Vec<Held>,
+    /// The reference the slice embeds; empty for none.
+    embedded: Vec<u8>,
     n_records: u32,
     n_bases: u64,
     /// 1-based position of the first record; 0 for unplaced.
@@ -306,6 +312,29 @@ impl SliceBuilder {
                 || self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()))
                     > MAX_BASES.max(u64::from(max_records).saturating_mul(BASES_PER_RECORD))
         })
+    }
+
+    /// Hold a record of a slice of `kind` to encode when the slice is
+    /// complete; it counts towards the slice's size.
+    pub(super) fn hold(&mut self, kind: SliceKind, record: Held) {
+        self.kind.get_or_insert(kind);
+        self.n_records = self.n_records.saturating_add(1);
+        let read_len = record.checked.read_len;
+        self.n_bases = self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()));
+        self.held.push(record);
+    }
+
+    /// The held records, the slice left empty to encode them into.
+    pub(super) fn take_held(&mut self) -> Vec<Held> {
+        self.kind = None;
+        self.n_records = 0;
+        self.n_bases = 0;
+        std::mem::take(&mut self.held)
+    }
+
+    /// Embed `bases`, the reference the slice's records are stored against.
+    pub(super) fn embed(&mut self, bases: Vec<u8>) {
+        self.embedded = bases;
     }
 
     /// Start a record at 1-based `pos1` (0 unplaced) in a slice of `kind`.
@@ -426,6 +455,8 @@ impl SliceBuilder {
             qs_starts,
             tag_lines,
             line_ids,
+            held,
+            embedded,
             n_records,
             n_bases,
             start,
@@ -439,6 +470,8 @@ impl SliceBuilder {
         qs_starts.clear();
         tag_lines.clear();
         line_ids.clear();
+        held.clear();
+        embedded.clear();
         *n_records = 0;
         *n_bases = 0;
         *start = 0;
@@ -469,6 +502,13 @@ impl SliceBuilder {
         reference: Option<&[u8]>,
     ) -> Frame {
         let md5 = match (self.kind, reference) {
+            _ if !self.embedded.is_empty() => {
+                debug_assert_eq!(
+                    i64::try_from(self.embedded.len()).ok(),
+                    Some(self.extent(length).1)
+                );
+                *md5::compute(&self.embedded)
+            }
             (Some(SliceKind::Mapped { reference: true, .. }), Some(bases)) => {
                 let (start, span) = self.extent(length);
                 let from = usize::try_from(start.saturating_sub(1)).unwrap_or(usize::MAX);
@@ -541,6 +581,10 @@ impl SliceBuilder {
             .filter(|((_, data), constant)| constant.is_none() && !data.is_empty())
             .map(|(&(series, data), _)| (series.content_id(), data))
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
+            .chain(
+                (!self.embedded.is_empty())
+                    .then_some((EMBEDDED_REFERENCE, self.embedded.as_slice())),
+            )
             .collect();
         let quals = if codecs.version == CramVersion::V3_1(CramProfile::Archive) {
             self.qual_records()
@@ -594,7 +638,10 @@ impl SliceBuilder {
         for &(id, _) in &blocks {
             write_itf8(&mut slice_header, id);
         }
-        write_itf8(&mut slice_header, -1);
+        write_itf8(
+            &mut slice_header,
+            if self.embedded.is_empty() { -1 } else { EMBEDDED_REFERENCE },
+        );
         slice_header.extend_from_slice(&md5);
 
         let mut slice = Vec::new();
@@ -710,6 +757,10 @@ impl SliceBuilder {
         out
     }
 }
+
+/// The content id of an embedded reference's block: no series' (1 to
+/// [`SERIES`]' length) and no tag's (from `A` shifted 16 bits up).
+const EMBEDDED_REFERENCE: i32 = 0x100;
 
 /// The size of a fixed-size tag type's value.
 fn fixed_size(ty: u8) -> i32 {

@@ -82,6 +82,7 @@
 
 mod arith;
 mod container;
+mod embed;
 mod fqzcomp;
 mod header;
 mod mates;
@@ -96,7 +97,7 @@ use self::container::{Assembled, SliceBuilder, SliceKind};
 use self::header::CramHeader;
 use self::metrics::Metrics;
 use self::pool::{Done, Pool};
-use self::record::{RecordView, Scratch};
+use self::record::{RecordView, Scratch, SliceRef};
 use super::index::{CraiEntry, CramIndex};
 use crate::bam::aux::AuxTag;
 use crate::bam::header::BamHeader;
@@ -237,7 +238,7 @@ impl<W: Write> Counting<W> {
     }
 }
 
-// r[impl cram_writer.scope]
+// r[impl cram_writer.scope+2]
 /// CRAM 3.1 (or 3.0) writer. Build with [`CramWriterBuilder`], write coordinate-sorted
 /// records, then [`finish`](Self::finish).
 pub struct CramWriter<W: Write> {
@@ -401,26 +402,17 @@ impl<W: Write> CramWriter<W> {
         if self.slice.ends_before(kind, checked.read_len, self.records_per_slice) {
             self.flush_slice().inspect_err(|_| self.poisoned = true)?;
         }
-        if let SliceKind::Mapped { tid, reference: true } = kind {
-            self.load_reference(tid)?;
-        }
-        let reference = match kind {
-            SliceKind::Mapped { reference: true, .. } => {
-                self.reference.as_ref().map(|(_, bases)| bases.as_slice())
+        let (drops_alignment, placement) = (checked.drops_alignment, checked.placement);
+        match kind {
+            // r[impl cram_writer.embedded_reference]
+            // Encoded with the slice, once its reference can be built.
+            SliceKind::Mapped { reference: false, .. } => {
+                self.slice.hold(kind, embed::Held::new(view, checked));
             }
-            _ => None,
-        };
-        record::encode(
-            &mut self.slice,
-            kind,
-            view,
-            &checked,
-            reference,
-            &self.header,
-            &mut self.scratch,
-        );
-        self.last = Some(checked.placement);
-        if checked.drops_alignment && !self.warned_unmapped_alignment {
+            _ => self.encode(kind, view, &checked)?,
+        }
+        self.last = Some(placement);
+        if drops_alignment && !self.warned_unmapped_alignment {
             self.warned_unmapped_alignment = true;
             tracing::warn!(
                 qname = std::str::from_utf8(view.qname).unwrap_or("<not UTF-8>"),
@@ -429,6 +421,59 @@ impl<W: Write> CramWriter<W> {
             );
         }
         Ok(())
+    }
+
+    /// Encode a record into the slice, against the FASTA's reference where
+    /// the slice is stored against it.
+    fn encode(
+        &mut self,
+        kind: SliceKind,
+        view: &RecordView<'_>,
+        checked: &record::Checked,
+    ) -> Result<(), CramWriteError> {
+        if let SliceKind::Mapped { tid, reference: true } = kind {
+            self.load_reference(tid)?;
+        }
+        let reference = match kind {
+            SliceKind::Mapped { reference: true, .. } => {
+                self.reference.as_ref().map(|(_, bases)| SliceRef::fasta(bases))
+            }
+            _ => None,
+        };
+        record::encode(
+            &mut self.slice,
+            kind,
+            view,
+            checked,
+            reference,
+            &self.header,
+            &mut self.scratch,
+        );
+        Ok(())
+    }
+
+    /// Encode the held records of a slice on a reference the FASTA lacks,
+    /// against a reference built from them where one can be.
+    fn encode_held(&mut self, tid: Tid) {
+        let held = self.slice.take_held();
+        let (start, end) = embed::extent(&held, self.header.target_len(tid));
+        let embedded = embed::consensus(&held, start, end);
+        let kind = SliceKind::Mapped { tid, reference: false };
+        let reference = embedded.as_deref().map(|bases| SliceRef { bases, start, embedded: true });
+        for h in &held {
+            record::encode(
+                &mut self.slice,
+                kind,
+                &h.view(),
+                &h.checked,
+                reference,
+                &self.header,
+                &mut self.scratch,
+            );
+        }
+        if let Some(bases) = embedded {
+            self.slice.embed(bases);
+        }
     }
 
     /// Make `self.reference` the bases of `tid`, checking them against the
@@ -453,6 +498,9 @@ impl<W: Write> CramWriter<W> {
     /// whatever containers have come back.
     fn flush_slice(&mut self) -> Result<(), CramWriteError> {
         let Some(kind) = self.slice.kind() else { return Ok(()) };
+        if let SliceKind::Mapped { tid, reference: false } = kind {
+            self.encode_held(tid);
+        }
         let reference = match kind {
             SliceKind::Mapped { tid, reference: true } => self
                 .reference
