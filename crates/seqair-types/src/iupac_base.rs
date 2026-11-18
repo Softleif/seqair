@@ -281,7 +281,8 @@ fn ascii_prefix_len_at(level: Level, bases: &[IupacBase], ascii: &[u8]) -> usize
 }
 
 /// The leading positions where `ASCII[code] == byte`. Whole vectors compare
-/// at once; the first unequal lane is the lowest clear bit of the mask.
+/// at once, the first unequal lane the lowest set bit of the inverted mask;
+/// a ragged tail is one more vector, overlapping.
 #[simd]
 #[allow(
     clippy::chunks_exact_to_as_chunks,
@@ -303,9 +304,22 @@ fn ascii_prefix<S: Simd>(simd: S, codes: &[u8], ascii: &[u8]) -> usize {
         }
         done = done.saturating_add(n);
     }
-    let tail =
-        codes.get(done..).unwrap_or_default().iter().zip(ascii.get(done..).unwrap_or_default());
-    done.saturating_add(tail.take_while(|&(&c, &a)| table.scalar(c) == a).count())
+    if done == len {
+        return len;
+    }
+    // A ragged tail: the last whole vector again, overlapping positions
+    // already known equal; shorter than a vector, scalar.
+    if let Some(last) = len.checked_sub(n) {
+        let (c, a) = (codes.get(last..).unwrap_or_default(), ascii.get(last..).unwrap_or_default());
+        let letters = table.vector(simd, S::u8s::from_slice(simd, c));
+        let unequal = !letters.simd_eq(S::u8s::from_slice(simd, a)).to_bitmask() & lanes;
+        return if unequal == 0 {
+            len
+        } else {
+            last.saturating_add(unequal.trailing_zeros() as usize)
+        };
+    }
+    codes.iter().zip(ascii).take_while(|&(&c, &a)| table.scalar(c) == a).count()
 }
 
 // r[impl io.simd_portable]
@@ -802,6 +816,7 @@ mod tests {
     /// lower case, or any byte), cut to a drawn length: the prefix ends at
     /// the change at every level, as the scalar loop finds it.
     #[hegel::test]
+    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, reason = "test code")]
     fn ascii_prefix_finds_the_first_mismatch_at_every_level(tc: TestCase) {
         let bases = any_bases(&tc);
         let mut ascii = IupacBase::to_ascii_slice(&bases);
