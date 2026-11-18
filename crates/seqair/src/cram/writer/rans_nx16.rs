@@ -258,10 +258,22 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
         flags.pack.then_some(Nx16Flags { order: Order::Zero, pack: true, ..plain }),
         Some(Nx16Flags { order: Order::Zero, ..plain }),
     ];
+    // Byte `i` to part `i % 4`, in one pass over sized parts (pushing a
+    // byte at a time cost more than the four passes it replaced).
+    let (quads, tail) = data.as_chunks::<STRIPES>();
+    let mut split: [Vec<u8>; STRIPES] = std::array::from_fn(|_| vec![0; quads.len()]);
+    let [p0, p1, p2, p3] = &mut split;
+    for ((((&[a, b, c, d], a0), b0), c0), d0) in
+        quads.iter().zip(p0.iter_mut()).zip(p1.iter_mut()).zip(p2.iter_mut()).zip(p3.iter_mut())
+    {
+        (*a0, *b0, *c0, *d0) = (a, b, c, d);
+    }
+    for (part, &b) in split.iter_mut().zip(tail) {
+        part.push(b);
+    }
     let mut parts = Vec::with_capacity(STRIPES);
-    for j in 0..STRIPES {
-        let part: Vec<u8> = data.iter().skip(j).step_by(STRIPES).copied().collect();
-        let part = Prepared::new(&part);
+    for part in &split {
+        let part = Prepared::new(part);
         let mut best: Option<Vec<u8>> = None;
         for f in candidates.iter().flatten() {
             let coded = encode_stream(&part, *f, false, coder)?;
