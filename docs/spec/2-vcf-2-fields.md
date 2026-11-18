@@ -51,8 +51,8 @@ A component that indexes its bytes (`Info`, the sample components) MUST build th
 
 ## Components
 
-r[vcf_fields.locus]
-`Locus` MUST hold the record's `ContigId`, its start and its inclusive end, and be `Copy`. Start and end are `VcfPos`, an enum of `Telomere` (VCF POS 0, BCF POS −1) and `At(Pos1)`; POS N+1, the other telomere, is an ordinary `At`. `Locus` needs no section beyond the fixed fields.
+r[vcf_fields.locus+2]
+`Locus` MUST hold the record's `ContigId`, its start and its inclusive end, and be `Clone + Eq + Hash`, cheap to clone (a contig name is a `SmolStr`). Start and end are `VcfPos`, an enum of `Telomere` (VCF POS 0, BCF POS −1) and `At(Pos1)`; POS N+1, the other telomere, is an ordinary `At`. `Locus` needs no section beyond the fixed fields.
 
 r[vcf_fields.site]
 `Site` MUST hold the ID, REF, ALT, QUAL and FILTER columns and expose:
@@ -79,6 +79,11 @@ r[vcf_fields.sample_idx]
 
 r[vcf_fields.full_record]
 `FullRecord` MUST hold every section (`Locus`, `Site`, `Info`, `Samples`) plus the raw record bytes and the `HeaderId`, so a later writer can copy a record unchanged when the output header is the same, and expose each part by reference.
+
+## Reading guide
+
+r[vcf_fields.guide]
+`crates/seqair/src/vcf/reading.md` is the user-facing guide to reading, included as documentation of the public reader module, and every example in it MUST run as a doctest. It is the acceptance target for the API: examples change only when the API is improved, never to fit an implementation. A test MUST fail while any example in it is still marked `ignore`.
 
 ## User types
 
