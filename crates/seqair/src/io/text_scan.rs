@@ -193,7 +193,7 @@ fn scan_block<S: Simd>(
 /// breaks — the sample columns of a VCF line (`\t`), the fields of a sample
 /// (`:`), the elements of a value (`,`).
 // r[impl vcf_reader.text_scan]
-#[expect(dead_code, reason = "used by the VCF reader in a later commit")]
+#[expect(dead_code, reason = "the VCF text reader (next commit)")]
 pub(crate) fn for_each_byte<B, F>(hay: &[u8], needle: u8, f: F) -> ControlFlow<B>
 where
     F: FnMut(usize) -> ControlFlow<B>,
@@ -240,6 +240,69 @@ where
     ControlFlow::Continue(())
 }
 
+/// Calls `f` with the offset of every `outer` or `inner` byte in `hay`, in
+/// order, and whether it is `outer`, until `f` breaks: the sample columns
+/// (`\t`) and their fields (`:`) of a VCF line in one pass.
+// r[impl vcf_reader.text_scan]
+#[expect(dead_code, reason = "the VCF text reader (next commit)")]
+pub(crate) fn for_each_of_two<B, F>(hay: &[u8], outer: u8, inner: u8, f: F) -> ControlFlow<B>
+where
+    F: FnMut(usize, bool) -> ControlFlow<B>,
+{
+    for_each_of_two_at(Level::new(), hay, outer, inner, f)
+}
+
+// r[impl io.simd_portable]
+fn for_each_of_two_at<B, F>(level: Level, hay: &[u8], outer: u8, inner: u8, f: F) -> ControlFlow<B>
+where
+    F: FnMut(usize, bool) -> ControlFlow<B>,
+{
+    dispatch!(level, simd => for_each_of_two_simd(simd, hay, outer, inner, f))
+}
+
+/// One mask of both bytes per vector, walked in order; the `outer` mask
+/// alone says which each set bit is.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+#[allow(clippy::arithmetic_side_effects, reason = "`bits - 1` runs only on a nonzero `bits`")]
+fn for_each_of_two_simd<S: Simd, B, F>(
+    simd: S,
+    hay: &[u8],
+    outer: u8,
+    inner: u8,
+    mut f: F,
+) -> ControlFlow<B>
+where
+    F: FnMut(usize, bool) -> ControlFlow<B>,
+{
+    let mut chunks = hay.chunks_exact(S::u8s::LEN);
+    let mut offset = 0usize;
+    for chunk in &mut chunks {
+        let v = S::u8s::from_slice(simd, chunk);
+        let outers = v.simd_eq(outer);
+        let both = outers | v.simd_eq(inner);
+        if both.any_true() {
+            let outer_bits = outers.to_bitmask();
+            let mut bits = both.to_bitmask();
+            while bits != 0 {
+                let lane = bits.trailing_zeros();
+                f(offset.saturating_add(lane as usize), (outer_bits >> lane) & 1 == 1)?;
+                bits &= bits - 1;
+            }
+        }
+        offset = offset.saturating_add(S::u8s::LEN);
+    }
+    for (i, &b) in chunks.remainder().iter().enumerate() {
+        if b == outer || b == inner {
+            f(offset.saturating_add(i), b == outer)?;
+        }
+    }
+    ControlFlow::Continue(())
+}
+
 /// One `KEY` or `KEY=VALUE` entry of an INFO column, as byte ranges into it.
 /// The first `=` splits key from value; later ones belong to the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +317,7 @@ pub(crate) struct InfoEntry {
 /// included (`""` is one empty entry), so the caller decides what an empty
 /// key or a `.` column means.
 // r[impl vcf_reader.text_scan]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the VCF reader in a later commit"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "the VCF text reader (next commit)"))]
 pub(crate) fn for_each_info_entry<B, F>(info: &[u8], f: F) -> ControlFlow<B>
 where
     F: FnMut(InfoEntry) -> ControlFlow<B>,
@@ -446,6 +509,31 @@ mod tests {
                 assert_eq!(got, expected, "{level:?}");
                 assert_eq!(flow.break_value(), all.get(stop_after).copied(), "{level:?}");
             }
+        }
+    }
+
+    // r[verify vcf_reader.text_scan]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn for_each_of_two_every_level_matches_scalar(tc: TestCase) {
+        let hay = vcf_text(&tc, 400);
+        let stop_after = tc.draw(gs::integers::<usize>().max_value(400));
+        let all: Vec<(usize, bool)> = (0..hay.len())
+            .filter(|&i| hay[i] == b'\t' || hay[i] == b':')
+            .map(|i| (i, hay[i] == b'\t'))
+            .collect();
+        for level in crate::simd_levels::levels() {
+            let mut got = Vec::new();
+            let flow = for_each_of_two_at(level, &hay, b'\t', b':', |pos, outer| {
+                got.push((pos, outer));
+                if got.len() > stop_after {
+                    ControlFlow::Break(pos)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            assert_eq!(got, &all[..all.len().min(stop_after + 1)], "{level:?}");
+            assert_eq!(flow.break_value(), all.get(stop_after).map(|&(p, _)| p), "{level:?}");
         }
     }
 
