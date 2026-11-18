@@ -3,7 +3,9 @@
 
 use super::entries::{FormatIndex, LazyIndex};
 use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
-use super::fields::{Fields, PlanError, ReadOptions, SampleSelection, Sections};
+use super::fields::{
+    Fields, PlanContext, PlanError, ReadOptions, SampleSel, SampleSelection, Sections,
+};
 use super::file::{DataStart, FileShared, Input, VcfFile};
 use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord, parse_pos};
 use super::site::{SiteParts, bcf_info_start};
@@ -12,9 +14,7 @@ use crate::io::text_scan::find_byte;
 use crate::vcf::header::VcfHeader;
 use crate::vcf::record_encoder::ContigId;
 use rayon_core::ThreadPool;
-use seqair_types::SmolStr;
 use std::io::{BufRead, Seek, SeekFrom};
-use std::marker::PhantomData;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -28,25 +28,26 @@ pub const MAX_LINE_BYTES: u64 = 256 << 20;
 
 /// Configures a [`Reader`]; [`open`](Self::open) plans `F` and opens it.
 #[must_use]
-pub struct ReaderBuilder<'f, F> {
+pub struct ReaderBuilder<'f, F: Fields> {
     file: &'f VcfFile,
     workers: Workers,
-    sample: Option<SmolStr>,
-    _f: PhantomData<fn() -> F>,
+    sample: Option<SampleSel>,
+    plan: Option<F::Plan>,
 }
 
-impl<F> std::fmt::Debug for ReaderBuilder<'_, F> {
+impl<F: Fields> std::fmt::Debug for ReaderBuilder<'_, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReaderBuilder")
             .field("workers", &self.workers)
             .field("sample", &self.sample)
+            .field("with_plan", &self.plan.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl<'f, F: Fields> ReaderBuilder<'f, F> {
     pub(crate) fn new(file: &'f VcfFile) -> Self {
-        Self { file, workers: Workers::Inline, sample: None, _f: PhantomData }
+        Self { file, workers: Workers::Inline, sample: None, plan: None }
     }
 
     // r[impl vcf_reader.reader.threads]
@@ -65,9 +66,23 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
         self
     }
 
-    /// The sample a [`Sample`](super::Sample) component reads.
-    pub fn sample(mut self, name: impl Into<SmolStr>) -> Self {
-        self.sample = Some(name.into());
+    // r[impl vcf_fields.sample+2]
+    /// The sample a [`Sample`](super::Sample) component reads (and
+    /// [`PlanContext::selected_sample`](super::PlanContext::selected_sample)
+    /// gives a type of yours): a name, or a `SampleIdx` of the file's header.
+    pub fn sample(mut self, sample: impl Into<SampleSel>) -> Self {
+        self.sample = Some(sample.into());
+        self
+    }
+
+    // r[impl vcf_fields.with_plan]
+    /// Read with `plan` instead of planning `F` against the header: how a
+    /// type of yours takes runtime context (a length band, a region), which
+    /// lives in its `Plan` beside the keys you resolved with
+    /// [`VcfFile::info_key`] and friends. Options the plan would have read
+    /// ([`sample`](Self::sample)) then fail the open as unused.
+    pub fn with_plan(mut self, plan: F::Plan) -> Self {
+        self.plan = Some(plan);
         self
     }
 
@@ -80,7 +95,10 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
     pub fn open(self) -> Result<Reader<F>, VcfReadError> {
         let shared = &self.file.0;
         let opts = ReadOptions::new(self.sample);
-        let plan = F::plan(&shared.header, &opts)?;
+        let plan = match self.plan {
+            Some(plan) => plan,
+            None => F::plan(&PlanContext::new(shared, &opts))?,
+        };
         if let Some(option) = opts.unused() {
             return Err(PlanError::UnusedOption { option }.into());
         }

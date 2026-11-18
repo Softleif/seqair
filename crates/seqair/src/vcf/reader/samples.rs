@@ -6,12 +6,12 @@ use super::access::{DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
 use super::entries::{BcfEntries, FormatIndex, LazyIndex, index_bcf, index_text_format};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
-use super::fields::{Fields, PlanError, ReadOptions, Sections};
+use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
 use super::index::{DictId, Entry};
 use super::info::{check_brand, debug_fields, decode, dyn_decode};
 use super::raw::RawRecord;
-use crate::vcf::header::{FormatDef, SampleIdx, VcfHeader};
+use crate::vcf::header::{FormatDef, SampleIdx};
 use crate::vcf::record_encoder::{FieldId, FormatKey};
 use seqair_types::{SmallVec, SmolStr};
 use std::marker::PhantomData;
@@ -506,8 +506,8 @@ impl OnlySample {
 impl Fields for OnlySample {
     type Plan = SampleIdx;
 
-    fn plan(header: &VcfHeader, _: &ReadOptions) -> Result<SampleIdx, PlanError> {
-        let mut samples = header.sample_indices();
+    fn plan(cx: &PlanContext<'_>) -> Result<SampleIdx, PlanError> {
+        let mut samples = cx.header().sample_indices();
         match (samples.len(), samples.next()) {
             (1, Some(sample)) => Ok(sample),
             (n, _) => Err(PlanError::NotSingleSample { n }),
@@ -529,7 +529,7 @@ impl Fields for OnlySample {
     }
 }
 
-// r[impl vcf_fields.sample]
+// r[impl vcf_fields.sample+2]
 /// The FORMAT values of the sample the reader's builder named with
 /// `.sample(name)` (or of the only sample, if there is one).
 #[derive(Clone)]
@@ -580,18 +580,9 @@ impl Sample {
 impl Fields for Sample {
     type Plan = (SampleIdx, SmolStr);
 
-    fn plan(header: &VcfHeader, opts: &ReadOptions) -> Result<Self::Plan, PlanError> {
-        let sample = match opts.sample() {
-            Some(name) => header.sample(name)?,
-            None => {
-                let mut samples = header.sample_indices();
-                match (samples.len(), samples.next()) {
-                    (1, Some(sample)) => sample,
-                    (n, _) => return Err(PlanError::SampleNotSelected { n }),
-                }
-            }
-        };
-        let name = header.samples().get(sample.index()).cloned().unwrap_or_default();
+    fn plan(cx: &PlanContext<'_>) -> Result<Self::Plan, PlanError> {
+        let sample = cx.selected_sample()?;
+        let name = cx.header().samples().get(sample.index()).cloned().unwrap_or_default();
         Ok((sample, name))
     }
 
@@ -655,7 +646,7 @@ impl Samples {
 impl Fields for Samples {
     type Plan = ();
 
-    fn plan(_: &VcfHeader, _: &ReadOptions) -> Result<(), PlanError> {
+    fn plan(_: &PlanContext<'_>) -> Result<(), PlanError> {
         Ok(())
     }
 

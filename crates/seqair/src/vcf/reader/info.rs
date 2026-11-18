@@ -4,11 +4,11 @@ use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::TypedValue;
 use super::entries::{BcfEntries, LazyIndex, index_bcf, index_text_info};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
-use super::fields::{Fields, PlanError, ReadOptions, Sections};
+use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
 use super::index::{DictId, FieldIndex};
 use super::raw::RawRecord;
-use crate::vcf::header::{InfoDef, ValueType, VcfHeader};
+use crate::vcf::header::{InfoDef, ValueType};
 use crate::vcf::record_encoder::{FieldId, InfoKey};
 use seqair_types::SmolStr;
 use std::sync::Arc;
@@ -234,7 +234,7 @@ impl Info {
 impl Fields for Info {
     type Plan = ();
 
-    fn plan(_: &VcfHeader, _: &ReadOptions) -> Result<(), PlanError> {
+    fn plan(_: &PlanContext<'_>) -> Result<(), PlanError> {
         Ok(())
     }
 

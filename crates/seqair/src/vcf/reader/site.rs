@@ -2,7 +2,7 @@
 
 use super::bcf_value::{BcfValueError, TypedValue, skip_typed_value};
 use super::error::{KeyKind, RecordError, RecordPart, VcfReadError};
-use super::fields::{Fields, PlanError, ReadOptions, Sections};
+use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
 use super::index::DictId;
 use super::raw::{Col, RawRecord, TextCols};
@@ -10,7 +10,6 @@ use super::text_value::parse_f32;
 use crate::vcf::alleles::Alleles;
 use crate::vcf::bcf_encoding::FLOAT_MISSING;
 use crate::vcf::error::AllelesError;
-use crate::vcf::header::VcfHeader;
 use crate::vcf::record_encoder::FilterId;
 use seqair_types::{Base, SmallVec, SmolStr};
 use std::ops::Range;
@@ -583,7 +582,7 @@ impl Site {
 impl Fields for Site {
     type Plan = ();
 
-    fn plan(_: &VcfHeader, _: &ReadOptions) -> Result<(), PlanError> {
+    fn plan(_: &PlanContext<'_>) -> Result<(), PlanError> {
         Ok(())
     }
 

@@ -19,8 +19,8 @@ use seqair::vcf::reader::{
 };
 use seqair::vcf::{
     Allele, DynValue, Fields, FormatGt, FullRecord, Info, InfoFlag, InfoInt, KeyError, Locus,
-    OnlySample, PlanError, RawRecord, ReadOptions, RecordError, Sample, Samples, Sections, Site,
-    VcfFile, VcfHeader, VcfPos, VcfReadError,
+    OnlySample, PlanContext, PlanError, RawRecord, RecordError, Sample, Samples, Sections, Site,
+    VcfFile, VcfPos, VcfReadError,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -471,7 +471,7 @@ fn files_and_readers_cross_threads() {
     send_sync_clone::<FullRecord>();
 }
 
-// r[verify vcf_fields.sample]
+// r[verify vcf_fields.sample+2]
 // r[verify vcf_fields.samples]
 // r[verify vcf_fields.only_sample]
 #[test]
@@ -550,9 +550,9 @@ fn plan_error<F: Fields>(file: &VcfFile, sample: Option<&str>) -> PlanError {
 }
 
 // r[verify vcf_fields.plan]
-// r[verify vcf_fields.unused_options]
+// r[verify vcf_fields.unused_options+2]
 // r[verify vcf_fields.only_sample]
-// r[verify vcf_fields.sample]
+// r[verify vcf_fields.sample+2]
 #[test]
 fn plans_fail_at_open() {
     let panel = VcfFile::open(fixture("panel.bcf")).unwrap();
@@ -577,6 +577,69 @@ fn plans_fail_at_open() {
         plan_error::<BadKey>(&rastair, None),
         PlanError::Key(KeyError::TypeMismatch { .. })
     ));
+    // A sample by handle: this header's reads, another header's is refused.
+    let na12878 = panel.header().sample("NA12878").unwrap();
+    let mut reader = panel.reader::<Sample>().sample(na12878).open().unwrap();
+    assert_eq!(reader.next_record().unwrap().unwrap().name(), "NA12878");
+    let foreign = VcfFile::open(fixture("panel.bcf")).unwrap().header().sample("NA12878").unwrap();
+    assert!(matches!(
+        panel.reader::<Sample>().sample(foreign).open(),
+        Err(VcfReadError::Plan(PlanError::ForeignKey { .. }))
+    ));
+    // A plan given by the caller skips `plan`, so an option is left unused.
+    let plan = (na12878, "NA12878".into());
+    assert!(panel.reader::<Sample>().with_plan(plan.clone()).open().is_ok());
+    assert!(matches!(
+        panel.reader::<Sample>().with_plan(plan).sample("NA12878").open(),
+        Err(VcfReadError::Plan(PlanError::UnusedOption { option: ReadOption::Sample }))
+    ));
+}
+
+/// A user type with runtime context and one sample's FORMAT: its plan is
+/// built by the caller (`with_plan`), or by `plan` through the context.
+#[derive(Clone, Debug)]
+struct Depth(Option<bool>);
+
+struct DepthPlan {
+    sample: seqair::vcf::SampleIdx,
+    gt: FormatGt,
+    min_alt: u16,
+}
+
+impl Fields for Depth {
+    type Plan = DepthPlan;
+    fn plan(cx: &PlanContext<'_>) -> Result<DepthPlan, PlanError> {
+        Ok(DepthPlan { sample: cx.selected_sample()?, gt: cx.format_key("GT")?, min_alt: 1 })
+    }
+    fn needs(plan: &DepthPlan) -> Sections {
+        Sections::sample(plan.sample)
+    }
+    fn new(plan: &DepthPlan, raw: RawRecord<'_>) -> Result<Self, VcfReadError> {
+        let gt = raw.sample(plan.sample)?.get(&plan.gt)?;
+        Ok(Self(gt.map(|gt| gt.alleles().any(|a| a.allele >= Some(plan.min_alt)))))
+    }
+}
+
+// r[verify vcf_fields.plan_context]
+// r[verify vcf_fields.with_plan]
+#[test]
+fn a_user_type_plans_with_the_context_or_takes_a_plan() {
+    let panel = VcfFile::open(fixture("panel.bcf")).unwrap();
+    assert_eq!(plan_error::<Depth>(&panel, None), PlanError::SampleNotSelected { n: 4 });
+    let read = |reader: seqair::vcf::Reader<Depth>| -> Vec<Option<bool>> {
+        reader.into_iter().map(|d| d.unwrap().0).collect()
+    };
+    let planned = read(panel.reader::<Depth>().sample("NA12878").open().unwrap());
+    let sample = panel.header().sample("NA12878").unwrap();
+    let gt = panel.format_key("GT").unwrap();
+    let given =
+        read(panel.reader().with_plan(DepthPlan { sample, gt, min_alt: 1 }).open().unwrap());
+    assert_eq!(planned, given);
+    assert!(planned.contains(&Some(true)));
+    let gt = panel.format_key("GT").unwrap();
+    let strict =
+        read(panel.reader().with_plan(DepthPlan { sample, gt, min_alt: 100 }).open().unwrap());
+    assert!(strict.iter().all(|d| *d != Some(true)), "runtime context reaches `new`");
 }
 
 #[derive(Clone, Debug)]
@@ -584,8 +647,8 @@ struct BadKey;
 
 impl Fields for BadKey {
     type Plan = InfoInt;
-    fn plan(header: &VcfHeader, _: &ReadOptions) -> Result<InfoInt, PlanError> {
-        Ok(header.info_key("BQ")?) // declared Float
+    fn plan(cx: &PlanContext<'_>) -> Result<InfoInt, PlanError> {
+        Ok(cx.info_key("BQ")?) // declared Float
     }
     fn needs(_: &InfoInt) -> Sections {
         Sections::INFO
@@ -632,8 +695,8 @@ struct Truth(Option<(VcfPos, u8, u8, bool)>);
 
 impl Fields for Truth {
     type Plan = InfoFlag;
-    fn plan(header: &VcfHeader, _: &ReadOptions) -> Result<InfoFlag, PlanError> {
-        Ok(header.info_key("CPG")?)
+    fn plan(cx: &PlanContext<'_>) -> Result<InfoFlag, PlanError> {
+        Ok(cx.info_key("CPG")?)
     }
     fn needs(_: &InfoFlag) -> Sections {
         Sections::SITE | Sections::INFO
@@ -652,8 +715,8 @@ impl Fields for Truth {
     }
 }
 
-// r[verify vcf_fields.trait+2]
-// r[verify vcf_fields.user_types]
+// r[verify vcf_fields.trait+3]
+// r[verify vcf_fields.user_types+2]
 // r[verify vcf_fields.sections]
 #[test]
 fn a_user_type_reads_through_raw_records() {
@@ -668,7 +731,7 @@ fn a_user_type_reads_through_raw_records() {
     struct Sneaky;
     impl Fields for Sneaky {
         type Plan = ();
-        fn plan(_: &VcfHeader, _: &ReadOptions) -> Result<(), PlanError> {
+        fn plan(_: &PlanContext<'_>) -> Result<(), PlanError> {
             Ok(())
         }
         fn needs(_: &()) -> Sections {
@@ -1163,7 +1226,7 @@ fn text_genotype_phase_follows_the_header_version() {
 }
 
 // r[verify vcf_fields.sections]
-// r[verify vcf_fields.sample]
+// r[verify vcf_fields.sample+2]
 /// `Sample` reads its column and no further: a malformed later column does
 /// not fail it, while `Samples` reads (and refuses) them all.
 #[test]

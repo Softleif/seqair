@@ -1,9 +1,9 @@
 //! [`Locus`]: where a record is (`r[vcf_fields.locus+3]`).
 
 use super::error::{RecordError, VcfReadError};
-use super::fields::{Fields, PlanError, ReadOptions, Sections};
+use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::raw::RawRecord;
-use crate::vcf::header::{HeaderId, VcfHeader};
+use crate::vcf::header::HeaderId;
 use crate::vcf::record_encoder::ContigId;
 use seqair_types::{Pos0, Pos1};
 use std::ops::RangeInclusive;
@@ -120,8 +120,8 @@ impl Locus {
 impl Fields for Locus {
     type Plan = HeaderId;
 
-    fn plan(header: &VcfHeader, _: &ReadOptions) -> Result<HeaderId, PlanError> {
-        Ok(header.id())
+    fn plan(cx: &PlanContext<'_>) -> Result<HeaderId, PlanError> {
+        Ok(cx.header().id())
     }
 
     fn needs(_: &HeaderId) -> Sections {
@@ -166,7 +166,7 @@ mod tests {
         let contig = ContigId {
             tid: 0,
             name: "c".into(),
-            header: VcfHeader::builder().build().unwrap().id(),
+            header: crate::vcf::VcfHeader::builder().build().unwrap().id(),
         };
         let bases = |s, e| Locus::new_unchecked(contig.clone(), s, e).bases();
         assert_eq!(bases(at(5), at(7)), Some(Pos1::new(5).unwrap()..=Pos1::new(7).unwrap()));

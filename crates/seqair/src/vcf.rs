@@ -200,11 +200,15 @@ pub use header::{
     Attribute, ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, HeaderId,
     InfoDef, Infos, Number, SampleIdx, ValueType, VcfHeader, VcfHeaderBuilder, VcfVersion,
 };
+// Every public reader type, so `use seqair::vcf::…` reaches them all.
 pub use reader::{
-    Allele, AllelesRef, Column, DynValue, FieldError, Fields, FilterStatus, FullRecord,
-    GenotypeRef, GtAllele, Info, InfoRef, Locus, MissingElement, OnlySample, OptValues, PlanError,
-    RawRecord, ReadKind, ReadOptions, Reader, RecordError, Sample, SampleRef, Samples, SamplesRef,
-    Sections, Site, SiteRef, Values, VcfFile, VcfPos, VcfReadError,
+    Allele, AllelesRef, BcfType, BcfValueError, Column, DecodeCx, DynValue, FailedFilters,
+    FieldError, Fields, FilterStatus, FiltersRef, FullRecord, GenotypeRef, GtAllele, Info, InfoRef,
+    IntoRecords, Locus, MAX_LINE_BYTES, MAX_RECORD_BYTES, MissingElement, Offending, OnlySample,
+    OptValues, PlanContext, PlanError, RawRecord, ReadKind, ReadOption, Reader, ReaderBuilder,
+    RecordError, RecordPart, RecordPlace, RecordSection, Records, Sample, SampleRef, SampleSel,
+    SampleSelection, Samples, SamplesRef, Sections, Site, SiteRef, Stored, TextValueError, Values,
+    VcfFile, VcfFormat, VcfPos, VcfReadError,
 };
 pub use record::Genotype;
 pub use record_encoder::{
@@ -213,6 +217,8 @@ pub use record_encoder::{
     FormatInts, FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat,
     InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, Numeric, OptArr, Scalar, Str,
 };
+/// Positions and regions as readers take and return them.
+pub use seqair_types::{Pos0, Pos1, RegionString};
 pub use unified::{
     Begun, CoordinateIndex, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer,
 };

@@ -22,6 +22,7 @@ mod file;
 mod full;
 mod index;
 mod info;
+mod keys;
 mod locus;
 mod raw;
 mod rlen;
@@ -35,9 +36,12 @@ pub(crate) mod values;
 pub use access::{DecodeCx, DynValue, ReadKind, Stored};
 pub use bcf_value::{BcfType, BcfValueError};
 pub use error::{
-    FieldError, KeyKind, RecordError, RecordPart, RecordSection, VcfFormat, VcfReadError,
+    FieldError, KeyKind, RecordError, RecordPart, RecordPlace, RecordSection, VcfFormat,
+    VcfReadError,
 };
-pub use fields::{Fields, PlanError, ReadOption, ReadOptions, SampleSelection, Sections};
+pub use fields::{
+    Fields, PlanContext, PlanError, ReadOption, SampleSel, SampleSelection, Sections,
+};
 pub use file::VcfFile;
 pub use full::FullRecord;
 pub use info::{Info, InfoRef};
@@ -46,5 +50,5 @@ pub use raw::RawRecord;
 pub use samples::{Column, OnlySample, Sample, SampleRef, Samples, SamplesRef};
 pub use site::{Allele, AllelesRef, FailedFilters, FilterStatus, FiltersRef, Site, SiteRef};
 pub use stream::{IntoRecords, MAX_LINE_BYTES, MAX_RECORD_BYTES, Reader, ReaderBuilder, Records};
-pub use text_value::TextValueError;
+pub use text_value::{Offending, TextValueError};
 pub use values::{GenotypeRef, GtAllele, MissingElement, OptValues, Values};

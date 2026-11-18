@@ -288,7 +288,7 @@ happens once, in `plan`.
 
 ```rust
 use seqair::vcf::{
-    Allele, Fields, FilterStatus, InfoFlag, PlanError, RawRecord, ReadOptions, Sections, VcfFile, VcfHeader,
+    Allele, Fields, FilterStatus, InfoFlag, PlanContext, PlanError, RawRecord, Sections, VcfFile,
     VcfPos, VcfReadError,
 };
 
@@ -310,8 +310,8 @@ struct Plan {
 
 impl Fields for Truth {
     type Plan = Plan;
-    fn plan(header: &VcfHeader, _: &ReadOptions) -> Result<Plan, PlanError> {
-        Ok(Plan { cpg: header.info_key("CPG")? })
+    fn plan(cx: &PlanContext<'_>) -> Result<Plan, PlanError> {
+        Ok(Plan { cpg: cx.info_key("CPG")? })
     }
     fn needs(_: &Plan) -> Sections {
         Sections::SITE | Sections::INFO

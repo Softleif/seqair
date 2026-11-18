@@ -1,13 +1,13 @@
 //! [`FullRecord`]: every part of a record (`r[vcf_fields.full_record]`).
 
 use super::error::VcfReadError;
-use super::fields::{Fields, PlanError, ReadOptions, Sections};
+use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::info::Info;
 use super::locus::Locus;
 use super::raw::RawRecord;
 use super::samples::Samples;
 use super::site::Site;
-use crate::vcf::header::{HeaderId, VcfHeader};
+use crate::vcf::header::HeaderId;
 
 // r[impl vcf_fields.full_record]
 /// Every part of a record, plus its bytes as stored and its header's id, so
@@ -66,8 +66,8 @@ impl FullRecord {
 impl Fields for FullRecord {
     type Plan = HeaderId;
 
-    fn plan(header: &VcfHeader, opts: &ReadOptions) -> Result<HeaderId, PlanError> {
-        Locus::plan(header, opts)
+    fn plan(cx: &PlanContext<'_>) -> Result<HeaderId, PlanError> {
+        Locus::plan(cx)
     }
 
     fn needs(_: &HeaderId) -> Sections {

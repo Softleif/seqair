@@ -2,7 +2,7 @@
 //! VCF fuzz targets (`r[vcf_reader.fuzz]`).
 
 use seqair::vcf::{
-    DynValue, Fields, Flag, FullRecord, Info, Locus, OptArr, PlanError, RawRecord, ReadOptions,
+    DynValue, Fields, Flag, FullRecord, Info, Locus, OptArr, PlanContext, PlanError, RawRecord,
     Sample, Sections, Str, ValueType, VcfFile, VcfHeader, VcfReadError,
 };
 
@@ -116,7 +116,7 @@ struct Raw(usize);
 
 impl Fields for Raw {
     type Plan = ();
-    fn plan(_: &VcfHeader, _: &ReadOptions) -> Result<(), PlanError> {
+    fn plan(_: &PlanContext<'_>) -> Result<(), PlanError> {
         Ok(())
     }
     fn needs(_: &()) -> Sections {

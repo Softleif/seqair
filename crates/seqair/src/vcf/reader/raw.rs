@@ -177,7 +177,7 @@ pub(crate) enum Repr<'a> {
     Text(TextRecord<'a>),
 }
 
-// r[impl vcf_fields.user_types]
+// r[impl vcf_fields.user_types+2]
 /// One record as the reader found it, not yet decoded: what a
 /// [`Fields::new`](super::Fields::new) or `fill` reads, through the views
 /// it hands out. Only the [`Sections`] the type's `needs` named can be
