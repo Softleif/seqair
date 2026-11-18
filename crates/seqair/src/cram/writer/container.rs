@@ -2,14 +2,30 @@
 //! frames them: compression header, slice header, blocks.
 
 use super::CramWriteError;
+use super::fqzcomp::QualRecord;
 use super::mates::{self, MateRecord};
 use super::metrics::{Method, Metrics, Plan, Trial};
-use super::{CramVersion, rans, rans_nx16, tok3};
+use super::{CramProfile, CramVersion, arith, fqzcomp, rans, rans_nx16, tok3};
 use crate::cram::varint::{decode_itf8, write_itf8, write_ltf8};
 use crate::io::CompressionLevel;
 use crate::reader::Tid;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// Every entry of [`arith::PROFILE`].
+const ARITH: [Method; 8] = [
+    Method::Arith(0),
+    Method::Arith(1),
+    Method::Arith(2),
+    Method::Arith(3),
+    Method::Arith(4),
+    Method::Arith(5),
+    Method::Arith(6),
+    Method::Arith(7),
+];
+
+/// Every entry of [`fqzcomp::Strategy::ALL`].
+const FQZ: [Method; 4] = [Method::Fqz(0), Method::Fqz(1), Method::Fqz(2), Method::Fqz(3)];
 
 /// Every entry of [`rans_nx16::normal_profile`].
 const NX16: [Method; 6] = [
@@ -249,6 +265,8 @@ pub(super) struct SliceBuilder {
     /// Each record's mate fields; the mate series and `CF` are written
     /// when the slice is complete, once its pairs are known.
     mates: Vec<MateRecord>,
+    /// Where each record's `QS` values start, for fqzcomp.
+    qs_starts: Vec<usize>,
     tag_lines: Vec<Vec<u8>>,
     line_ids: FxHashMap<Vec<u8>, i32>,
     n_records: u32,
@@ -291,6 +309,8 @@ impl SliceBuilder {
             self.start = if kind == SliceKind::Unplaced { 0 } else { pos1 };
             self.prev_ap = self.start;
         }
+        let qs = self.len(Series::Qs);
+        self.qs_starts.push(qs);
         self.n_records = self.n_records.saturating_add(1);
         self.n_bases = self.n_bases.saturating_add(u64::from(read_len.unsigned_abs()));
         let ap = pos1.saturating_sub(self.prev_ap);
@@ -396,6 +416,7 @@ impl SliceBuilder {
             series,
             tags,
             mates,
+            qs_starts,
             tag_lines,
             line_ids,
             n_records,
@@ -408,6 +429,7 @@ impl SliceBuilder {
         series.iter_mut().for_each(Vec::clear);
         tags.clear();
         mates.clear();
+        qs_starts.clear();
         tag_lines.clear();
         line_ids.clear();
         *n_records = 0;
@@ -513,11 +535,17 @@ impl SliceBuilder {
             .map(|(&(series, data), _)| (series.content_id(), data))
             .chain(self.tags.iter().map(|t| (t.key, t.data.as_slice())))
             .collect();
+        let quals = self.qual_records();
         let mut external = Vec::new();
         let plan = codecs.metrics.plan(slice_index);
         for &(id, data) in &blocks {
-            let content =
-                if id == Series::Rn.content_id() { Content::Names } else { Content::Data };
+            let content = if id == Series::Rn.content_id() {
+                Content::Names
+            } else if id == Series::Qs.content_id() {
+                Content::Qualities(&quals)
+            } else {
+                Content::Data
+            };
             let tried = match &plan {
                 Plan::Trial => Tried::Record(&mut trial.trials),
                 Plan::Learned(choices) => {
@@ -587,6 +615,22 @@ impl SliceBuilder {
             slice_offset: compression_header.len() as u64,
             slice_size: slice.len() as u64,
         })
+    }
+
+    /// Each record's share of the `QS` block and the flags fqzcomp models.
+    fn qual_records(&self) -> Vec<QualRecord> {
+        let total = self.len(Series::Qs);
+        let ends = self.qs_starts.iter().skip(1).copied().chain(std::iter::once(total));
+        self.qs_starts
+            .iter()
+            .zip(ends)
+            .zip(&self.mates)
+            .map(|((&start, end), mate)| QualRecord {
+                len: u32::try_from(end.saturating_sub(start)).unwrap_or(u32::MAX),
+                reverse: mate.flags.is_reverse(),
+                read2: mate.flags.is_second_in_template(),
+            })
+            .collect()
     }
 
     fn compression_header(
@@ -731,11 +775,14 @@ fn push_crc(out: &mut Vec<u8>, from: usize) {
 
 /// What a block holds, for the codecs it is tried with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Content {
+pub(super) enum Content<'a> {
     /// The SAM header: gzip only, which every reader takes.
     Header,
     /// The `RN` block: the name tokeniser too, in CRAM 3.1.
     Names,
+    /// The `QS` block, with each record's share of it: fqzcomp too, in the
+    /// archive profile.
+    Qualities(&'a [QualRecord]),
     Data,
 }
 
@@ -795,20 +842,38 @@ impl Codecs {
         }
     }
 
-    /// Every method the version has for `content`.
-    fn methods(&self, content: Content) -> impl Iterator<Item = Method> + use<> {
-        let (rans, tok3): (&[Method], bool) = match (content, self.version) {
-            (Content::Header, _) => (&[], false),
-            (_, CramVersion::V3_0) => (&[Method::Rans4x8Order0, Method::Rans4x8Order1], false),
-            (_, CramVersion::V3_1) => (&NX16, content == Content::Names),
+    // r[impl cram_writer.profile]
+    /// Every method the version and profile have for `content`.
+    fn methods(&self, content: Content<'_>) -> Vec<Method> {
+        let mut methods = vec![Method::Gzip];
+        let profile = match (content, self.version) {
+            (Content::Header, _) => return methods,
+            (_, CramVersion::V3_0) => {
+                methods.extend([Method::Rans4x8Order0, Method::Rans4x8Order1]);
+                return methods;
+            }
+            (_, CramVersion::V3_1(profile)) => profile,
         };
-        std::iter::once(Method::Gzip)
-            .chain(rans.iter().copied())
-            .chain(tok3.then_some(Method::Tok3))
+        methods.extend(NX16);
+        if content == Content::Names {
+            methods.push(Method::Tok3);
+        }
+        if profile == CramProfile::Archive {
+            methods.extend(ARITH);
+            if matches!(content, Content::Qualities(_)) {
+                methods.extend(FQZ);
+            }
+        }
+        methods
     }
 
     /// `data` stored by `method`, or `None` where it does not apply.
-    fn encode(&mut self, method: Method, data: &[u8]) -> Option<(u8, Vec<u8>)> {
+    fn encode(
+        &mut self,
+        method: Method,
+        data: &[u8],
+        content: Content<'_>,
+    ) -> Option<(u8, Vec<u8>)> {
         match method {
             Method::Raw => None,
             Method::Gzip => {
@@ -823,6 +888,14 @@ impl Codecs {
                 Some((5, rans_nx16::encode(data, flags)?))
             }
             Method::Tok3 => Some((8, tok3::encode(data)?)),
+            Method::Arith(i) => {
+                Some((6, arith::encode(data, *arith::PROFILE.get(usize::from(i))?)?))
+            }
+            Method::Fqz(i) => {
+                let Content::Qualities(records) = content else { return None };
+                let strategy = *fqzcomp::Strategy::ALL.get(usize::from(i))?;
+                Some((7, fqzcomp::encode(data, records, strategy)?))
+            }
         }
     }
 
@@ -835,7 +908,7 @@ impl Codecs {
         content_type: u8,
         content_id: i32,
         data: &[u8],
-        content: Content,
+        content: Content<'_>,
         tried: Tried<'_>,
     ) -> Result<(), CramWriteError> {
         if data.len() < MIN_COMPRESSED || self.level == CompressionLevel::Level0 {
@@ -845,11 +918,11 @@ impl Codecs {
         let mut sizes = Vec::new();
         let methods: Vec<Method> = match tried {
             Tried::Only(methods) => methods.into_iter().flatten().collect(),
-            Tried::All | Tried::Record(_) => self.methods(content).collect(),
+            Tried::All | Tried::Record(_) => self.methods(content),
         };
         let mut declined = true;
         for method in methods {
-            let Some((id, bytes)) = self.encode(method, data) else { continue };
+            let Some((id, bytes)) = self.encode(method, data, content) else { continue };
             declined = false;
             sizes.push((method, bytes.len()));
             if bytes.len() < best.as_ref().map_or(data.len(), |(_, b)| b.len()) {

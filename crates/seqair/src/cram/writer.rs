@@ -281,7 +281,7 @@ impl<W: Write> CramWriter<W> {
         def.extend_from_slice(b"CRAM\x03");
         def.push(match options.version {
             CramVersion::V3_0 => 0,
-            CramVersion::V3_1 => 1,
+            CramVersion::V3_1(_) => 1,
         });
         def.extend_from_slice(&file_id);
         out.write_all(&def)?;
@@ -555,17 +555,37 @@ struct Options {
     exhaustive_codec_search: bool,
 }
 
-// r[impl cram_writer.version]
+// r[impl cram_writer.version+2]
 /// The CRAM version a writer writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CramVersion {
     /// gzip and rANS 4×8 only, for readers without CRAM 3.1 (htsjdk before
     /// 4.x, older tools).
     V3_0,
-    /// htslib's default: rANS Nx16 and the name tokeniser as well.
+    /// htslib's default: rANS Nx16 and the name tokeniser as well, and
+    /// whatever else the profile adds.
+    V3_1(CramProfile),
+}
+
+impl Default for CramVersion {
+    fn default() -> Self {
+        Self::V3_1(CramProfile::default())
+    }
+}
+
+// r[impl cram_writer.profile]
+/// Which CRAM 3.1 codecs the writer tries; it keeps whichever stores a block
+/// smallest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CramProfile {
+    /// htslib's default: rANS Nx16 and the name tokeniser.
     #[default]
-    V3_1,
+    Normal,
+    /// Also the adaptive arithmetic coder, and fqzcomp for qualities: a few
+    /// percent smaller, slower to write and to read.
+    Archive,
 }
 
 impl<'a> CramWriterBuilder<'a, ToPath<'a>> {
@@ -650,7 +670,8 @@ impl<'a, T> CramWriterBuilder<'a, T> {
         self
     }
 
-    /// The CRAM version to write. Defaults to [`CramVersion::V3_1`], as
+    /// The CRAM version to write. Defaults to [`CramVersion::V3_1`] with
+    /// [`CramProfile::Normal`], as
     /// htslib does.
     #[must_use]
     pub fn version(mut self, version: CramVersion) -> Self {

@@ -17,7 +17,7 @@
 use seqair::bam::RawBamRecord;
 use seqair::bam::stream::BamStreamReader;
 use seqair::cram::stream::CramStreamReader;
-use seqair::cram::writer::{CramVersion, CramWriterBuilder};
+use seqair::cram::writer::{CramProfile, CramVersion, CramWriterBuilder};
 use seqair::fasta::IndexedFastaReader;
 use seqair::io::CompressionLevel;
 use seqair::sam::format::format_sam_record;
@@ -216,7 +216,8 @@ fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
 /// The fixture BAM written with `write_raw` reads back, through samtools and
 /// through seqair, as samtools' own CRAM of it reads back, in CRAM 3.0 and
 /// 3.1, and is no larger than samtools' of the same version.
-// r[verify cram_writer.version]
+// r[verify cram_writer.version+2]
+// r[verify cram_writer.profile]
 // r[verify cram_writer.rans_nx16]
 // r[verify cram_writer.tok3]
 #[test]
@@ -224,7 +225,11 @@ fn fixture_reads_back_as_samtools_cram_does() {
     let bam = data("test.bam");
     let fasta = data("test.fasta.gz");
     let (header, records) = stream_bam(&bam);
-    for (version, name) in [(CramVersion::V3_0, "3.0"), (CramVersion::V3_1, "3.1")] {
+    for (version, name) in [
+        (CramVersion::V3_0, "3.0"),
+        (CramVersion::V3_1(CramProfile::Normal), "3.1"),
+        (CramVersion::V3_1(CramProfile::Archive), "3.1"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("ours.cram");
         let reference = IndexedFastaReader::open(&fasta).unwrap();
@@ -235,7 +240,7 @@ fn fixture_reads_back_as_samtools_cram_does() {
         }
         writer.finish().unwrap();
         // The file definition says which minor version.
-        assert_eq!(std::fs::read(&ours).unwrap()[5], u8::from(version == CramVersion::V3_1));
+        assert_eq!(std::fs::read(&ours).unwrap()[5], u8::from(version != CramVersion::V3_0));
 
         let theirs = dir.path().join("theirs.cram");
         let version_option = format!("version={name}");
@@ -292,7 +297,7 @@ fn learned_codecs_keep_the_records_and_the_size() {
     // Every 150th record: 196 records in slices of 1, 197 slices, so trials
     // at 0, 70 and 140 and each block small enough for a debug build.
     let records: Vec<_> = records.into_iter().step_by(150).collect();
-    for version in [CramVersion::V3_0, CramVersion::V3_1] {
+    for version in [CramVersion::V3_0, CramVersion::V3_1(CramProfile::Normal)] {
         let write = |exhaustive: bool, threads: usize| {
             let reference = IndexedFastaReader::open(&fasta).unwrap();
             let mut writer = CramWriterBuilder::to_writer(Vec::new(), &header, reference)
@@ -317,7 +322,7 @@ fn learned_codecs_keep_the_records_and_the_size() {
         assert!(seqair_lines(&ours, &fasta) == samtools_lines(&theirs, &fasta));
         eprintln!("{version:?}: learned {} bytes, exhaustive {}", learned.len(), exhaustive.len());
         assert!(learned.len() * 100 <= exhaustive.len() * 101, "{version:?} grew more than 1%");
-        if version == CramVersion::V3_1 {
+        if version == CramVersion::V3_1(CramProfile::Normal) {
             // Some learned slice made another choice than the full search:
             // the learning ran.
             assert!(learned != exhaustive, "no slice learned");
@@ -789,7 +794,11 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
     // Small slices sometimes, so records cross slice boundaries.
     let options = Options {
         records_per_slice: tc.draw(gs::sampled_from(vec![10_000, 10_000, 1, 2, 5])),
-        version: tc.draw(gs::sampled_from(vec![CramVersion::V3_0, CramVersion::V3_1])),
+        version: tc.draw(gs::sampled_from(vec![
+            CramVersion::V3_0,
+            CramVersion::V3_1(CramProfile::Normal),
+            CramVersion::V3_1(CramProfile::Archive),
+        ])),
     };
     let calmd = tc.draw(gs::booleans());
     let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, calmd, options);
