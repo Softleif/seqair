@@ -488,7 +488,11 @@ fn order_1_tables(data: &[u8], n: usize) -> Order1Tables {
 /// sizes it.
 fn row_target(row: &[u32; 256]) -> u32 {
     let total: u32 = row.iter().fold(0, |a, &c| a.saturating_add(c));
-    let symbols = row.iter().filter(|&&c| c > 0).count();
+    target(total, row.iter().filter(|&&c| c > 0).count())
+}
+
+/// [`row_target`] of a row's total and its number of symbols.
+fn target(total: u32, symbols: usize) -> u32 {
     let mut target = total.checked_next_power_of_two().unwrap_or(1 << 31);
     if symbols < 64 && target > 128 {
         target /= 2;
@@ -520,7 +524,7 @@ fn encode_order_1(data: &[u8], n: usize) -> Option<Vec<u8>> {
         if !on {
             continue;
         }
-        write_row(&mut table, &alphabet, row)?;
+        write_row(&mut table, row.iter().zip(alphabet).filter(|(_, a)| *a).map(|(&f, _)| f))?;
         let total: u32 = row.iter().sum();
         *s = symbols(row, shift - total.trailing_zeros());
     }
@@ -569,9 +573,9 @@ fn order_1_header(shift: u32, table: &[u8], coder: Coder) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One order-1 row over the alphabet: each frequency as uint7, a run of
-/// zeros as 0 and the count of zeros after the first (`encode_freq_d`).
-fn write_row(out: &mut Vec<u8>, alphabet: &[bool; 256], row: &[u32; 256]) -> Option<()> {
+/// One order-1 row, its frequencies over the alphabet: each as uint7, a run
+/// of zeros as 0 and the count of zeros after the first (`encode_freq_d`).
+fn write_row(out: &mut Vec<u8>, freqs: impl IntoIterator<Item = u32>) -> Option<()> {
     let mut zeros = 0u32;
     let flush = |out: &mut Vec<u8>, zeros: &mut u32| -> Option<()> {
         if *zeros > 0 {
@@ -581,7 +585,7 @@ fn write_row(out: &mut Vec<u8>, alphabet: &[bool; 256], row: &[u32; 256]) -> Opt
         }
         Some(())
     };
-    for (&f, _) in row.iter().zip(alphabet).filter(|(_, a)| **a) {
+    for f in freqs {
         if f == 0 {
             zeros = zeros.saturating_add(1);
         } else {
@@ -595,22 +599,31 @@ fn write_row(out: &mut Vec<u8>, alphabet: &[bool; 256], row: &[u32; 256]) -> Opt
 /// Scale `counts` to frequencies summing to `total`, each present symbol
 /// at least 1, rounding to nearest and settling the difference on the
 /// largest. `total` is at least the number of present symbols.
+fn normalize(counts: &[u32; 256], total: u32) -> [u32; 256] {
+    let mut freq = [0u32; 256];
+    normalize_into(counts, total, &mut freq);
+    freq
+}
+
+/// [`normalize`] of any number of counts, into `freq` (as long).
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "each subtraction is guarded by the comparison before it"
 )]
-fn normalize(counts: &[u32; 256], total: u32) -> [u32; 256] {
+fn normalize_into(counts: &[u32], total: u32, freq: &mut [u32]) {
+    debug_assert_eq!(counts.len(), freq.len());
     let sum: u64 = counts.iter().map(|&c| u64::from(c)).sum();
-    let mut freq = [0u32; 256];
     for (f, &c) in freq.iter_mut().zip(counts) {
-        if c > 0 {
+        *f = if c == 0 {
+            0
+        } else {
             let scaled = u64::from(c)
                 .saturating_mul(u64::from(total))
                 .saturating_add(sum / 2)
                 .checked_div(sum)
                 .unwrap_or(0);
-            *f = u32::try_from(scaled).unwrap_or(total).max(1);
-        }
+            u32::try_from(scaled).unwrap_or(total).max(1)
+        };
     }
     let mut got: u32 = freq.iter().fold(0, |a, &f| a.saturating_add(f));
     while got != total {
@@ -628,7 +641,6 @@ fn normalize(counts: &[u32; 256], total: u32) -> [u32; 256] {
         }
     }
     debug_assert_eq!(got, total, "a total below the symbol count cannot be reached");
-    freq
 }
 
 /// Each symbol's slot range once its frequency is scaled up by `scale` bits.
