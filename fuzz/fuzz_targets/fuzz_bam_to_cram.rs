@@ -13,14 +13,17 @@ fuzz_target!(|data: &[u8]| {
     let Ok(mut reader) = BamStreamReader::new(data) else { return };
     let records: Vec<_> = reader.records().map_while(Result::ok).take(200).collect();
     let header = reader.into_header();
-    // A reference for every target, if they are small enough to write.
+    // A reference for every target but every third, whose records embed
+    // one built from them, if they are small enough to write.
     let targets: Vec<_> = header.targets().collect();
     if targets.iter().map(|t| t.length).sum::<u64>() > 200_000 {
         return;
     }
     let contigs: Vec<(String, Vec<u8>)> = targets
         .iter()
-        .map(|t| {
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 2)
+        .map(|(_, t)| {
             let bases = (0..t.length).map(|i| b"ACGTTGCAN"[(i % 9) as usize]).collect();
             (t.name.to_string(), bases)
         })

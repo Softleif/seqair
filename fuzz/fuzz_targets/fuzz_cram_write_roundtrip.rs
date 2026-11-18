@@ -52,7 +52,8 @@ struct Tag {
 
 #[derive(Arbitrary, Debug)]
 struct Read {
-    /// 0, 1: a contig in the FASTA; 2: one it lacks; else unplaced.
+    /// 0–3: a contig in the FASTA; 4, 5: one it lacks; else unplaced. Few
+    /// reads on each of several contigs make multi-reference slices.
     contig: u8,
     pos: u16,
     unmapped: bool,
@@ -94,12 +95,14 @@ fn tag_into(aux: &mut AuxData, tag: &Tag) {
     }
 }
 
-fn build(read: &Read, refs: &[Vec<u8>; 2], header: &BamHeader, i: usize) -> Option<RawBamRecord> {
-    let tid_of = |c: u8| ["c0", "c1", "missing"].get(usize::from(c)).and_then(|n| header.tid(n));
+const NAMES: [&str; 6] = ["c0", "c1", "c2", "c3", "missing", "missing2"];
+
+fn build(read: &Read, refs: &[Vec<u8>; 4], header: &BamHeader, i: usize) -> Option<RawBamRecord> {
+    let tid_of = |c: u8| NAMES.get(usize::from(c)).and_then(|n| header.tid(n));
     let tid = tid_of(read.contig);
     let len = match read.contig {
-        0 | 1 => refs[usize::from(read.contig)].len(),
-        2 => 500,
+        0..=3 => refs[usize::from(read.contig)].len(),
+        4 | 5 => 500,
         _ => 0,
     };
     let pos = tid.map(|_| u32::from(read.pos) % len.max(1) as u32).and_then(Pos0::new);
@@ -199,7 +202,7 @@ fn build(read: &Read, refs: &[Vec<u8>; 2], header: &BamHeader, i: usize) -> Opti
 }
 
 fuzz_target!(|input: Input| {
-    let refs: [Vec<u8>; 2] = input.contigs.map(|c| {
+    let [a, b] = input.contigs.map(|c| {
         let mut bases: Vec<u8> =
             c.iter().take(2000).map(|b| REF_LETTERS[usize::from(*b) % REF_LETTERS.len()]).collect();
         if bases.is_empty() {
@@ -207,11 +210,13 @@ fuzz_target!(|input: Input| {
         }
         bases
     });
-    let header_text = format!(
-        "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:c0\tLN:{}\n@SQ\tSN:c1\tLN:{}\n@SQ\tSN:missing\tLN:500\n@RG\tID:a\n@RG\tID:b\n",
-        refs[0].len(),
-        refs[1].len()
-    );
+    let reversed = |r: &[u8]| r.iter().rev().copied().collect::<Vec<u8>>();
+    let refs: [Vec<u8>; 4] = [a.clone(), b.clone(), reversed(&a), reversed(&b)];
+    let mut header_text = String::from("@HD\tVN:1.6\tSO:coordinate\n");
+    for (name, len) in NAMES.iter().zip(refs.iter().map(Vec::len).chain([500, 500])) {
+        header_text += &format!("@SQ\tSN:{name}\tLN:{len}\n");
+    }
+    header_text += "@RG\tID:a\n@RG\tID:b\n";
     let header = BamHeader::from_sam_text(&header_text).unwrap();
     let mut records: Vec<RawBamRecord> = input
         .reads
@@ -223,7 +228,8 @@ fuzz_target!(|input: Input| {
     records.sort_by_key(|r| (r.tid().is_none(), r.tid(), r.tid().and(r.pos())));
 
     let dir = tempfile::tempdir().unwrap();
-    let contigs = [("c0".to_string(), refs[0].clone()), ("c1".to_string(), refs[1].clone())];
+    let contigs: Vec<(String, Vec<u8>)> =
+        NAMES.iter().zip(&refs).map(|(n, r)| (n.to_string(), r.clone())).collect();
     let fasta = cram_roundtrip::write_fasta(dir.path(), &contigs);
     let rps = u32::from(input.records_per_slice % 8).max(1)
         * if input.records_per_slice > 128 { 10_000 } else { 1 };
