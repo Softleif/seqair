@@ -26,13 +26,14 @@
 
 mod container;
 mod header;
+mod mates;
 mod pool;
 mod rans;
 mod record;
 
 use self::container::{Assembled, SliceBuilder, SliceKind};
-use self::pool::{Done, Pool};
 use self::header::CramHeader;
+use self::pool::{Done, Pool};
 use self::record::{RecordView, Scratch};
 use super::index::{CraiEntry, CramIndex};
 use crate::bam::aux::AuxTag;
@@ -492,13 +493,7 @@ impl<'a> CramWriterBuilder<'a, ToPath<'a>> {
             *dst = src;
         }
         let file = BufWriter::new(File::create(self.target.path)?);
-        CramWriter::new(
-            file,
-            file_id,
-            self.header,
-            self.reference,
-            self.options,
-        )
+        CramWriter::new(file, file_id, self.header, self.reference, self.options)
     }
 }
 
@@ -514,13 +509,7 @@ impl<'a, W: Write> CramWriterBuilder<'a, ToWriter<W>> {
     /// # Errors
     /// As [`CramWriterBuilder::build`] for a path.
     pub fn build(self) -> Result<CramWriter<W>, CramWriteError> {
-        CramWriter::new(
-            self.target.writer,
-            [0; 20],
-            self.header,
-            self.reference,
-            self.options,
-        )
+        CramWriter::new(self.target.writer, [0; 20], self.header, self.reference, self.options)
     }
 }
 

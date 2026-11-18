@@ -4,6 +4,7 @@
 use super::CramWriteError;
 use super::container::{Series, SliceBuilder, SliceKind};
 use super::header::CramHeader;
+use super::mates::MateRecord;
 use crate::bam::aux::AuxTag;
 use crate::bam::aux_data::advance_past_value;
 use crate::bam::cigar::{CigarOp, CigarOpType};
@@ -228,26 +229,31 @@ pub(super) fn encode(
     // r[impl cram_writer.record.order]
     // r[impl cram_writer.record.flags]
     slice.int(Series::Bf, i32::from(view.flags.raw()));
-    slice.int(Series::Cf, 0x1 | 0x2 | if seq_unknown { 0x8 } else { 0 });
     slice.int(Series::Rl, checked.read_len);
     slice.begin_record(kind, pos1, checked.read_len);
     slice.reach(checked.end);
 
+    let name_start = slice.len(Series::Rn);
     slice.bytes(Series::Rn, view.qname);
+    let name = name_start..slice.len(Series::Rn);
     slice.byte(Series::Rn, 0);
 
     // r[impl cram_writer.record.mate]
-    let mut mate_flags = 0;
-    if view.flags.is_paired() && view.flags.is_mate_reverse() {
-        mate_flags |= 0x1;
-    }
-    if view.flags.is_mate_unmapped() {
-        mate_flags |= 0x2;
-    }
-    slice.int(Series::Mf, mate_flags);
-    slice.int(Series::Ns, view.mate.tid.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap_or(-1)));
-    slice.int(Series::Np, view.mate.pos.map_or(0, |p| p.as_i32().saturating_add(1)));
-    slice.int(Series::Ts, view.mate.template_len.map_or(0, i32::from));
+    // `CF` and the mate series are written with the slice, attached or not.
+    let pos0 = pos1.saturating_sub(1);
+    slice.push_mate(MateRecord {
+        name,
+        flags: view.flags,
+        tid: view.tid,
+        pos: pos0,
+        end: if unmapped {
+            pos0.saturating_add(1)
+        } else {
+            checked.end.max(pos0.saturating_add(1))
+        },
+        mate: view.mate,
+        cram_flags: 0x1 | if seq_unknown { 0x8 } else { 0 },
+    });
 
     // `MD`/`NM` are generated on decode only for these.
     let regenerates = !unmapped && !seq_unknown && reference.is_some();

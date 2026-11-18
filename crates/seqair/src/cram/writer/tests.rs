@@ -135,12 +135,11 @@ fn a_sink_error_poisons_the_writer() {
     let dir = tempfile::tempdir().unwrap();
     for threads in [0, 2] {
         let reference = IndexedFastaReader::open(&fasta(dir.path())).unwrap();
-        let mut w =
-            CramWriterBuilder::to_writer(Failing { left: 1000 }, &header(""), reference)
-                .compression_threads(threads)
-                .records_per_slice(1)
-                .build()
-                .unwrap();
+        let mut w = CramWriterBuilder::to_writer(Failing { left: 1000 }, &header(""), reference)
+            .compression_threads(threads)
+            .records_per_slice(1)
+            .build()
+            .unwrap();
         let mut failed = None;
         for i in 0..20 {
             if let Err(e) = w.write(&mapped(i, b"r", b"ACGT")) {

@@ -9,7 +9,7 @@ The purpose is smaller output for rastair/postalt than BAM at close to `BamWrite
 ## Scope
 
 r[cram_writer.scope]
-The writer MUST write CRAM version 3.0. Its input MUST be coordinate-sorted (`r[cram_writer.sort_order]`). Every slice holds the records of one reference, or only unplaced records; there are no multi-reference slices and no embedded references. Read names are always stored (`RN` true), and every record's mate fields are stored as they are (detached, `r[cram_writer.record.mate]`).
+The writer MUST write CRAM version 3.0. Its input MUST be coordinate-sorted (`r[cram_writer.sort_order]`). Every slice holds the records of one reference, or only unplaced records; there are no multi-reference slices and no embedded references. Read names are always stored (`RN` true). Mates in one slice are attached where the decode rebuilds their mate fields exactly (`r[cram_writer.mates]`); every other record's are stored as they are (`r[cram_writer.record.mate]`).
 
 ## Writer
 
@@ -88,7 +88,7 @@ r[cram_writer.record.order]
 A record's data series MUST be written in the order `r[cram.record.decode_order]` reads them: `BF`, `CF`, `RL`, `AP`, `RG`, `RN`, the mate series, `TL`, the tags, then for a mapped record `FN`, the features, `MQ` and `QS`, and for an unmapped one `BA` and `QS`.
 
 r[cram_writer.record.flags]
-`BF` MUST be the record's FLAG. `CF` MUST have bit `0x1` (qualities stored as an array) and `0x2` (detached) set always, and `0x8` when SEQ is `*`.
+`BF` MUST be the record's FLAG. `CF` MUST have bit `0x1` (qualities stored as an array) set always, `0x8` when SEQ is `*`, and the mate bits of `r[cram_writer.mates]`.
 
 r[cram_writer.record.position]
 `RL` MUST be the read's length: SEQ's, or for SEQ `*` the CIGAR's query length (htslib's `fake_qual`), whose bases the decode rebuilds from the reference and then drops. `AP` MUST be the 1-based position minus the previous record's in the slice (the first record's minus the slice's alignment start); an unplaced record's position is 0.
@@ -96,8 +96,11 @@ r[cram_writer.record.position]
 r[cram_writer.record.read_group]
 `RG` MUST be the index of the record's `RG:Z` value among the header's `@RG` lines, with the tag left out of the stored tags; `-1` if it has none. A value no `@RG` line has stays a stored tag, as does a value naming a last `@RG` line whose ID is `UNKNOWN`, which readers drop as Java CRAM's (`r[cram.record.rg_tag+2]`).
 
+r[cram_writer.mates]
+Two records of a slice MUST be stored attached when they are the only two records of the slice with their read name and the decode rebuilds each one's mate fields as they are (`r[cram.record.mate_attached]`): its FLAG already has every bit the decode adds (`0x1`; `0x8` if the other is unmapped; `0x20` if the other is reverse), and its RNEXT and PNEXT are the other's reference and position. The first gets CRAM flag `0x4` and `NF`, the number of records between them; the second neither `0x2` nor `0x4`. A TLEN other than the one the decode computes for the pair is stored with CRAM flag `0x10` in `TS`. Every other record is detached. `CF` and the mate series are written once the slice is complete, when its pairs are known.
+
 r[cram_writer.record.mate]
-Every record MUST be detached: `MF` (bit `0x1` for FLAG `0x20`, bit `0x2` for `0x8`), `NS` (the mate's reference id, `-1` for none), `NP` (the mate's 1-based position, 0 for none) and `TS` (the template length) carry the BAM mate fields as they are.
+A detached record (CRAM flag `0x2`) MUST store `MF` (bit `0x1` for FLAG `0x20`, bit `0x2` for `0x8`), `NS` (the mate's reference id, `-1` for none), `NP` (the mate's 1-based position, 0 for none) and `TS` (the template length) carry the BAM mate fields as they are.
 
 r[cram_writer.record.name]
 `RN` MUST be the read name. An empty read name MUST be refused (`EmptyReadName`): BAM stores none as `*`, and a CRAM reader names a record with an empty name itself. A name holding a NUL, which would end it early in `RN`, MUST be refused (`NulInReadName`).
