@@ -197,6 +197,60 @@ pub(super) fn histogram(data: &[u8]) -> [u32; 256] {
     sum
 }
 
+/// What RLE saves on each symbol, as the parent's `rle` counts it (one for
+/// each repeat, minus one for each run): a symbol's count less twice its
+/// runs, each from sub-tables, so that a long run is not a chain of
+/// increments of one counter.
+#[allow(clippy::indexing_slicing, reason = "u8s index 256-entry tables; k < 4")]
+#[allow(clippy::arithmetic_side_effects, reason = "counts ≤ data.len() ≤ i32::MAX")]
+pub(super) fn rle_saved(data: &[u8]) -> [i64; 256] {
+    let total = histogram(data);
+    let mut runs = [[0u32; 256]; 4];
+    if let Some((&first, rest)) = data.split_first() {
+        runs[0][usize::from(first)] += 1;
+        let mut prev = first;
+        let (quads, tail) = rest.as_chunks::<4>();
+        for q in quads {
+            for (k, &b) in q.iter().enumerate() {
+                runs[k][usize::from(b)] += u32::from(b != prev);
+                prev = b;
+            }
+        }
+        for &b in tail {
+            runs[0][usize::from(b)] += u32::from(b != prev);
+            prev = b;
+        }
+    }
+    let mut saved = [0i64; 256];
+    for (sym, s) in saved.iter_mut().enumerate() {
+        let r: u32 = runs.iter().map(|t| t[sym]).sum();
+        *s = i64::from(total[sym]) - 2 * i64::from(r);
+    }
+    saved
+}
+
+/// The parent's `pack` of `data`, `per_byte` (2, 4 or 8) symbol indices a
+/// byte, the first in the lowest bits.
+#[allow(clippy::indexing_slicing, reason = "u8s index a 256-entry table")]
+#[allow(clippy::arithmetic_side_effects, reason = "per_byte ∈ {2, 4, 8}")]
+pub(super) fn pack(data: &[u8], code: &[u8; 256], per_byte: usize) -> Vec<u8> {
+    fn packed<const K: usize>(data: &[u8], code: &[u8; 256]) -> Vec<u8> {
+        let bits = 8 / K;
+        let (whole, tail) = data.as_chunks::<K>();
+        let byte = |c: &[u8]| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]);
+        let mut out: Vec<u8> = whole.iter().map(|c| byte(c)).collect();
+        if !tail.is_empty() {
+            out.push(byte(tail));
+        }
+        out
+    }
+    match per_byte {
+        2 => packed::<2>(data, code),
+        4 => packed::<4>(data, code),
+        _ => packed::<8>(data, code),
+    }
+}
+
 /// The parent's `encode_order_0` coding loop: `n` states, the table already
 /// in `out`; the states and words follow.
 #[allow(clippy::arithmetic_side_effects, reason = "i % n ≤ i")]

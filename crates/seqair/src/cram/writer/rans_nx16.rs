@@ -82,7 +82,7 @@ pub(super) fn normal_profile(len: usize) -> [Nx16Flags; 6] {
 /// SIMD kernels at a level (`r[cram_writer.rans_nx16.simd]`). Both write
 /// the same bytes.
 #[derive(Debug, Clone, Copy)]
-enum Coder {
+pub(super) enum Coder {
     Scalar,
     Simd(Level),
 }
@@ -138,7 +138,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
         byte |= FLAG_NO_SIZE;
     }
 
-    let packed = if flags.pack { pack(data) } else { None };
+    let packed = if flags.pack { pack(data, coder) } else { None };
     let mut body = data;
     if let Some((meta, packed)) = &packed {
         byte |= FLAG_PACK;
@@ -147,7 +147,7 @@ fn encode_stream(data: &[u8], flags: Nx16Flags, sized: bool, coder: Coder) -> Op
         body = packed;
     }
 
-    let rle = if flags.rle { rle(body) } else { None };
+    let rle = if flags.rle { rle(body, coder) } else { None };
     if let Some((meta, literals)) = &rle {
         byte |= FLAG_RLE;
         let meta_len = meta.len().checked_mul(2)?;
@@ -234,7 +234,7 @@ fn encode_stripe(data: &[u8], flags: Nx16Flags, coder: Coder) -> Option<Vec<u8>>
 #[allow(clippy::indexing_slicing, reason = "a u8 indexes a 256-entry table")]
 #[allow(clippy::cast_possible_truncation, reason = "at most 16 symbols, so indices fit 4 bits")]
 #[allow(clippy::arithmetic_side_effects, reason = "8 / per_byte with per_byte ∈ {2, 4, 8}")]
-pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(super) fn pack(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut present = [false; 256];
     for &b in data {
         present[usize::from(b)] = true;
@@ -258,11 +258,15 @@ pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
         3 | 4 => 4,
         _ => 2,
     };
-    let bits = 8 / per_byte;
-    let packed = data
-        .chunks(per_byte)
-        .map(|c| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]))
-        .collect();
+    let packed = match coder {
+        Coder::Scalar => {
+            let bits = 8 / per_byte;
+            data.chunks(per_byte)
+                .map(|c| c.iter().rev().fold(0u8, |acc, &b| (acc << bits) | code[usize::from(b)]))
+                .collect()
+        }
+        Coder::Simd(_) => simd::pack(data, &code, per_byte),
+    };
     Some((meta, packed))
 }
 
@@ -277,18 +281,24 @@ pub(super) fn pack(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     reason = "256 symbols are written as 0, as htscodecs does"
 )]
 #[allow(clippy::arithmetic_side_effects, reason = "i + run + 1 ≤ data.len()")]
-fn rle(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let mut saved = [0i64; 256];
-    let mut last = None;
-    for &b in data {
-        let s = &mut saved[usize::from(b)];
-        if last == Some(b) {
-            *s = s.saturating_add(1);
-        } else {
-            *s = s.saturating_sub(1);
-            last = Some(b);
+fn rle(data: &[u8], coder: Coder) -> Option<(Vec<u8>, Vec<u8>)> {
+    let saved = match coder {
+        Coder::Scalar => {
+            let mut saved = [0i64; 256];
+            let mut last = None;
+            for &b in data {
+                let s = &mut saved[usize::from(b)];
+                if last == Some(b) {
+                    *s = s.saturating_add(1);
+                } else {
+                    *s = s.saturating_sub(1);
+                    last = Some(b);
+                }
+            }
+            saved
         }
-    }
+        Coder::Simd(_) => simd::rle_saved(data),
+    };
     let mut is_run = [false; 256];
     let mut meta = vec![0];
     for ((sym, &s), r) in (0u8..=255).zip(&saved).zip(&mut is_run) {
