@@ -369,10 +369,11 @@ pub(crate) fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option
         b'i' | b'I' | b'f' => pos = pos.checked_add(4)?,
         b'd' => pos = pos.checked_add(8)?,
         b'Z' | b'H' => {
-            while pos < data.len() && *data.get(pos)? != 0 {
-                pos = pos.checked_add(1)?;
-            }
-            pos = pos.checked_add(1)?; // skip NUL
+            // `memchr` for the NUL; a value without one runs to the end.
+            let rest = data.get(pos..)?;
+            let len =
+                std::ffi::CStr::from_bytes_until_nul(rest).map_or(rest.len(), |c| c.count_bytes());
+            pos = pos.checked_add(len)?.checked_add(1)?; // skip NUL
         }
         b'B' => {
             let elem_type = *data.get(pos)?;
