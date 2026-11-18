@@ -244,7 +244,7 @@ fn the_first_slice_uses_the_bases_build_hashed() {
     }
 }
 
-// r[verify cram_writer.md_nm]
+// r[verify cram_writer.md_nm+2]
 /// A correct `MD`/`NM` is dropped and regenerated; a wrong one is kept.
 #[test]
 fn md_nm_are_dropped_only_where_the_decode_regenerates_them() {

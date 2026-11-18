@@ -212,7 +212,7 @@ fn stream_bam(path: &Path) -> (seqair::bam::BamHeader, Vec<RawBamRecord>) {
 // r[verify cram_writer.compression+3]
 // r[verify cram_writer.builder]
 // r[verify cram_writer.finish]
-// r[verify cram_writer.scope]
+// r[verify cram_writer.scope+2]
 /// The fixture BAM written with `write_raw` reads back, through samtools and
 /// through seqair, as samtools' own CRAM of it reads back, in CRAM 3.0 and
 /// 3.1, and is no larger than samtools' of the same version.
@@ -305,6 +305,46 @@ fn fixture_reads_back_as_samtools_cram_does() {
         let threaded = writer.finish().unwrap().0;
         assert!(threaded[26..] == std::fs::read(&ours).unwrap()[26..], "threads change the file");
     }
+}
+
+// r[verify cram_writer.embedded_reference]
+// r[verify cram_writer.test_size]
+/// The fixture BAM against a FASTA without its lambda contig reads back as
+/// samtools' `embed_ref=2` CRAM of it does, through samtools, seqair and
+/// noodles, and is no larger.
+#[test]
+fn a_fixture_contig_the_fasta_lacks_embeds_its_reference() {
+    let bam = data("test.bam");
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("no_lambda.fa");
+    let all = data("test.fasta.gz");
+    let text = samtools(&["faidx", all.to_str().unwrap(), "chr19", "2kb_3_Unmodified"]);
+    std::fs::write(&fasta, text).unwrap();
+    samtools(&["faidx", fasta.to_str().unwrap()]);
+    let (header, records) = stream_bam(&bam);
+    let ours = dir.path().join("ours.cram");
+    let reference = IndexedFastaReader::open(&fasta).unwrap();
+    let mut writer = CramWriterBuilder::to_path(&ours, &header, reference).build().unwrap();
+    for record in &records {
+        writer.write_raw(record).unwrap();
+    }
+    writer.finish().unwrap();
+    assert!(embeds_a_reference(&ours));
+
+    let theirs = dir.path().join("theirs.cram");
+    let fa = fasta.to_str().unwrap();
+    let out = theirs.to_str().unwrap();
+    let options = ["--output-fmt-option", "embed_ref=2"];
+    samtools(
+        &[&["view", "-C", "-T", fa, "-o", out][..], &options, &[bam.to_str().unwrap()]].concat(),
+    );
+    let expected = samtools_lines(&theirs, &fasta);
+    assert!(samtools_lines(&ours, &fasta) == expected, "samtools reads it as its own");
+    assert!(seqair_lines(&ours, &fasta) == expected, "seqair reads it as samtools does");
+    assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    let size = |p: &Path| std::fs::metadata(p).unwrap().len();
+    eprintln!("ours {} bytes, samtools embed_ref=2 {} bytes", size(&ours), size(&theirs));
+    assert!(size(&ours) <= size(&theirs), "larger than samtools' CRAM");
 }
 
 // r[verify cram_writer.compression.learning]
@@ -720,11 +760,13 @@ fn normalized(line: &str) -> String {
 struct Options {
     records_per_slice: u32,
     version: CramVersion,
+    /// The FASTA the CRAM is written against lacks `chr2`.
+    lacks_chr2: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { records_per_slice: 10_000, version: CramVersion::default() }
+        Self { records_per_slice: 10_000, version: CramVersion::default(), lacks_chr2: false }
     }
 }
 
@@ -811,7 +853,8 @@ fn write_each_way(dir: &Path, bam: &Path, fasta: &Path, options: Options) -> (Pa
 // r[verify cram_writer.features]
 // r[verify cram_writer.substitution+2]
 // r[verify cram_writer.past_reference_end]
-// r[verify cram_writer.md_nm]
+// r[verify cram_writer.md_nm+2]
+// r[verify cram_writer.embedded_reference]
 // r[verify cram_writer.record.read_group]
 // r[verify cram_writer.record.unmapped]
 // r[verify cram_writer.record.mate]
@@ -855,6 +898,7 @@ fn drawn_reads_read_back_as_samtools_cram_does(tc: TestCase) {
             CramVersion::V3_1(CramProfile::Normal),
             CramVersion::V3_1(CramProfile::Archive),
         ])),
+        lacks_chr2: tc.draw(gs::booleans()),
     };
     let calmd = tc.draw(gs::booleans());
     let compared = assert_reads_back_as_samtools_cram_does(&refs, &text, calmd, options);
@@ -901,7 +945,11 @@ fn assert_reads_back_as_samtools_cram_does(
     options: Options,
 ) -> bool {
     let dir = tempfile::tempdir().unwrap();
-    let fasta = write_fasta(dir.path(), refs);
+    let full = tempfile::tempdir().unwrap();
+    let full_fasta = write_fasta(full.path(), refs);
+    // Without chr2, its slices embed a reference built from their reads.
+    let fasta =
+        if options.lacks_chr2 { write_fasta(dir.path(), &refs[..1]) } else { full_fasta.clone() };
     let sam = dir.path().join("in.sam");
     std::fs::write(&sam, header_text() + records).unwrap();
     let mut bam = dir.path().join("in.bam");
@@ -909,7 +957,7 @@ fn assert_reads_back_as_samtools_cram_does(
     if calmd {
         // Correct MD/NM, which the writer drops and the decode regenerates.
         let out = Command::new("samtools")
-            .args(["calmd", "-b", bam.to_str().unwrap(), fasta.to_str().unwrap()])
+            .args(["calmd", "-b", bam.to_str().unwrap(), full_fasta.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -922,6 +970,9 @@ fn assert_reads_back_as_samtools_cram_does(
     let samtools_crai = dir.path().join("samtools.crai");
     samtools(&["index", "-o", samtools_crai.to_str().unwrap(), ours.to_str().unwrap()]);
     assert_eq!(crai_lines(&crai), crai_lines(&samtools_crai), "the index is samtools index's");
+    // samtools' own CRAM, the oracle of the normalizations, against every
+    // reference: given a FASTA that lacks one, htslib may write the whole
+    // file without a reference.
     let theirs = dir.path().join("theirs.cram");
     samtools(&[
         "view",
@@ -929,7 +980,7 @@ fn assert_reads_back_as_samtools_cram_does(
         "--output-fmt-option",
         "version=3.0",
         "-T",
-        fasta.to_str().unwrap(),
+        full_fasta.to_str().unwrap(),
         "-o",
         theirs.to_str().unwrap(),
         bam.to_str().unwrap(),
@@ -947,7 +998,7 @@ fn assert_reads_back_as_samtools_cram_does(
         );
     }
     let theirs_read = Command::new("samtools")
-        .args(["view", "--no-PG", "-T", fasta.to_str().unwrap(), theirs.to_str().unwrap()])
+        .args(["view", "--no-PG", "-T", full_fasta.to_str().unwrap(), theirs.to_str().unwrap()])
         .output()
         .unwrap();
     if !theirs_read.status.success() {
@@ -955,8 +1006,30 @@ fn assert_reads_back_as_samtools_cram_does(
         assert!(stderr.contains("beyond slice reference extents"), "{stderr}");
         return false;
     }
-    let expected: Vec<String> =
-        String::from_utf8(theirs_read.stdout).unwrap().lines().map(normalized).collect();
+    // A chr2 record without MD/NM reads back without them when chr2's slice
+    // embeds its reference (`r[cram_writer.embedded_reference.md_nm]`),
+    // where htslib generates them from the FASTA's chr2.
+    let input = samtools_lines(&bam, &full_fasta);
+    let expected: Vec<String> = String::from_utf8(theirs_read.stdout)
+        .unwrap()
+        .lines()
+        .zip(&input)
+        .map(|(line, input)| {
+            let on_chr2 = line.split('\t').nth(2) == Some("chr2");
+            if !(options.lacks_chr2 && on_chr2) {
+                return normalized(line);
+            }
+            let generated = |tag: &str| {
+                line.contains(&format!("\t{tag}:")) && !input.contains(&format!("\t{tag}:"))
+            };
+            let (md, nm) = (generated("MD"), generated("NM"));
+            let kept: Vec<&str> = line
+                .split('\t')
+                .filter(|t| !(md && t.starts_with("MD:") || nm && t.starts_with("NM:")))
+                .collect();
+            normalized(&kept.join("\t"))
+        })
+        .collect();
     let normalized_ours: Vec<String> = through_samtools.iter().map(|l| normalized(l)).collect();
     assert_eq!(normalized_ours, expected);
     true
@@ -1054,11 +1127,20 @@ fn a_header_without_sq_lines_gets_them() {
     }
 }
 
-// r[verify cram_writer.reference_free]
-/// Records on a reference the FASTA lacks are written without it, and read
-/// back through samtools and seqair as they were.
+/// Whether `samtools cram-size` finds a slice of `cram` that embeds its
+/// reference.
+fn embeds_a_reference(cram: &Path) -> bool {
+    samtools(&["cram-size", "-v", cram.to_str().unwrap()]).contains("embedded_ref")
+}
+
+// r[verify cram_writer.embedded_reference]
+// r[verify cram_writer.embedded_reference.md_nm]
+/// Records on a reference the FASTA lacks are written against one built
+/// from them, and read back through samtools, seqair and noodles as they
+/// were: an `MD` that fits its CIGAR gives the bases (and is dropped), one
+/// that does not stays, and a record without `MD`/`NM` reads back without.
 #[test]
-fn a_reference_the_fasta_lacks_is_written_without_it() {
+fn a_reference_the_fasta_lacks_is_embedded() {
     let refs = reference_bases(&mut Rng(5));
     let dir = tempfile::tempdir().unwrap();
     let fasta = write_fasta(dir.path(), &refs);
@@ -1066,6 +1148,7 @@ fn a_reference_the_fasta_lacks_is_written_without_it() {
     let records = [
         "a\t0\tchr1\t11\t60\t4M\t*\t0\t0\tACGT\tIIII\tXS:i:1",
         "b\t0\tchrX\t3\t60\t2S3M1I2M2D1M1N2M\t*\t0\t0\tTTACGNACGAA\tIIIIIIIIIII\tNM:i:3\tMD:Z:0A",
+        "b2\t0\tchrX\t4\t60\t4M2D2M\t*\t0\t0\tCGTAAC\tIIIIII\tMD:Z:1T2^GG2\tNM:i:3",
         "c\t81\tchrX\t9\t7\t1H3M1P1M\t=\t3\t-7\tACGT\t*",
         "d\t133\tchrX\t9\t0\t*\t=\t9\t0\tAC\t##",
     ];
@@ -1080,6 +1163,33 @@ fn a_reference_the_fasta_lacks_is_written_without_it() {
     assert_eq!(through_samtools[1..], records[1..]);
     assert_eq!(seqair_lines(&ours, &fasta), through_samtools);
     assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    assert!(embeds_a_reference(&ours));
+}
+
+// r[verify cram_writer.reference_free+2]
+/// Records on a reference the FASTA lacks with no aligned base to build one
+/// from are written without a reference.
+#[test]
+fn a_reference_the_fasta_lacks_without_aligned_bases_is_written_without_it() {
+    let refs = reference_bases(&mut Rng(5));
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = write_fasta(dir.path(), &refs);
+    let text = header_text().replacen("@RG", "@SQ\tSN:chrX\tLN:500\n@RG", 1);
+    let records = [
+        "c\t0\tchrX\t9\t7\t2S1I\t*\t0\t0\tACG\t*",
+        "d\t0\tchrX\t9\t7\t3M\t*\t0\t0\t*\t*",
+        "e\t4\tchrX\t9\t0\t*\t*\t0\t0\tAC\t##",
+    ];
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, text + &records.join("\n") + "\n").unwrap();
+    let bam = dir.path().join("in.bam");
+    samtools(&["view", "-b", "-o", bam.to_str().unwrap(), sam.to_str().unwrap()]);
+    let (ours, _) = write_each_way(dir.path(), &bam, &fasta, Options::default());
+    let through_samtools = samtools_lines(&ours, &fasta);
+    assert_eq!(through_samtools, records);
+    assert_eq!(seqair_lines(&ours, &fasta), through_samtools);
+    assert_noodles_reads_it_as_seqair(&ours, &fasta);
+    assert!(!embeds_a_reference(&ours));
 }
 
 /// The block sizes `samtools cram-size -v` reports for `series` in `cram`.

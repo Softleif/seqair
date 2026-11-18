@@ -65,7 +65,7 @@ pub(super) struct Checked {
     pub read_len: i32,
     /// 0-based exclusive end of the reference span (an unmapped record
     /// spans its position).
-    end: i64,
+    pub end: i64,
     /// Whether the record has an `MD` tag, and an `NM` tag.
     has_md: bool,
     has_nm: bool,
@@ -211,14 +211,49 @@ pub(super) fn check(
     })
 }
 
-/// The record's data series, appended to `slice`. `reference` is the
-/// uppercased bases of its reference when the slice is stored against them.
+/// The uppercased bases a slice's records are stored against: the FASTA's
+/// reference from its start, or the reference a slice embeds from its own.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SliceRef<'a> {
+    pub bases: &'a [u8],
+    /// 0-based reference position of `bases[0]`.
+    pub start: usize,
+    /// Built from the slice's reads (`r[cram_writer.embedded_reference]`).
+    pub embedded: bool,
+}
+
+impl<'a> SliceRef<'a> {
+    pub(super) fn fasta(bases: &'a [u8]) -> Self {
+        Self { bases, start: 0, embedded: false }
+    }
+
+    /// `pos`'s index in `bases`; past them (never) for one before them.
+    fn index(self, pos: usize) -> usize {
+        pos.checked_sub(self.start).unwrap_or(usize::MAX)
+    }
+
+    fn get(self, pos: usize) -> Option<u8> {
+        self.bases.get(self.index(pos)).copied()
+    }
+
+    fn range(self, from: usize, to: usize) -> Option<&'a [u8]> {
+        self.bases.get(self.index(from)..self.index(to))
+    }
+
+    /// 0-based exclusive end of the bases.
+    fn end(self) -> usize {
+        self.start.saturating_add(self.bases.len())
+    }
+}
+
+/// The record's data series, appended to `slice`. `reference` is the bases
+/// the slice is stored against, if any.
 pub(super) fn encode(
     slice: &mut SliceBuilder,
     kind: SliceKind,
     view: &RecordView<'_>,
     checked: &Checked,
-    reference: Option<&[u8]>,
+    reference: Option<SliceRef<'_>>,
     header: &CramHeader,
     scratch: &mut Scratch,
 ) {
@@ -261,8 +296,8 @@ pub(super) fn encode(
     // `MD` as `N`, htslib's as it is: only drop what both regenerate.
     let iupac_reference = reference.is_some_and(|r| {
         let from = view.pos.map_or(0, Pos0::as_usize);
-        let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.len());
-        r.get(from..to).unwrap_or_default().iter().all(|b| IupacBase::ASCII.contains(b))
+        let to = usize::try_from(checked.end).unwrap_or(usize::MAX).min(r.end());
+        r.range(from, to).unwrap_or_default().iter().all(|b| IupacBase::ASCII.contains(b))
     });
     let track = regenerates && iupac_reference && (checked.has_md || checked.has_nm);
     let md = &mut scratch.md;
@@ -299,7 +334,7 @@ pub(super) fn encode(
         }
     }
 
-    // r[impl cram_writer.md_nm]
+    // r[impl cram_writer.md_nm+2]
     // htslib's decoder fails a record whose deletion runs past its
     // reference's end when it generates either tag (`beyond_slice`).
     let track = track && !deletion_past_end;
@@ -330,7 +365,9 @@ pub(super) fn encode(
         }
     }
     // r[impl cram_writer.md_nm.past_reference_end]
-    if regenerates && deletion_past_end {
+    // r[impl cram_writer.embedded_reference.md_nm]
+    let embedded = reference.is_some_and(|r| r.embedded);
+    if regenerates && (deletion_past_end || embedded) {
         let flags = u8::from(!checked.has_md) | u8::from(!checked.has_nm) << 1;
         if flags != 0 {
             line.extend_from_slice(b"cFC");
@@ -360,7 +397,7 @@ fn int_value(ty: u8, value: &[u8]) -> Option<i64> {
 struct Features<'a, 's> {
     slice: &'s mut SliceBuilder,
     view: &'a RecordView<'a>,
-    reference: Option<&'a [u8]>,
+    reference: Option<SliceRef<'a>>,
     md: Option<&'s mut MdNm>,
     count: i32,
     /// 1-based read position of the previous feature.
@@ -410,11 +447,11 @@ impl Features<'_, '_> {
                 CigarOpType::Deletion => {
                     self.feature(b'D', read);
                     self.slice.int(Series::Dl, op.len().cast_signed());
-                    if let (Some(md), Some(reference)) = (self.md.as_deref_mut(), self.reference) {
-                        md.deletion(reference, refpos, len);
+                    if let (Some(md), Some(r)) = (self.md.as_deref_mut(), self.reference) {
+                        md.deletion(r.bases, r.index(refpos), len);
                     }
                     refpos = refpos.saturating_add(len);
-                    self.deletion_past_end |= self.reference.is_some_and(|r| refpos > r.len());
+                    self.deletion_past_end |= self.reference.is_some_and(|r| refpos > r.end());
                 }
                 CigarOpType::RefSkip => {
                     self.feature(b'N', read);
@@ -465,7 +502,7 @@ impl Features<'_, '_> {
     fn aligned(&mut self, read: usize, refpos: usize, len: usize) {
         let view = self.view;
         let Some(reference) = self.reference else {
-            // r[impl cram_writer.reference_free]
+            // r[impl cram_writer.reference_free+2]
             self.feature(b'b', read);
             self.slice.int(Series::BbLen, i32::try_from(len).unwrap_or(i32::MAX));
             for i in read..read.saturating_add(len) {
@@ -479,7 +516,7 @@ impl Features<'_, '_> {
             let g = refpos.saturating_add(i);
             let r = read.saturating_add(i);
             let base = view.seq.get(r).copied().unwrap_or(IupacBase::N);
-            let ref_base = reference.get(g).copied();
+            let ref_base = reference.get(g);
             // The same letter, as htslib compares them: a reference letter
             // that is no IUPAC code (or `U`) reads as `N` but is no match.
             if ref_base == Some(base.to_ascii()) {
@@ -516,7 +553,7 @@ impl Features<'_, '_> {
         if let (Some(md), Some(reference)) = (self.md.as_deref_mut(), self.reference)
             && to > from
         {
-            md.matches(reference.get(from..to), to.saturating_sub(from));
+            md.matches(reference.range(from, to), to.saturating_sub(from));
         }
     }
 }
