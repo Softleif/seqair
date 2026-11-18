@@ -552,7 +552,7 @@ impl VcfHeader {
 
         for (name, def) in &self.contigs {
             out.push_str("##contig=<ID=");
-            out.push_str(name);
+            push_value(&mut out, name);
             if let Some(len) = def.length {
                 out.push_str(",length=");
                 out.push_str(&len.to_string());
@@ -610,7 +610,7 @@ impl DefLine<'_> {
         out.push_str("##");
         out.push_str(self.key);
         out.push_str("=<ID=");
-        out.push_str(self.id);
+        push_value(out, self.id);
         if let Some((number, typ)) = self.kind {
             out.push_str(",Number=");
             out.push_str(&number.as_str());
@@ -638,6 +638,16 @@ fn push_attributes(out: &mut String, attributes: &[Attribute]) {
         } else {
             out.push_str(&attr.value);
         }
+    }
+}
+
+/// `value` as it was read: bare, unless a reader would take a bare one
+/// to end early (at `,` or `>`) or to be quoted or bracketed.
+fn push_value(out: &mut String, value: &str) {
+    if value.contains([',', '>']) || value.starts_with(['"', '[']) {
+        push_quoted(out, value);
+    } else {
+        out.push_str(value);
     }
 }
 

@@ -231,9 +231,14 @@ fn description(attributes: &mut Vec<Attribute>, line: usize, id: &str) -> SmolSt
 }
 
 /// Remove the first attribute named `key`, returning its value.
+/// The first `key` attribute's value, every `key` attribute removed: a
+/// repeat kept among the others would be written back before the one read,
+/// and read in its place next time.
 fn take(attributes: &mut Vec<Attribute>, key: &str) -> Option<SmolStr> {
     let at = attributes.iter().position(|attr| attr.key == key)?;
-    Some(attributes.remove(at).value)
+    let value = attributes.remove(at).value;
+    attributes.retain(|attr| attr.key != key);
+    Some(value)
 }
 
 // r[impl vcf_header.parse.dictionary]
@@ -667,6 +672,34 @@ mod tests {
         // Written back in canonical order (FILTER, INFO, FORMAT), this order
         // needs IDX to survive.
         let again = VcfHeader::parse(&h.to_vcf_text()).unwrap();
+        assert_eq!(again.string_map(), h.string_map());
+    }
+
+    // r[verify vcf_header.parse.preserve]
+    /// An id read quoted that a bare value cannot hold is written quoted
+    /// (fuzzer-found).
+    #[test]
+    fn an_id_a_bare_value_cannot_hold_is_written_quoted() {
+        let h = parse("##FILTER=<ID=\"a, b>\",Description=\"\">\n##contig=<ID=\"[c\">\n").unwrap();
+        let again = VcfHeader::parse(&h.to_vcf_text()).unwrap();
+        assert_eq!(
+            again.filters().keys().collect::<Vec<_>>(),
+            h.filters().keys().collect::<Vec<_>>()
+        );
+        assert_eq!(again.contig_map(), h.contig_map());
+    }
+
+    // r[verify vcf_header.parse.dictionary]
+    // r[verify vcf_header.parse.preserve]
+    /// A repeated `IDX` (or `ID`) is read once, the first, and not written
+    /// back as an attribute that would win the next read (fuzzer-found).
+    #[test]
+    fn a_repeated_reserved_key_reads_and_writes_as_the_first() {
+        let h = parse("##FILTER=<ID=f,Description=\"\",IDX=7,x=y,IDX=2,ID=g>\n").unwrap();
+        assert_eq!(h.string_map().get("f"), Some(7));
+        let text = h.to_vcf_text();
+        assert!(text.contains("##FILTER=<ID=f,Description=\"\",x=y,IDX=7>"), "{text}");
+        let again = VcfHeader::parse(&text).unwrap();
         assert_eq!(again.string_map(), h.string_map());
     }
 
