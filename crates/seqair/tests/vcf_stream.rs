@@ -121,7 +121,7 @@ fn stream_options_and_errors() {
     ));
 }
 
-// r[verify vcf_values.reader_keys]
+// r[verify vcf_values.reader_keys+2]
 /// A stream reader resolves keys as its file would, and they read its
 /// records as the file's keys read the file's.
 #[test]
@@ -149,6 +149,11 @@ fn a_stream_readers_keys_read_its_records() {
         keys.info_key::<seqair::vcf::Str>("DP"),
         Err(seqair::vcf::KeyError::TypeMismatch { .. })
     ));
+    // r[verify vcf_values.file_keys+3]
+    let low_dp = keys.filter("lowDp").unwrap();
+    assert_eq!(low_dp.name(), file.filter("lowDp").unwrap().name());
+    assert_eq!(file.filter("lowDp").unwrap(), file.header().filter("lowDp").unwrap());
+    assert!(matches!(keys.filter("nope"), Err(seqair::vcf::KeyError::UnknownFilter { .. })));
     let mut got = Vec::new();
     while let Some(info) = reader.next_record().unwrap() {
         got.push(info.get(&dp).unwrap());

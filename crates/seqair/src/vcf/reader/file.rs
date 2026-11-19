@@ -433,7 +433,10 @@ impl VcfFile {
 
     // r[impl vcf_reader.contig_lookup]
     /// The contig `name`, if the header or the index declares it or a
-    /// record named it: whether a query of `name` resolves.
+    /// record named it: whether a query of `name` resolves. An `Option`,
+    /// unlike [`VcfHeader::contig`](crate::vcf::VcfHeader::contig)'s
+    /// `Result`: a contig the file lacks is an answer here (riker asks for
+    /// every contig of its BAM), and the header knows only its own lines.
     pub fn contig(&self, name: &str) -> Option<ContigId> {
         self.0.contigs.find(&self.0.header, name)
     }

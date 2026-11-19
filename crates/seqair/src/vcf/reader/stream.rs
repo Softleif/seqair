@@ -860,7 +860,7 @@ impl<F: Fields> Reader<F> {
         &self.core.file.header
     }
 
-    // r[impl vcf_values.reader_keys]
+    // r[impl vcf_values.reader_keys+2]
     /// Keys for reading this reader's records, resolved as its file
     /// resolves them: for a [`VcfStream`](super::VcfStream), whose file
     /// exists only inside its reader.

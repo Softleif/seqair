@@ -1,5 +1,5 @@
 //! A file's field table and resolving keys through it
-//! (`r[vcf_reader.field_table]`, `r[vcf_values.file_keys+2]`,
+//! (`r[vcf_reader.field_table]`, `r[vcf_values.file_keys+3]`,
 //! `r[vcf_values.optional_keys+2]`, `r[vcf_values.lenient_keys]`).
 
 use super::fields::optional;
@@ -10,7 +10,7 @@ use super::text_keys::TextKeys;
 use crate::vcf::error::{KeyError, KeyKind};
 use crate::vcf::header::{FormatDef, HeaderId, InfoDef, Number, ValueType, VcfHeader};
 use crate::vcf::record_encoder::{
-    FieldId, FieldKind, FormatKey, InfoKey, Section, check_genotype, check_kind,
+    FieldId, FieldKind, FilterId, FormatKey, InfoKey, Section, check_genotype, check_kind,
 };
 use seqair_types::SmolStr;
 use std::collections::HashMap;
@@ -413,7 +413,7 @@ impl FileShared {
 }
 
 impl VcfFile {
-    // r[impl vcf_values.file_keys+2]
+    // r[impl vcf_values.file_keys+3]
     /// Resolve an INFO key for reading this file, checking marker `V`
     /// against the header's definition: `let dp: InfoInt = file.info_key("DP")?;`.
     ///
@@ -429,7 +429,7 @@ impl VcfFile {
         self.0.info_key(name, false)
     }
 
-    // r[impl vcf_values.file_keys+2]
+    // r[impl vcf_values.file_keys+3]
     /// Resolve a FORMAT key for reading this file (see [`Self::info_key`]).
     ///
     /// # Errors
@@ -466,9 +466,19 @@ impl VcfFile {
     pub fn lenient(&self) -> LenientKeys<'_> {
         LenientKeys(&self.0)
     }
+
+    // r[impl vcf_values.file_keys+3]
+    /// A FILTER the header declares, as [`VcfHeader::filter`](crate::vcf::VcfHeader::filter)
+    /// and [`PlanContext::filter`](super::PlanContext::filter) resolve it.
+    ///
+    /// # Errors
+    /// [`KeyError::UnknownFilter`].
+    pub fn filter(&self, name: &str) -> Result<FilterId, KeyError> {
+        self.0.header.filter(name)
+    }
 }
 
-// r[impl vcf_values.reader_keys]
+// r[impl vcf_values.reader_keys+2]
 /// A reader's key resolution, from [`Reader::keys`](super::Reader::keys):
 /// what [`VcfFile::info_key`] and its siblings resolve, for a reader
 /// whose file is not at hand (a [`VcfStream`](super::VcfStream)'s).
@@ -514,6 +524,14 @@ impl<'a> Keys<'a> {
     /// As [`VcfFile::lenient`].
     pub fn lenient(&self) -> LenientKeys<'a> {
         LenientKeys(self.0)
+    }
+
+    /// As [`VcfFile::filter`].
+    ///
+    /// # Errors
+    /// As [`VcfFile::filter`].
+    pub fn filter(&self, name: &str) -> Result<FilterId, KeyError> {
+        self.0.header.filter(name)
     }
 }
 

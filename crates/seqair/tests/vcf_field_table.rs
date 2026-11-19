@@ -42,7 +42,7 @@ fn file(lines: &[&str]) -> VcfFile {
     VcfFile::from_bytes(text(lines).into_bytes(), None).unwrap()
 }
 
-// r[verify vcf_values.file_keys+2]
+// r[verify vcf_values.file_keys+3]
 // r[verify vcf_values.optional_keys+2]
 // r[verify vcf_values.lenient_keys]
 // r[verify vcf_reader.field_table]
@@ -139,7 +139,7 @@ fn undeclared_keys_resolve_through_lenient_keys() {
 }
 
 // r[verify vcf_reader.field_table]
-// r[verify vcf_values.file_keys+2]
+// r[verify vcf_values.file_keys+3]
 // r[verify vcf_values.lenient_keys]
 /// One header as VCF text and as BCF: plain keys resolve its fields only,
 /// lenient keys the same undeclared names to the same definitions, and a
