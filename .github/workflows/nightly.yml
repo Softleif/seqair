@@ -78,8 +78,8 @@ jobs:
             autoconf automake libtool pkg-config \
             zlib1g-dev libbz2-dev liblzma-dev \
             libssl-dev libcurl4-openssl-dev \
-            tabix bcftools
-      - uses: ./.github/actions/samtools
+            tabix
+      - uses: ./.github/actions/htslib-tools
 
       # The `thorough` profile in hegel.toml is 50000 cases against the CI
       # profile's 1000. Nothing ran it before, so the rare paths a property
@@ -130,8 +130,8 @@ jobs:
             autoconf automake libtool pkg-config \
             zlib1g-dev libbz2-dev liblzma-dev \
             libssl-dev libcurl4-openssl-dev \
-            tabix bcftools
-      - uses: ./.github/actions/samtools
+            tabix
+      - uses: ./.github/actions/htslib-tools
 
       # 83 of the 283 property tests pin their own `test_cases` and ignore the
       # profile entirely, so the `thorough` job above never goes deeper on them

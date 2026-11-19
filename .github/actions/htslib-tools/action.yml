@@ -1,0 +1,27 @@
+name: htslib-tools
+description: >-
+  samtools and bcftools 1.25, the htslib the SAM/BAM and VCF/BCF oracle
+  tests are written against. Ubuntu's apt builds are 1.19, which (among
+  other differences) reads U as N, rejects an empty `B:A` array, rewrites
+  the PASS description, spans a `<DEL>` without htslib's SVLEN rule and
+  leaves a haploid genotype's phase unset, so those tests fail against them.
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/htslib-tools
+        key: htslib-tools-1.25-${{ runner.os }}-${{ runner.arch }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        for tool in samtools bcftools; do
+          curl -fsSL "https://github.com/samtools/$tool/releases/download/1.25/$tool-1.25.tar.bz2" \
+            | tar -xj -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/$tool-1.25"
+          ./configure --prefix="$HOME/htslib-tools" $([ "$tool" = samtools ] && echo --without-curses)
+          make -j"$(nproc)" install
+        done
+    - shell: bash
+      run: echo "$HOME/htslib-tools/bin" >> "$GITHUB_PATH"
