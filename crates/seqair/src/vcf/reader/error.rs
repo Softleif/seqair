@@ -239,7 +239,7 @@ impl std::fmt::Display for RecordPart {
 }
 
 /// What is wrong with one record. `Clone`, so a lazily built index that
-/// failed returns the same error on every access (`r[vcf_fields.lazy]`).
+/// failed returns the same error on every access (`r[vcf_fields.lazy+4]`).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordError {

@@ -13,15 +13,16 @@
     reason = "test code"
 )]
 
+use hegel::prelude::*;
 use seqair::io::BgzfWriter;
 use seqair::vcf::reader::{
     BcfValueError, FieldError, FilterStatus, KeyKind, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadOption,
     RecordPart, RecordSection,
 };
 use seqair::vcf::{
-    Allele, DynValue, Fields, FormatGt, FullRecord, Info, InfoFlag, InfoInt, KeyError, Locus,
-    OnlySample, OpenError, PlanContext, PlanError, RawRecord, RecordError, Sample, Samples,
-    Sections, Site, VcfFile, VcfPos, VcfReadError,
+    Allele, DynValue, Fields, FormatAny, FormatGt, FullRecord, Info, InfoAny, InfoFlag, InfoInt,
+    KeyError, Locus, OnlySample, OpenError, PlanContext, PlanError, RawRecord, RecordError, Sample,
+    Samples, Sections, Site, VcfFile, VcfPos, VcfReadError,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -1016,7 +1017,7 @@ fn a_text_line_over_the_limit_fails_every_later_read() {
 }
 
 // r[verify vcf_fields.only_sample]
-// r[verify vcf_fields.lazy+3]
+// r[verify vcf_fields.lazy+4]
 /// One sample's FORMAT data is copied whole, unchecked: malformed data (a
 /// truncated column, bytes after the last field) fails on access with the
 /// same typed error the multi-sample index gives, and the next record reads.
@@ -1048,7 +1049,7 @@ fn a_malformed_single_sample_fails_on_access() {
 }
 
 // r[verify vcf_fields.sample+2]
-// r[verify vcf_fields.lazy+3]
+// r[verify vcf_fields.lazy+4]
 /// One sample of a multi-sample BCF is copied out of each column: malformed
 /// data fails every access with the error the whole section's index gives,
 /// not the read, and the next record reads.
@@ -1084,7 +1085,7 @@ fn a_malformed_sample_of_many_fails_on_access() {
     assert!(one.next_record().unwrap().is_none());
 }
 
-// r[verify vcf_fields.lazy+3]
+// r[verify vcf_fields.lazy+4]
 // r[verify vcf_reader.field_table]
 /// An INFO key the dictionary does not declare fails the lazily built index,
 /// and every access returns the same error; the record's other parts read.
@@ -1111,6 +1112,138 @@ fn a_failed_index_is_returned_on_every_access() {
     }
     // The index buffers survive the failure: the next record reads.
     assert_eq!(values, [Some(5), None, Some(5)]);
+}
+
+// ── The lazy index under interleaved accesses ──────────────────────────
+
+/// Three samples in VCF text: INFO flags, `key=`, a repeated and an
+/// undeclared key; FORMAT with dropped trailing fields, a value that does
+/// not decode, and a sample with more fields than FORMAT has keys (which
+/// fails the index).
+const TEXT_PANEL: &str = "##fileformat=VCFv4.3\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"d\">\n\
+##INFO=<ID=AF,Number=A,Type=Float,Description=\"a\">\n\
+##INFO=<ID=DB,Number=0,Type=Flag,Description=\"b\">\n\
+##INFO=<ID=NOTE,Number=1,Type=String,Description=\"n\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"g\">\n\
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"q\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"a\">\n\
+##contig=<ID=chr1,length=1000>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t10\t.\tA\tC\t.\tPASS\tDP=5;DB;AF=0.5;NOTE=x\tGT:GQ:AD\t0/1:30:3,2\t1/1:.:0,5\t0/0\n\
+chr1\t20\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2;DP=7;DP=8;XX=1;NOTE=\tGT:AD\t0|1:1,2,3\t.\t1/2:.\n\
+chr1\t30\t.\tA\tC\t.\tPASS\t.\tGT:GQ\t0/1:x\t1/1:5\t0/0:6\n\
+chr1\t40\t.\tA\tC\t.\tPASS\tDP=abc;DB\tGT\t0/1\t1/1:5\t0/0\n";
+
+/// One access to a record's INFO or FORMAT data.
+#[derive(Debug, Clone)]
+enum Access {
+    Get(usize),
+    Has(usize),
+    /// Start iterating INFO (held open across later accesses), or step it.
+    Iter,
+    Format(usize),
+    SampleHas(usize, usize),
+    SampleIter(usize),
+    /// Read a column (held open across later accesses), or step it.
+    Column(usize),
+    Clone,
+}
+
+#[hegel::composite]
+fn accesses(tc: &TestCase, n_info: usize, n_format: usize, n_samples: usize) -> Vec<Access> {
+    let info = || gs::integers::<usize>().max_value(n_info - 1);
+    let format = || gs::integers::<usize>().max_value(n_format - 1);
+    let sample = || gs::integers::<usize>().max_value(n_samples - 1);
+    let access = hegel::one_of!(
+        info().map(Access::Get),
+        info().map(Access::Has),
+        gs::just(Access::Iter),
+        format().map(Access::Format),
+        gs::tuples2(sample(), format()).map(|(s, k)| Access::SampleHas(s, k)),
+        sample().map(Access::SampleIter),
+        format().map(Access::Column),
+        gs::just(Access::Clone),
+    );
+    tc.draw(gs::vecs(access).max_size(12))
+}
+
+/// What one access reads, as text: values, errors and absence alike.
+fn read(info: &Info, samples: &Samples, keys: &Keys, access: &Access) -> String {
+    let s = |i: usize| samples.sample(keys.samples[i]);
+    match *access {
+        Access::Get(k) => format!("{:?}", info.get(&keys.info[k])),
+        Access::Has(k) => format!("{:?}", info.has(&keys.info[k])),
+        Access::Iter => format!("{:?}", info.iter().collect::<Vec<_>>()),
+        Access::Format(k) => format!("{:?}", s(0).get(&keys.format[k])),
+        Access::SampleHas(i, k) => format!("{:?}", s(i).has(&keys.format[k])),
+        Access::SampleIter(i) => format!("{:?}", s(i).iter().collect::<Vec<_>>()),
+        Access::Column(k) => {
+            format!("{:?}", samples.column(&keys.format[k]).map(|c| c.map(Vec::from_iter)))
+        }
+        Access::Clone => String::new(),
+    }
+}
+
+struct Keys {
+    info: Vec<InfoAny>,
+    format: Vec<FormatAny>,
+    samples: Vec<seqair::vcf::SampleIdx>,
+}
+
+// r[verify vcf_fields.lazy+4]
+/// Accesses interleaved on one record — lookups and `has` in any order, an
+/// INFO iterator and a column held open across them, clones at any point —
+/// never panic, and each reads what the same access reads on a fresh copy
+/// of the record; a clone reads what its source reads.
+#[hegel::test]
+fn interleaved_accesses_read_what_a_fresh_record_reads(tc: TestCase) {
+    let text = VcfFile::from_bytes(TEXT_PANEL.as_bytes().to_vec(), None).unwrap();
+    let bcf = VcfFile::open(fixture("panel.bcf")).unwrap();
+    let file = if tc.draw(gs::booleans()) { text } else { bcf };
+    let header = file.header();
+    let mut info: Vec<InfoAny> = header.infos().keys().map(|n| file.info_key(n).unwrap()).collect();
+    info.extend(file.lenient().info_key::<seqair::vcf::Any>("XX"));
+    let keys = Keys {
+        info,
+        format: header.formats().keys().map(|n| file.format_key(n).unwrap()).collect(),
+        samples: header.sample_indices().collect(),
+    };
+    let records: Vec<(Info, Samples)> =
+        file.reader::<(Info, Samples)>().open().unwrap().into_iter().map(Result::unwrap).collect();
+    let (info, samples) = &records[tc.draw(gs::integers::<usize>().max_value(records.len() - 1))];
+    let (pristine_info, pristine_samples) = (info.clone(), samples.clone());
+    let (n_info, n_format, n_samples) = (keys.info.len(), keys.format.len(), keys.samples.len());
+    let mut held_iter = None;
+    let mut held_column = None;
+    for access in tc.draw(accesses(n_info, n_format, n_samples)) {
+        let (fresh_info, fresh_samples) = (pristine_info.clone(), pristine_samples.clone());
+        match access {
+            // Each step reads the index again while other accesses interleave.
+            Access::Iter => match held_iter.as_mut() {
+                None => held_iter = Some(info.iter()),
+                Some(iter) => drop(iter.next()),
+            },
+            Access::Column(k) => match held_column.as_mut() {
+                None => held_column = samples.column(&keys.format[k]).ok().flatten(),
+                Some(column) => drop(column.next()),
+            },
+            Access::Clone => {
+                let (copy_info, copy_samples) = (info.clone(), samples.clone());
+                for k in 0..n_info {
+                    let get = Access::Get(k);
+                    let expected = read(&fresh_info, &fresh_samples, &keys, &get);
+                    assert_eq!(read(&copy_info, &copy_samples, &keys, &get), expected);
+                }
+                let iter = Access::Iter;
+                let expected = read(&fresh_info, &fresh_samples, &keys, &iter);
+                assert_eq!(read(&copy_info, &copy_samples, &keys, &iter), expected);
+            }
+            _ => {}
+        }
+        let expected = read(&fresh_info, &fresh_samples, &keys, &access);
+        assert_eq!(read(info, samples, &keys, &access), expected, "{access:?}");
+    }
 }
 
 // r[verify vcf_reader.file.header_only]

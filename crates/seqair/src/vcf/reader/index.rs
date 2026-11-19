@@ -33,6 +33,7 @@ pub(crate) enum Progress {
 }
 
 // r[impl vcf_values.index+2]
+// r[impl vcf_fields.lazy+4]
 /// The fields of one section in record order, a table with one `u32` per
 /// dictionary id, `epoch << 16 | slot`, and how far the scan that fills
 /// them got. A lookup is one table read, an epoch compare and one list
@@ -115,28 +116,6 @@ impl SectionIndex {
     /// The fields indexed, in record order, duplicates left out.
     pub(crate) fn entries(&self) -> &[Entry] {
         &self.entries
-    }
-
-    /// Whether the scan is over, done or failed.
-    pub(crate) fn settled(&self) -> bool {
-        !matches!(self.progress, Progress::Scanning { .. })
-    }
-
-    /// The scan's error, if it failed.
-    pub(crate) fn result(&self) -> Result<(), RecordError> {
-        match &self.progress {
-            Progress::Failed(e) => Err(e.clone()),
-            _ => Ok(()),
-        }
-    }
-
-    /// What a settled index reads for `id`: its entry if the scan reached
-    /// it, else the scan's error or absent.
-    pub(crate) fn found(&self, id: DictId) -> Result<Option<Entry>, RecordError> {
-        match self.get(id) {
-            Some(entry) => Ok(Some(entry)),
-            None => self.result().map(|()| None),
-        }
     }
 
     /// The first entry of `id` in the INFO section `info`, indexing no

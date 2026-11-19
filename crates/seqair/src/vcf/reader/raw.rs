@@ -2,10 +2,11 @@
 //! a [`Fields`](super::Fields) type decodes it through
 //! (`r[vcf_fields.user_types]`).
 
-use super::entries::{FormatIndex, LazyIndex};
+use super::entries::FormatIndex;
 use super::error::{RecordAt, RecordError, RecordPart, RecordSection, VcfReadError};
 use super::fields::{SampleSelection, Sections};
 use super::file::FileShared;
+use super::index::SectionIndex;
 use super::info::InfoRef;
 use super::locus::{Locus, VcfPos, span_of};
 use super::rlen::{RlenColumns, text_rlen};
@@ -16,6 +17,7 @@ use crate::io::text_scan::{find_byte, for_each_byte};
 use crate::vcf::header::{SampleIdx, VcfHeader};
 use crate::vcf::record_encoder::ContigId;
 use seqair_types::SmolStr;
+use std::cell::RefCell;
 use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
 
@@ -217,8 +219,8 @@ pub struct RawRecord<'a> {
     pub(crate) site: Option<&'a SiteParts>,
     /// The reader's indexes of this record's INFO and FORMAT data, for the
     /// views; reset for every record.
-    pub(crate) info_index: &'a LazyIndex,
-    pub(crate) format_index: &'a LazyIndex<FormatIndex>,
+    pub(crate) info_index: &'a RefCell<SectionIndex>,
+    pub(crate) format_index: &'a RefCell<FormatIndex>,
     /// The record's bytes, BCF or text.
     pub(crate) repr: Repr<'a>,
 }

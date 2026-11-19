@@ -1,12 +1,13 @@
 //! [`Reader`]: records read front to back into a [`Fields`] type
 //! (`r[vcf_reader.reader]`, `r[vcf_reader.read_into+2]`).
 
-use super::entries::{FormatIndex, LazyIndex};
+use super::entries::FormatIndex;
 use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
 use super::fields::{
     Fields, PlanContext, PlanError, ReadOption, ReadOptions, SampleSel, SampleSelection, Sections,
 };
 use super::file::{DataStart, FileShared, Input, VcfFile};
+use super::index::SectionIndex;
 use super::keys::Keys;
 use super::locus::VcfPos;
 use super::query::{self, Partition, Query, RegionInput, Verdict};
@@ -19,6 +20,7 @@ use crate::io::text_scan::find_byte;
 use crate::vcf::header::VcfHeader;
 use crate::vcf::record_encoder::ContigId;
 use rayon_core::ThreadPool;
+use std::cell::RefCell;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
@@ -193,8 +195,8 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             query,
             scratch: Vec::new(),
             site: SiteParts::default(),
-            info_index: LazyIndex::default(),
-            format_index: LazyIndex::default(),
+            info_index: RefCell::default(),
+            format_index: RefCell::default(),
             text: TextState::default(),
             ordinal: 0,
             line,
@@ -420,8 +422,8 @@ struct Core<P> {
     /// The current record's site columns, decoded.
     site: SiteParts,
     /// The current record's INFO and FORMAT indexes, for [`RawRecord`]'s views.
-    info_index: LazyIndex,
-    format_index: LazyIndex<FormatIndex>,
+    info_index: RefCell<SectionIndex>,
+    format_index: RefCell<FormatIndex>,
     text: TextState,
     ordinal: u64,
     /// The line last framed, for VCF text read from its start.
@@ -493,8 +495,8 @@ impl<P> Core<P> {
         }
         let mut with = Some(with);
         loop {
-            self.info_index.reset();
-            self.format_index.reset();
+            self.info_index.get_mut().reset();
+            self.format_index.get_mut().reset();
             let step = if self.file.is_text() {
                 self.next_text(&mut with)?
             } else {
@@ -772,8 +774,8 @@ struct Parts<'c> {
     file: &'c Arc<FileShared>,
     sections: Sections,
     site: &'c mut SiteParts,
-    info_index: &'c LazyIndex,
-    format_index: &'c LazyIndex<FormatIndex>,
+    info_index: &'c RefCell<SectionIndex>,
+    format_index: &'c RefCell<FormatIndex>,
     at: RecordAt,
     query: Option<&'c Query>,
     group: Option<usize>,

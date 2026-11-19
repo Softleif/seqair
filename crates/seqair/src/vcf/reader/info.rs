@@ -2,7 +2,6 @@
 
 use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::TypedValue;
-use super::entries::LazyIndex;
 use super::error::{RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
@@ -10,6 +9,7 @@ use super::index::{DictId, Entry, SectionIndex};
 use super::raw::RawRecord;
 use crate::vcf::header::{InfoDef, ValueType};
 use crate::vcf::record_encoder::{FieldId, InfoKey};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 // r[impl vcf_values.header_brand+2]
@@ -116,7 +116,7 @@ pub(crate) fn debug_fields<'a, D: 'a>(
 #[derive(Clone, Copy)]
 pub struct InfoRef<'a> {
     info: InfoSource<'a>,
-    index: &'a LazyIndex,
+    index: &'a RefCell<SectionIndex>,
     file: &'a FileShared,
     at: RecordAt,
 }
@@ -133,21 +133,18 @@ impl<'a> InfoRef<'a> {
     pub(crate) fn new(
         bytes: &'a [u8],
         n: usize,
-        index: &'a LazyIndex,
+        index: &'a RefCell<SectionIndex>,
         file: &'a FileShared,
         at: RecordAt,
     ) -> Self {
         Self { info: InfoSource::new(bytes, n, file), index, file, at }
     }
 
-    fn index(&self) -> Result<&'a SectionIndex, VcfReadError> {
-        let Self { info, file, at, .. } = *self;
-        self.index.whole(|index| index.finish(info, file)).map_err(|e| at.error(file, e))
-    }
-
     /// The first entry of `id`, indexing no further than that.
+    #[inline]
     fn find(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
-        self.index.find(id, self.info, self.file).map_err(|e| self.at.error(self.file, e))
+        let found = self.index.borrow_mut().find(id, self.info, self.file);
+        found.map_err(|e| self.at.error(self.file, e))
     }
 
     fn value(&self, entry: Entry) -> Result<Stored<'a>, VcfReadError> {
@@ -197,15 +194,16 @@ impl<'a> InfoRef<'a> {
     ) -> impl Iterator<Item = Result<(DictId, &'a str, &'a InfoDef, DynValue<'a>), VcfReadError>> + use<'a>
     {
         let this = *self;
-        let file = self.file;
-        let (error, entries) = match self.index() {
-            Ok(index) => (None, index.entries()),
-            Err(e) => (Some(Err(e)), &[][..]),
+        let Self { info, index, file, at } = this;
+        let finished = index.borrow_mut().finish(info, file);
+        let (error, len) = match finished {
+            Ok(()) => (None, index.borrow().entries().len()),
+            Err(e) => (Some(Err(at.error(file, e))), 0),
         };
-        error.into_iter().chain(entries.iter().filter_map(move |e| {
+        error.into_iter().chain((0..len).filter_map(move |i| {
+            let e = index.borrow().entries().get(i).copied()?;
             let (name, def) = file.fields.info_def(&file.header, e.id)?;
-            let value =
-                this.value(*e).and_then(|v| dyn_decode(v, name, def.typ, false, file, this.at));
+            let value = this.value(e).and_then(|v| dyn_decode(v, name, def.typ, false, file, at));
             Some(value.map(|v| (e.id, name, def, v)))
         }))
     }
@@ -221,7 +219,7 @@ pub struct Info {
     n: usize,
     file: Arc<FileShared>,
     at: RecordAt,
-    index: LazyIndex,
+    index: RefCell<SectionIndex>,
 }
 
 impl std::fmt::Debug for Info {
@@ -288,7 +286,7 @@ impl Fields for Info {
             n: 0,
             file: Arc::clone(raw.file),
             at: raw.at(),
-            index: LazyIndex::default(),
+            index: RefCell::default(),
         };
         info.fill(plan, raw)?;
         Ok(info)
@@ -300,7 +298,7 @@ impl Fields for Info {
         self.bytes.extend_from_slice(bytes);
         self.n = n;
         self.at = raw.at();
-        self.index.reset();
+        self.index.get_mut().reset();
         raw.keep_file(&mut self.file);
         Ok(())
     }
@@ -312,21 +310,22 @@ mod tests {
     use crate::vcf::reader::{Locus, VcfFile};
     use crate::vcf::record_encoder::InfoInt;
 
-    // r[verify vcf_fields.lazy+3]
+    // r[verify vcf_fields.lazy+4]
     /// Filling a record does not index its INFO; the first access does, and
     /// the next fill drops that index (keeping its buffers).
     #[test]
     fn info_is_indexed_on_first_access_only() {
+        let is_built = |info: &Info| !info.index.borrow().entries().is_empty();
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/rastair.bcf");
         let file = VcfFile::open(path).unwrap();
         let dp: InfoInt = file.header().info_key("DP").unwrap();
         let mut reader = file.reader::<(Locus, Info)>().open().unwrap();
         let (_, info) = reader.next_record().unwrap().unwrap();
-        assert!(!info.index.is_built());
+        assert!(!is_built(info));
         assert_eq!(info.get(&dp).unwrap(), Some(140));
-        assert!(info.index.is_built());
+        assert!(is_built(info));
         let (_, info) = reader.next_record().unwrap().unwrap();
-        assert!(!info.index.is_built());
+        assert!(!is_built(info));
         assert_eq!(info.get(&dp).unwrap(), Some(60));
     }
 }

@@ -1,6 +1,6 @@
 //! Scanning a section's bytes into its [`SectionIndex`]: BCF INFO and
 //! FORMAT entry by entry, VCF text INFO key by key, VCF text FORMAT keys
-//! and sample cells in one pass (`r[vcf_fields.lazy+3]`, `r[vcf_values.index+2]`).
+//! and sample cells in one pass (`r[vcf_fields.lazy+4]`, `r[vcf_values.index+2]`).
 
 use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
@@ -8,7 +8,6 @@ use super::file::FileShared;
 use super::index::{DictId, Entry, Progress, SectionIndex};
 use super::samples::FormatSource;
 use crate::io::text_scan::{for_each_info_entry, for_each_of_two};
-use std::cell::{Cell, OnceCell};
 use std::ops::{ControlFlow, Range};
 
 /// The entries of a BCF INFO section (`samples: None`) or FORMAT section
@@ -256,6 +255,13 @@ impl FormatIndex {
         self.n_keys = 0;
     }
 
+    /// Where sample `sample`'s value of the `k`th key lies in the sample
+    /// columns (VCF text).
+    pub(crate) fn cell(&self, sample: usize, k: usize) -> Option<Range<usize>> {
+        let r = self.values.get(sample.checked_mul(self.n_keys)?.checked_add(k)?)?;
+        Some(r.start as usize..r.end as usize)
+    }
+
     /// Index the whole FORMAT data `source` (once; later calls return the
     /// first one's outcome).
     pub(crate) fn finish(
@@ -354,152 +360,6 @@ impl FormatIndex {
             *slot = s..e;
         }
         Ok(())
-    }
-}
-
-/// An index a [`LazyIndex`] builds in place and keeps the buffers of.
-pub(crate) trait Rebuild: Default {
-    /// Start indexing a new section ([`SectionIndex::reset`]).
-    fn restart(&mut self);
-    /// The scan's error, if it failed ([`SectionIndex::result`]).
-    fn outcome(&self) -> Result<(), RecordError>;
-}
-
-impl Rebuild for SectionIndex {
-    fn restart(&mut self) {
-        self.reset();
-    }
-    fn outcome(&self) -> Result<(), RecordError> {
-        self.result()
-    }
-}
-
-impl Rebuild for FormatIndex {
-    fn restart(&mut self) {
-        self.reset();
-    }
-    fn outcome(&self) -> Result<(), RecordError> {
-        self.keys.result()
-    }
-}
-
-// r[impl vcf_fields.lazy+3]
-// r[impl vcf_values.index+2]
-/// A section's index, built on first access, in place: its buffers stay
-/// for the next record's build.
-///
-/// `partial` holds the index while lookups build it, and the spare buffers
-/// otherwise; each scan takes it out and puts it back, so one that panics
-/// leaves nothing and the next access starts over. Once the scan is over
-/// the index moves into `done`, read in place until [`reset`](Self::reset).
-/// Boxed, so these moves copy a pointer. Single-threaded cells: a record
-/// holding one is `Send`, not `Sync`.
-pub(crate) struct LazyIndex<T = SectionIndex> {
-    done: OnceCell<Box<T>>,
-    partial: Cell<Option<Box<T>>>,
-}
-
-impl<T> Default for LazyIndex<T> {
-    fn default() -> Self {
-        Self { done: OnceCell::new(), partial: Cell::new(None) }
-    }
-}
-
-impl<T: Clone> Clone for LazyIndex<T> {
-    /// A settled index is cloned; one not (or partly) built is not, and the
-    /// clone builds its own on first access.
-    fn clone(&self) -> Self {
-        Self { done: self.done.clone(), partial: Cell::new(None) }
-    }
-}
-
-impl<T: std::fmt::Debug> std::fmt::Debug for LazyIndex<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.done.get() {
-            Some(index) => f.debug_tuple("LazyIndex").field(index).finish(),
-            None => f.write_str("LazyIndex(<not built>)"),
-        }
-    }
-}
-
-impl<T: Rebuild> LazyIndex<T> {
-    /// Forget the index of the last record, keeping its buffers.
-    #[inline]
-    pub(crate) fn reset(&mut self) {
-        if let Some(index) = self.done.take() {
-            *self.partial.get_mut() = Some(index);
-        }
-        if let Some(index) = self.partial.get_mut() {
-            index.restart();
-        }
-    }
-
-    /// The whole index, `finish` scanning what is left on first access.
-    #[inline]
-    pub(crate) fn whole(
-        &self,
-        finish: impl FnOnce(&mut T) -> Result<(), RecordError>,
-    ) -> Result<&T, RecordError> {
-        match self.done.get() {
-            Some(index) => index.outcome().map(|()| &**index),
-            None => self.finish_on(finish),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn finish_on(
-        &self,
-        finish: impl FnOnce(&mut T) -> Result<(), RecordError>,
-    ) -> Result<&T, RecordError> {
-        let mut index = self.partial.take().unwrap_or_default();
-        let result = finish(&mut index);
-        let index = self.done.get_or_init(|| index);
-        result.map(|()| &**index)
-    }
-}
-
-impl LazyIndex<SectionIndex> {
-    /// Whether anything has been indexed, for tests.
-    #[cfg(test)]
-    pub(crate) fn is_built(&self) -> bool {
-        let partial = self.partial.take();
-        let started = partial.as_ref().is_some_and(|index| !index.entries().is_empty());
-        self.partial.set(partial);
-        started || self.done.get().is_some()
-    }
-
-    /// The first entry of `id` in INFO section `info`, scanning no further
-    /// than that ([`SectionIndex::find`]).
-    #[inline]
-    pub(crate) fn find(
-        &self,
-        id: DictId,
-        info: super::info::InfoSource<'_>,
-        file: &FileShared,
-    ) -> Result<Option<Entry>, RecordError> {
-        match self.done.get() {
-            Some(index) => index.found(id),
-            None => self.find_on(id, info, file),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn find_on(
-        &self,
-        id: DictId,
-        info: super::info::InfoSource<'_>,
-        file: &FileShared,
-    ) -> Result<Option<Entry>, RecordError> {
-        let mut index = self.partial.take().unwrap_or_default();
-        let found = index.find(id, info, file);
-        if index.settled() {
-            self.done.get_or_init(|| index);
-        } else {
-            self.partial.set(Some(index));
-        }
-        found
     }
 }
 

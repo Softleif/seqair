@@ -4,7 +4,7 @@
 
 use super::access::{DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
-use super::entries::{FormatIndex, LazyIndex};
+use super::entries::FormatIndex;
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
@@ -14,8 +14,8 @@ use super::raw::RawRecord;
 use crate::vcf::header::{FormatDef, SampleIdx};
 use crate::vcf::record_encoder::{FieldId, FormatKey};
 use seqair_types::{SmallVec, SmolStr};
+use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::ops::Range;
 use std::sync::Arc;
 
 /// Where a record's FORMAT data comes from, as the reader found it.
@@ -41,9 +41,9 @@ struct FormatData {
     n_samples: usize,
     file: Arc<FileShared>,
     at: RecordAt,
-    index: LazyIndex<FormatIndex>,
+    index: RefCell<FormatIndex>,
     /// The error copying one sample's values out of a multi-sample BCF
-    /// record met, returned by every access (`r[vcf_fields.lazy+3]`).
+    /// record met, returned by every access (`r[vcf_fields.lazy+4]`).
     failed: Option<RecordError>,
 }
 
@@ -56,7 +56,7 @@ impl FormatData {
             n_samples: 0,
             file: Arc::clone(raw.file),
             at: raw.at(),
-            index: LazyIndex::default(),
+            index: RefCell::default(),
             failed: None,
         }
     }
@@ -67,7 +67,7 @@ impl FormatData {
         self.keys_len = 0;
         self.n_samples = n_samples;
         self.at = raw.at();
-        self.index.reset();
+        self.index.get_mut().reset();
         self.failed = None;
         raw.keep_file(&mut self.file);
     }
@@ -88,7 +88,7 @@ impl FormatData {
                     self.bytes.extend_from_slice(indiv);
                     self.n_fmt = n_fmt;
                 }
-                // r[impl vcf_fields.lazy+3]
+                // r[impl vcf_fields.lazy+4]
                 // Malformed data fails the accesses, not the read, as it
                 // does for every other shape of FORMAT data.
                 Some(sample) => {
@@ -166,7 +166,7 @@ fn copy_one_sample(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FormatView<'a> {
     source: FormatSource<'a>,
-    index: &'a LazyIndex<FormatIndex>,
+    index: &'a RefCell<FormatIndex>,
     /// Copying the data failed: every access returns this.
     failed: Option<&'a RecordError>,
     file: &'a FileShared,
@@ -177,7 +177,7 @@ impl<'a> FormatView<'a> {
     /// The view of a record's FORMAT data straight from the reader.
     pub(crate) fn new(
         source: FormatSource<'a>,
-        index: &'a LazyIndex<FormatIndex>,
+        index: &'a RefCell<FormatIndex>,
         file: &'a FileShared,
         at: RecordAt,
     ) -> Self {
@@ -191,12 +191,30 @@ impl<'a> FormatView<'a> {
         }
     }
 
-    fn index(&self) -> Result<&'a FormatIndex, VcfReadError> {
+    /// Index the whole FORMAT data, on first access.
+    fn finish(&self) -> Result<(), VcfReadError> {
         let Self { source, file, at, .. } = *self;
         if let Some(e) = self.failed {
             return Err(at.error(file, e.clone()));
         }
-        self.index.whole(|index| index.finish(source, file)).map_err(|e| at.error(file, e))
+        let finished = self.index.borrow_mut().finish(source, file);
+        finished.map_err(|e| at.error(file, e))
+    }
+
+    /// The entry of field `id`, if the record has it.
+    fn entry(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
+        self.finish()?;
+        Ok(self.index.borrow().keys.get(id))
+    }
+
+    /// The `i`th field present, once indexed.
+    fn entry_at(&self, i: usize) -> Option<Entry> {
+        self.index.borrow().keys.entries().get(i).copied()
+    }
+
+    /// How many fields are present, once indexed.
+    fn n_fields(&self) -> usize {
+        self.index.borrow().keys.entries().len()
     }
 
     fn malformed(&self, source: BcfValueError) -> VcfReadError {
@@ -204,15 +222,11 @@ impl<'a> FormatView<'a> {
     }
 
     /// The values of the field an index entry names.
-    fn field_at(&self, index: &'a FormatIndex, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
+    fn field_at(&self, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
         match self.source {
-            FormatSource::Text { samples, n_samples, .. } => Ok(FieldAt::Text {
-                values: &index.values,
-                samples,
-                n_keys: index.n_keys,
-                k: entry.start as usize,
-                n_samples,
-            }),
+            FormatSource::Text { samples, n_samples, .. } => {
+                Ok(FieldAt::Text { index: self.index, samples, k: entry.start as usize, n_samples })
+            }
             FormatSource::Bcf { indiv, n_samples, .. } => {
                 let bytes = indiv.get(entry.span()).unwrap_or_default();
                 let (column, _) =
@@ -225,14 +239,13 @@ impl<'a> FormatView<'a> {
     /// Whether the record has field `key`.
     fn has(&self, key: &FieldId) -> Result<bool, VcfReadError> {
         check_brand(key, self.file)?;
-        Ok(self.index()?.keys.get(key.id).is_some())
+        Ok(self.entry(key.id)?.is_some())
     }
 
     /// Field `key`'s values, if the record has it.
     fn field(&self, key: &FieldId) -> Result<Option<FieldAt<'a>>, VcfReadError> {
         check_brand(key, self.file)?;
-        let index = self.index()?;
-        index.keys.get(key.id).map(|e| self.field_at(index, e)).transpose()
+        self.entry(key.id)?.map(|e| self.field_at(e)).transpose()
     }
 }
 
@@ -240,7 +253,13 @@ impl<'a> FormatView<'a> {
 #[derive(Debug, Clone, Copy)]
 enum FieldAt<'a> {
     Bcf(FormatColumn<'a>),
-    Text { values: &'a [Range<u32>], samples: &'a [u8], n_keys: usize, k: usize, n_samples: usize },
+    /// The `k`th FORMAT key's cells, read from the index one sample at a time.
+    Text {
+        index: &'a RefCell<FormatIndex>,
+        samples: &'a [u8],
+        k: usize,
+        n_samples: usize,
+    },
 }
 
 impl<'a> FieldAt<'a> {
@@ -248,12 +267,12 @@ impl<'a> FieldAt<'a> {
     fn sample(&self, i: usize) -> Option<Stored<'a>> {
         match *self {
             Self::Bcf(column) => column.sample(i).map(|v| Stored(StoredRepr::Bcf(v))),
-            Self::Text { values, samples, n_keys, k, n_samples } => {
+            Self::Text { index, samples, k, n_samples } => {
                 if i >= n_samples {
                     return None;
                 }
-                let r = values.get(i.checked_mul(n_keys)?.checked_add(k)?)?;
-                let value = samples.get(r.start as usize..r.end as usize).unwrap_or_default();
+                let cell = index.borrow().cell(i, k)?;
+                let value = samples.get(cell).unwrap_or_default();
                 Some(Stored(StoredRepr::Text(Some(value))))
             }
         }
@@ -334,20 +353,17 @@ impl<'a> SampleRef<'a> {
     ) -> impl Iterator<Item = Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError>> + use<'a>
     {
         let this = *self;
-        let index = check_sample(self.sample, self.view.file).and_then(|()| self.view.index());
-        let (error, entries) = match index {
-            Ok(index) => (None, Some(index)),
-            Err(e) => (Some(Err(e)), None),
+        let finished = check_sample(self.sample, self.view.file).and_then(|()| self.view.finish());
+        let (error, len) = match finished {
+            Ok(()) => (None, self.view.n_fields()),
+            Err(e) => (Some(Err(e)), 0),
         };
-        let fields = entries.into_iter().flat_map(move |index| {
-            index.keys.entries().iter().map(move |&e| this.dyn_entry(index, e))
-        });
+        let fields = (0..len).filter_map(move |i| Some(this.dyn_entry(this.view.entry_at(i)?)));
         error.into_iter().chain(fields)
     }
 
     fn dyn_entry(
         &self,
-        index: &'a FormatIndex,
         entry: Entry,
     ) -> Result<(&'a str, &'a FormatDef, DynValue<'a>), VcfReadError> {
         let (file, at) = (self.view.file, self.view.at);
@@ -355,7 +371,7 @@ impl<'a> SampleRef<'a> {
         let unknown =
             || at.error(file, RecordError::UnknownKey { index: id, kind: KeyKind::Format });
         let (name, def) = file.fields.format_def(&file.header, entry.id).ok_or_else(unknown)?;
-        let value = self.view.field_at(index, entry)?.sample(self.column).ok_or_else(unknown)?;
+        let value = self.view.field_at(entry)?.sample(self.column).ok_or_else(unknown)?;
         let value = dyn_decode(value, name, def.typ, name == "GT", file, at)?;
         Ok((name, def, value))
     }
@@ -392,13 +408,17 @@ impl std::fmt::Debug for SamplesRef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("Samples");
         d.field("len", &self.len());
-        match self.view.index() {
-            Ok(index) => {
-                let names: SmallVec<&str, 8> = index
+        match self.view.finish() {
+            Ok(()) => {
+                let file = self.view.file;
+                let names: SmallVec<&str, 8> = self
+                    .view
+                    .index
+                    .borrow()
                     .keys
                     .entries()
                     .iter()
-                    .filter_map(|e| self.view.file.fields.name(&self.view.file.header, e.id))
+                    .filter_map(|e| file.fields.name(&file.header, e.id))
                     .collect();
                 d.field("fields", &names)
             }
@@ -470,14 +490,14 @@ impl<'a> SamplesRef<'a> {
     ) -> Result<impl Iterator<Item = Result<DynColumn<'a>, VcfReadError>> + use<'a>, VcfReadError>
     {
         let view = self.view;
-        let index = view.index()?;
-        Ok(index.keys.entries().iter().map(move |&entry| {
+        view.finish()?;
+        Ok((0..view.n_fields()).filter_map(move |i| view.entry_at(i)).map(move |entry| {
             let (file, at) = (view.file, view.at);
             let index_id = i32::try_from(entry.id.get()).unwrap_or(i32::MAX);
             let (name, def) = file.fields.format_def(&file.header, entry.id).ok_or_else(|| {
                 at.error(file, RecordError::UnknownKey { index: index_id, kind: KeyKind::Format })
             })?;
-            let field = view.field_at(index, entry)?;
+            let field = view.field_at(entry)?;
             Ok(DynColumn { id: entry.id, name, def, field, file, at })
         }))
     }
