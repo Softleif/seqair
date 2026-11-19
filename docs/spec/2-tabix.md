@@ -45,6 +45,9 @@ Tabix files MUST start with magic bytes `TBI\x01` (4 bytes), after BGZF decompre
 
 Note: when `format=1` (SAM), htslib hard-codes the column configuration internally. The stored col_seq/col_beg/col_end values may be ignored by some implementations. The reader SHOULD NOT reject a tabix file based on stored column values when format=1.
 
+r[tabix.names]
+The `names` block MUST be read as htslib's `tbx_index_load` reads it: names are separated by NULs, and every one, the empty name included, numbers the next reference; only the empty rest after the final NUL is no name (a last name without its NUL is one, as htslib reads it). htslib's `tabix` writes an empty name for lines whose first column is empty, and a reader that dropped it numbered every later sequence one reference too low (the CSI tabix aux block, `r[csi.aux_tabix]`, holds the same list). seqair's writers never write an empty name: they name only references with records, and a contig dictionary hole has none.
+
 r[tabix.bai_reuse]
 Since tabix uses identical binning parameters to BAI (min_shift=14, depth=5), the index data after the tabix header MUST be parsed by reusing `BamIndex::from_reader()` (or equivalent). This avoids duplicating the bin/chunk/linear-index parsing code. The tabix header is read and validated first, then the remaining bytes are handed to the BAI parser.
 
