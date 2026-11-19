@@ -153,27 +153,27 @@ fn split_comma(rest: &[u8]) -> (&[u8], Option<&[u8]>) {
     }
 }
 
-/// A `,`-separated number vector, missing elements (`.`) as `None`. Every
-/// element is parsed once by [`TextVec::new`], so iterating cannot fail.
+/// A `,`-separated number vector, missing elements (`.`) as `None`. Built
+/// from text [`TextVec::parse`] checked; an element it would reject reads as
+/// missing.
 #[derive(Debug, Clone)]
 pub(crate) struct TextVec<'a, T> {
     /// The elements not yet yielded; `None` once all are.
     rest: Option<&'a [u8]>,
     len: usize,
-    /// An element other than `.` reads as missing: an integer in BCF's
-    /// reserved band.
-    reserved: bool,
     _t: PhantomData<T>,
 }
 
 impl<'a, T: TextNumber> TextVec<'a, T> {
     /// No elements: an INFO key written without a value.
     pub(crate) fn empty() -> Self {
-        Self { rest: None, len: 0, reserved: false, _t: PhantomData }
+        Self { rest: None, len: 0, _t: PhantomData }
     }
 
-    /// Checks every element of `value` (`""` is one empty, invalid element).
-    pub(crate) fn new(value: &'a [u8]) -> Result<Self, TextValueError> {
+    /// `value` with every element checked (`""` is one empty, invalid
+    /// element), and whether one other than `.` reads as missing (an
+    /// integer in BCF's reserved band).
+    pub(crate) fn parse(value: &'a [u8]) -> Result<(Self, bool), TextValueError> {
         let mut len = 0usize;
         let mut reserved = false;
         let mut rest = Some(value);
@@ -183,12 +183,14 @@ impl<'a, T: TextNumber> TextVec<'a, T> {
             len = len.saturating_add(1);
             rest = tail;
         }
-        Ok(Self { rest: Some(value), len, reserved, _t: PhantomData })
+        Ok((Self { rest: Some(value), len, _t: PhantomData }, reserved))
     }
 
-    /// Whether an element other than `.` reads as missing (a reserved integer).
-    pub(crate) fn has_reserved(&self) -> bool {
-        self.reserved
+    /// The elements of `value`, one more than its commas.
+    #[inline]
+    pub(crate) fn new(value: &'a [u8]) -> Self {
+        let commas = value.iter().filter(|&&b| b == b',').count();
+        Self { rest: Some(value), len: commas.saturating_add(1), _t: PhantomData }
     }
 
     /// Element `i` of those not yet yielded; `None` past the end.
@@ -209,9 +211,7 @@ impl<T: TextNumber> Iterator for TextVec<'_, T> {
         let (token, tail) = split_comma(self.rest?);
         self.rest = tail;
         self.len = self.len.saturating_sub(1);
-        let v = T::parse_text(token);
-        debug_assert!(v.is_ok(), "new() parsed every element");
-        v.ok()
+        Some(T::parse_text(token).ok().flatten())
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -251,9 +251,20 @@ fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
         .ok_or_else(|| TextValueError::GenotypeAlleleOutOfRange { value: Offending::new(token) })
 }
 
+/// A genotype's alleles after any leading phase indicator, and that
+/// indicator's phase.
+fn split_prefix(gt: &[u8]) -> (Option<bool>, &[u8]) {
+    match gt.split_first() {
+        Some((&b'|', body)) => (Some(true), body),
+        Some((&b'/', body)) => (Some(false), body),
+        _ => (None, gt),
+    }
+}
+
 // r[impl vcf_values.gt+2]
 /// A text GT (`0/1`, `0|1`, `.`, `./.`, `1`, `0/1|2`, VCF 4.4's `|0|1`),
-/// allele by allele, checked once by [`TextGt::new`].
+/// allele by allele. Built from text [`TextGt::check`] passed; an allele it
+/// would reject reads as missing.
 #[derive(Debug, Clone)]
 pub(crate) struct TextGt<'a> {
     /// The alleles not yet yielded; `None` once all are.
@@ -264,28 +275,34 @@ pub(crate) struct TextGt<'a> {
 }
 
 impl<'a> TextGt<'a> {
+    /// Check every allele of `gt`: digits up to 65535, or `.`.
+    pub(crate) fn check(gt: &[u8]) -> Result<(), TextValueError> {
+        let mut rest = Some(split_prefix(gt).1);
+        while let Some(r) = rest {
+            let (token, sep) = split_allele(r);
+            parse_allele(token).map_err(|e| e.naming(gt))?;
+            rest = sep.map(|(_, tail)| tail);
+        }
+        Ok(())
+    }
+
     // r[impl vcf_record.gt_first_phase+3]
-    /// `gt` checked and its first allele's phase settled: with
+    /// `gt` with its first allele's phase settled: with
     /// `first_phase_is_read` (VCF 4.4 and later) a leading `|` or `/` gives
     /// it; without one, htslib's rule infers it — a haploid allele is phased
     /// unless it is `.`, a longer genotype is phased iff every separator is
     /// `|` — so text and htslib-written BCF agree. Before 4.4 it is unphased.
     #[inline]
-    pub(crate) fn new(gt: &'a [u8], first_phase_is_read: bool) -> Result<Self, TextValueError> {
-        let (prefix, body) = match gt.split_first() {
-            Some((&b'|', body)) => (Some(true), body),
-            Some((&b'/', body)) => (Some(false), body),
-            _ => (None, gt),
-        };
+    pub(crate) fn new(gt: &'a [u8], first_phase_is_read: bool) -> Self {
+        let (prefix, body) = split_prefix(gt);
         let mut len = 0usize;
         let mut all_phased = true;
         let mut first_missing = false;
         let mut rest = Some(body);
         while let Some(r) = rest {
             let (token, sep) = split_allele(r);
-            let allele = parse_allele(token).map_err(|e| e.naming(gt))?;
             if len == 0 {
-                first_missing = allele.is_none();
+                first_missing = token == b".";
             }
             len = len.saturating_add(1);
             rest = sep.map(|(phased, tail)| {
@@ -295,21 +312,20 @@ impl<'a> TextGt<'a> {
         }
         let phased = first_phase_is_read
             && prefix.unwrap_or(if len == 1 { !first_missing } else { all_phased });
-        Ok(Self { rest: Some(body), len, phased })
+        Self { rest: Some(body), len, phased }
     }
 }
 
 impl Iterator for TextGt<'_> {
     type Item = GtAllele;
 
+    #[inline]
     fn next(&mut self) -> Option<GtAllele> {
         let (token, sep) = split_allele(self.rest?);
         let phased = self.phased;
         (self.phased, self.rest) = sep.map_or((false, None), |(p, tail)| (p, Some(tail)));
         self.len = self.len.saturating_sub(1);
-        let allele = parse_allele(token);
-        debug_assert!(allele.is_ok(), "new() checked every allele");
-        Some(GtAllele { allele: allele.unwrap_or(None), phased })
+        Some(GtAllele { allele: parse_allele(token).ok().flatten(), phased })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -450,10 +466,11 @@ mod tests {
         let values =
             tc.draw(gs::vecs(gs::optional(gs::integers::<i32>())).min_size(1).max_size(40));
         let text = join(&values.iter().map(|v| v.map(|v| v.to_string())).collect::<Vec<_>>());
-        let v = TextVec::<i32>::new(text.as_bytes()).unwrap();
+        let (v, reserved) = TextVec::<i32>::parse(text.as_bytes()).unwrap();
+        assert_eq!(TextVec::<i32>::new(text.as_bytes()).len(), v.len());
         // BCF's reserved band reads as missing.
         let read: Vec<_> = values.iter().map(|v| v.filter(|&v| v >= i32::MIN + 8)).collect();
-        assert_eq!(v.has_reserved(), read != values);
+        assert_eq!(reserved, read != values);
         assert_eq!(v.len(), values.len());
         for (i, &expected) in read.iter().enumerate() {
             assert_eq!(v.get(i), Some(expected), "element {i}");
@@ -465,17 +482,21 @@ mod tests {
     #[test]
     fn a_bad_element_anywhere_fails_the_vector() {
         assert!(matches!(
-            TextVec::<i32>::new(b"1,2,x"),
+            TextVec::<i32>::parse(b"1,2,x"),
             Err(TextValueError::InvalidInteger { .. })
         ));
-        assert!(matches!(TextVec::<i32>::new(b"1,,2"), Err(TextValueError::InvalidInteger { .. })));
-        assert!(matches!(TextVec::<i32>::new(b""), Err(TextValueError::InvalidInteger { .. })));
-        assert!(matches!(TextVec::<i32>::new(b"1,"), Err(TextValueError::InvalidInteger { .. })));
         assert!(matches!(
-            TextVec::<f32>::new(b"0.5,abc"),
+            TextVec::<i32>::parse(b"1,,2"),
+            Err(TextValueError::InvalidInteger { .. })
+        ));
+        assert!(matches!(TextVec::<i32>::parse(b""), Err(TextValueError::InvalidInteger { .. })));
+        assert!(matches!(TextVec::<i32>::parse(b"1,"), Err(TextValueError::InvalidInteger { .. })));
+        assert!(matches!(
+            TextVec::<f32>::parse(b"0.5,abc"),
             Err(TextValueError::InvalidFloat { .. })
         ));
-        let v = TextVec::<f32>::new(b".,0.5,Inf").unwrap();
+        let (v, reserved) = TextVec::<f32>::parse(b".,0.5,Inf").unwrap();
+        assert!(!reserved);
         assert_eq!(v.collect::<Vec<_>>(), [None, Some(0.5), Some(f32::INFINITY)]);
     }
 
@@ -487,18 +508,18 @@ mod tests {
         {
             assert!(
                 matches!(
-                    TextGt::new(bad.as_bytes(), true),
+                    TextGt::check(bad.as_bytes()),
                     Err(TextValueError::InvalidGenotype { .. })
                 ),
                 "{bad:?}"
             );
         }
         assert!(matches!(
-            TextGt::new(b"0/65536", true),
+            TextGt::check(b"0/65536"),
             Err(TextValueError::GenotypeAlleleOutOfRange { .. })
         ));
         assert_eq!(
-            TextGt::new(b"0/x1", true).unwrap_err().to_string(),
+            TextGt::check(b"0/x1").unwrap_err().to_string(),
             "\"0/x1\" is not a genotype (alleles as digits or `.`, separated by `/` or `|`)"
         );
         let long = vec![b'\xff'; 100];
@@ -506,7 +527,8 @@ mod tests {
         let TextValueError::InvalidFloat { value } = &e else { panic!("{e:?}") };
         assert_eq!((value.as_bytes().len(), value.is_truncated()), (Offending::MAX, true));
         assert!(e.to_string().starts_with("\"\\xff"), "{e}");
-        let gt: Vec<_> = TextGt::new(b"65535|00", true).unwrap().map(|a| a.allele).collect();
+        TextGt::check(b"65535|00").unwrap();
+        let gt: Vec<_> = TextGt::new(b"65535|00", true).map(|a| a.allele).collect();
         assert_eq!(gt, [Some(65535), Some(0)]);
     }
 }

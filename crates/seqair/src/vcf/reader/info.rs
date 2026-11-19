@@ -1,10 +1,11 @@
 //! [`Info`]: the INFO column, indexed on first access (`r[vcf_fields.info]`),
 //! and what the INFO and FORMAT views share: the brand check and decoding a
-//! stored value through a key ([`decode`]) or a field table definition
-//! ([`dyn_decode`]).
+//! stored value through a key ([`get`], [`check`]) or a field table
+//! definition ([`get_dyn`]).
 
-use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
+use super::access::{DecodeCx, DynValue, ReadCx, ReadKind, Stored, StoredRepr, Valid, dyn_get};
 use super::bcf_value::TypedValue;
+use super::error::FieldError;
 use super::error::{RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
@@ -61,42 +62,63 @@ impl<'a> InfoSource<'a> {
     }
 }
 
-/// Decode `value`, the field `key`'s, as `V`.
-pub(crate) fn decode<'a, V: ReadKind>(
+/// How to check and read the field `name`: its key's, or its definition's
+/// in the file's field table.
+pub(crate) fn decode_cx<'f>(
+    file: &'f FileShared,
+    name: &'f str,
+    declared: ValueType,
+    genotype: bool,
+) -> DecodeCx<'f> {
+    let first_phase_is_read = file.first_phase_is_read;
+    DecodeCx { read: ReadCx { first_phase_is_read, declared, genotype }, file: Some(file), name }
+}
+
+/// How to check and read the field `key` names.
+pub(crate) fn key_cx<'f>(key: &'f FieldId, file: &'f FileShared) -> DecodeCx<'f> {
+    decode_cx(file, &key.name, key.typ, key.genotype)
+}
+
+/// Check `values` as `V`, an error saying which field and record.
+#[inline]
+pub(crate) fn check<'a, V: ReadKind>(
+    values: Stored<'a>,
+    cx: DecodeCx<'_>,
+    file: &FileShared,
+    at: RecordAt,
+) -> Result<Valid<'a, V>, VcfReadError> {
+    Valid::check(values, cx).map_err(|source| field_error(cx, file, at, source))
+}
+
+/// Check and read one value as `V`, an error saying which field and record.
+#[inline]
+pub(crate) fn get<'a, V: ReadKind>(
     value: Stored<'a>,
-    key: &FieldId,
+    cx: DecodeCx<'_>,
     file: &FileShared,
     at: RecordAt,
 ) -> Result<V::Out<'a>, VcfReadError> {
-    let cx = DecodeCx {
-        first_phase_is_read: file.first_phase_is_read,
-        declared: key.typ,
-        genotype: key.genotype,
-        file: Some(file),
-        name: &key.name,
-    };
-    V::decode(value, cx)
-        .map_err(|source| at.error(file, RecordError::Field { name: key.name.clone(), source }))
+    V::get(value, cx).map_err(|source| field_error(cx, file, at, source))
 }
 
-/// Decode `value`, the field `name`'s, as `declared` says.
-pub(crate) fn dyn_decode<'a>(
+/// Check and read one value as its declaration says.
+pub(crate) fn get_dyn<'a>(
     value: Stored<'a>,
-    name: &str,
-    declared: ValueType,
-    genotype: bool,
+    cx: DecodeCx<'_>,
     file: &FileShared,
     at: RecordAt,
 ) -> Result<DynValue<'a>, VcfReadError> {
-    let cx = DecodeCx {
-        first_phase_is_read: file.first_phase_is_read,
-        declared,
-        genotype,
-        file: Some(file),
-        name,
-    };
-    DynValue::decode(value, declared, genotype, cx)
-        .map_err(|source| at.error(file, RecordError::Field { name: name.into(), source }))
+    dyn_get(value, cx).map_err(|source| field_error(cx, file, at, source))
+}
+
+#[cold]
+fn field_error(
+    cx: DecodeCx<'_>,
+    file: &FileShared,
+    at: RecordAt,
+    source: FieldError,
+) -> VcfReadError {
+    at.error(file, RecordError::Field { name: cx.name.into(), source })
 }
 
 // r[impl vcf_reader.debug]
@@ -170,7 +192,9 @@ impl<'a> InfoRef<'a> {
     pub fn get<V: ReadKind>(&self, key: &InfoKey<V>) -> Result<V::Out<'a>, VcfReadError> {
         check_brand(&key.0, self.file)?;
         match self.find(key.0.id)? {
-            Some(entry) => decode::<V>(self.value(entry)?, &key.0, self.file, self.at),
+            Some(entry) => {
+                get::<V>(self.value(entry)?, key_cx(&key.0, self.file), self.file, self.at)
+            }
             None => Ok(V::absent()),
         }
     }
@@ -212,7 +236,8 @@ impl<'a> InfoRef<'a> {
         error.into_iter().chain((0..len).filter_map(move |i| {
             let e = index.borrow().entries().get(i).copied()?;
             let (name, def) = file.fields.info_def(&file.header, e.id)?;
-            let value = this.value(e).and_then(|v| dyn_decode(v, name, def.typ, false, file, at));
+            let cx = decode_cx(file, name, def.typ, false);
+            let value = this.value(e).and_then(|v| get_dyn(v, cx, file, at));
             Some(value.map(|v| (e.id, name, def, v)))
         }))
     }

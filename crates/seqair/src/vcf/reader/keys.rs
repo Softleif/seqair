@@ -69,6 +69,10 @@ pub(crate) struct FieldTable {
     format: Vec<Option<Declared<FormatDef>>>,
     /// The header dictionary's size: ids from here are reserved, then extra.
     header_len: usize,
+    /// The id of `GT`, which generic iteration reads as a genotype in FORMAT
+    /// (a key carries the same decision in `FieldId::genotype`). VCF text
+    /// reserves `GT`, so no record can name it by an id past these.
+    genotype: Option<DictId>,
     /// Names of the reserved ids, from `header_len`.
     reserved_names: Vec<&'static str>,
     /// The id the table's keys carry when the header does not declare them:
@@ -135,8 +139,10 @@ impl FieldTable {
         format.resize(base, None);
         let reserved_ids =
             reserved_names.iter().enumerate().map(|(i, &n)| (header_len.saturating_add(i), n));
+        let keys = TextKeys::new(dict.iter().chain(reserved_ids));
         Self {
-            keys: TextKeys::new(dict.iter().chain(reserved_ids)),
+            genotype: keys.get(b"GT"),
+            keys,
             info,
             format,
             header_len,
@@ -147,6 +153,11 @@ impl FieldTable {
             warned: AtomicBool::new(false),
             path: None,
         }
+    }
+
+    /// Whether FORMAT field `id` is `GT`.
+    pub(crate) fn is_genotype(&self, id: DictId) -> bool {
+        self.genotype == Some(id)
     }
 
     /// Ids below this one are the header's or reserved.

@@ -5,7 +5,7 @@
 //! pushes one [`Entry`] per field, and leaves its stopping point in the
 //! index's `Progress`; the index itself decides when to call it.
 
-use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
+use super::bcf_value::{BcfValueError, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
 use super::file::FileShared;
 use super::index::{DictId, Entry, FormatIndex, Progress, SectionIndex};
@@ -86,10 +86,7 @@ impl<'a> BcfEntries<'a> {
         let rest = self.bytes.get(self.at..).unwrap_or_default();
         let (key, key_len) = read_typed_int(rest)?;
         let value = rest.get(key_len..).unwrap_or_default();
-        let len = match self.samples {
-            None => TypedValue::parse(value)?.1,
-            Some(n) => FormatColumn::parse(value, n)?.1,
-        };
+        let len = TypedValue::parse_column(value, self.samples.unwrap_or(1))?.1;
         let start = self.at.saturating_add(key_len);
         let end = start.saturating_add(len);
         self.at = end;

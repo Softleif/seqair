@@ -101,6 +101,14 @@ impl<'a, T: Number> OptValues<'a, T> {
 #[derive(Clone)]
 pub struct Values<'a, T>(OptValues<'a, T>);
 
+impl<'a, T> Values<'a, T> {
+    /// `v`, which [`OptValues::all_present`] passed when it was checked; a
+    /// missing element would end the vector.
+    pub(crate) fn checked(v: OptValues<'a, T>) -> Self {
+        Self(v)
+    }
+}
+
 // Per element type rather than over the crate's private `Number` bound, so
 // no public impl names a private trait.
 macro_rules! number_views {
@@ -171,9 +179,7 @@ macro_rules! number_views {
 
             #[inline]
             fn next(&mut self) -> Option<$t> {
-                let v = self.0.next_inner()?;
-                debug_assert!(v.is_some(), "all_present checked every element");
-                v
+                self.0.next_inner().flatten()
             }
 
             fn size_hint(&self) -> (usize, Option<usize>) {
@@ -205,6 +211,18 @@ pub(crate) enum GtAlleles<'a> {
 }
 
 impl GtAlleles<'_> {
+    /// Whether the genotype is `.`: no alleles, or one missing allele.
+    #[inline]
+    pub(crate) fn is_missing(&self) -> bool {
+        match self {
+            Self::Bcf(gt) => gt.is_missing(),
+            Self::Text(gt) => {
+                let mut alleles = gt.clone();
+                matches!(alleles.next(), Some(GtAllele { allele: None, .. })) && alleles.len() == 0
+            }
+        }
+    }
+
     /// The writer's owned genotype. It has no slot for the first allele's
     /// phase: the writer derives that from the separators.
     pub(crate) fn into_genotype(self) -> Genotype {
@@ -311,11 +329,11 @@ mod tests {
         BCF_BT_FLOAT, FLOAT_MISSING, encode_type_byte, encode_typed_int_vec,
     };
     use crate::vcf::bcf_encoding::{BCF_BT_INT32, INT32_END_OF_VECTOR};
-    use crate::vcf::reader::bcf_value::{FormatColumn, TypedValue};
+    use crate::vcf::reader::bcf_value::TypedValue;
     use hegel::prelude::*;
 
     fn bcf(bytes: &[u8]) -> OptValues<'_, i32> {
-        OptValues::bcf(TypedValue::parse(bytes).unwrap().0.ints().unwrap())
+        OptValues::bcf(TypedValue::parse(bytes).unwrap().0.numbers::<i32>().unwrap())
     }
 
     // r[verify vcf_values.access+2]
@@ -343,7 +361,7 @@ mod tests {
     // r[verify vcf_values.gt+2]
     #[test]
     fn genotypes_index_their_alleles() {
-        let gt = GenotypeRef(GtAlleles::Text(TextGt::new(b"0|1/.", true).unwrap()));
+        let gt = GenotypeRef(GtAlleles::Text(TextGt::new(b"0|1/.", true)));
         assert_eq!((gt.ploidy(), gt.get(0).map(|a| a.allele)), (3, Some(Some(0))));
         assert_eq!(gt.get(1), Some(GtAllele { allele: Some(1), phased: true }));
         assert_eq!(gt.get(2), Some(GtAllele { allele: None, phased: false }));
@@ -361,7 +379,7 @@ mod tests {
     }
 
     fn text<T: Number>(bytes: &[u8]) -> OptValues<'_, T> {
-        OptValues::text(TextVec::new(bytes).unwrap())
+        OptValues::text(TextVec::parse(bytes).unwrap().0)
     }
 
     // r[verify vcf_values.access+2]
@@ -391,7 +409,7 @@ mod tests {
         let text_bytes = text_bytes.join(",");
 
         let from_bcf: OptValues<'_, f32> =
-            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.floats().unwrap());
+            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.numbers::<f32>().unwrap());
         let from_text = text::<f32>(text_bytes.as_bytes());
         assert_eq!(from_bcf.is_missing(), from_text.is_missing());
         assert_eq!(
@@ -413,7 +431,7 @@ mod tests {
         let text_bytes: Vec<String> = values.iter().map(i32::to_string).collect();
         let text_bytes = text_bytes.join(",");
         let from_bcf: OptValues<'_, i32> =
-            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.ints().unwrap());
+            OptValues::bcf(TypedValue::parse(&bcf_bytes).unwrap().0.numbers::<i32>().unwrap());
         let from_text = text::<i32>(text_bytes.as_bytes());
         assert_eq!(from_bcf.all_present().unwrap().collect::<Vec<_>>(), values);
         assert_eq!(from_text.all_present().unwrap().collect::<Vec<_>>(), values);
@@ -424,15 +442,19 @@ mod tests {
     }
 
     fn text_gt(gt: &str, read: bool) -> Vec<GtAllele> {
-        GtAlleles::Text(TextGt::new(gt.as_bytes(), read).unwrap()).collect()
+        GtAlleles::Text(TextGt::new(gt.as_bytes(), read)).collect()
     }
 
     /// Each sample's alleles from a GT column: its descriptor and elements.
     fn bcf_gts(bytes: &[u8], n_samples: usize, read: bool) -> Vec<Vec<GtAllele>> {
-        let (column, len) = FormatColumn::parse(bytes, n_samples).unwrap();
+        let (column, len) = TypedValue::parse_column(bytes, n_samples).unwrap();
         assert_eq!(len, bytes.len());
         (0..n_samples)
-            .map(|i| GtAlleles::Bcf(column.sample(i).unwrap().gt(read).unwrap()).collect())
+            .map(|i| {
+                let sample = column.sample(i).unwrap();
+                sample.check_gt().unwrap();
+                GtAlleles::Bcf(BcfGt::new(sample, read)).collect()
+            })
             .collect()
     }
 
@@ -482,9 +504,7 @@ mod tests {
 
     #[test]
     fn genotypes_convert_to_the_writers_genotype() {
-        let gt = |text: &str| {
-            GtAlleles::Text(TextGt::new(text.as_bytes(), true).unwrap()).into_genotype()
-        };
+        let gt = |text: &str| GtAlleles::Text(TextGt::new(text.as_bytes(), true)).into_genotype();
         assert_eq!(gt("0|1"), Genotype::phased_diploid(0, 1));
         assert_eq!(gt("0/1"), Genotype::unphased(0, 1));
         assert_eq!(gt("1"), Genotype::haploid(1));

@@ -10,7 +10,7 @@
 
 use super::error::{FieldMapError, KeyKind, VcfError};
 use super::header::{Number, ValueType, VcfHeader};
-use super::reader::{DictId, DynValue, FilterStatus, FullRecord, VcfFile};
+use super::reader::{Any, Column, DictId, DynValue, FilterStatus, FullRecord, VcfFile};
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::unified::{Escape, Ready, RecordEdit, Writer};
@@ -426,7 +426,7 @@ impl<W: Write> Writer<W, Ready> {
             for column in record.samples().columns()? {
                 let column = column?;
                 if let Some(out) = map.field(KeyKind::Format, column.id, column.name)? {
-                    copy_format(&mut enc, &out, &column, record.samples().len())?;
+                    copy_format(&mut enc, &out, &column)?;
                 }
             }
         }
@@ -470,10 +470,9 @@ fn copy_format(
     enc: &mut RecordEdit<'_>,
     id: &FieldId,
     column: &super::reader::DynColumn<'_>,
-    n_samples: usize,
 ) -> Result<(), VcfError> {
     let mut s = std::mem::take(&mut enc.record.copy);
-    let result = copy_format_with(enc, id, column, n_samples, &mut s);
+    let result = copy_format_with(enc, id, column, &mut s);
     enc.record.copy = s;
     result
 }
@@ -482,44 +481,41 @@ fn copy_format_with(
     enc: &mut RecordEdit<'_>,
     id: &FieldId,
     column: &super::reader::DynColumn<'_>,
-    n: usize,
     s: &mut CopyScratch,
 ) -> Result<(), VcfError> {
-    if column.name == "GT" {
+    let values = column.values()?;
+    if column.genotype {
         s.gts.clear();
-        for i in 0..n {
-            s.gts.push(match column.sample(i)? {
-                Some(DynValue::Gt(Some(gt))) => gt.to_genotype(),
-                _ => Genotype { alleles: SmallVec::new(), phased: SmallVec::new() },
-            });
-        }
+        s.gts.extend(values.map(|v| match v {
+            Some(DynValue::Gt(Some(gt))) => gt.to_genotype(),
+            _ => Genotype { alleles: SmallVec::new(), phased: SmallVec::new() },
+        }));
         return enc.format_gt(id, &s.gts);
     }
     match column.def.typ {
         ValueType::Integer => {
-            gather(column, n, &mut s.ints, &mut s.ends, |v, out| {
+            gather(values, &mut s.ints, &mut s.ends, |v, out| {
                 if let DynValue::Int(v) = v {
                     out.extend(v);
                 }
-            })?;
+            });
             enc.format_int_opts(id, &slices(&s.ints, &s.ends))
         }
         ValueType::Float => {
-            gather(column, n, &mut s.floats, &mut s.ends, |v, out| {
+            gather(values, &mut s.floats, &mut s.ends, |v, out| {
                 if let DynValue::Float(v) = v {
                     out.extend(v);
                 }
-            })?;
+            });
             enc.format_float_opts(id, &slices(&s.floats, &s.ends))
         }
         ValueType::String | ValueType::Character => {
-            let mut strings: SmallVec<&str, 8> = SmallVec::with_capacity(n);
-            for i in 0..n {
-                strings.push(match column.sample(i)? {
+            let strings: SmallVec<&str, 8> = values
+                .map(|v| match v {
                     Some(DynValue::Str(Some(v))) => v,
                     _ => "",
-                });
-            }
+                })
+                .collect();
             enc.format_str(id, &strings, Escape::Structure(b':'))
         }
         // A header declares no FORMAT Flag.
@@ -529,18 +525,17 @@ fn copy_format_with(
 
 /// Every sample's elements into `values`, each sample's end into `ends`; a
 /// sample without any is one missing element.
-fn gather<T: Copy>(
-    column: &super::reader::DynColumn<'_>,
-    n: usize,
+fn gather<'a, T: Copy>(
+    column: Column<'a, Any>,
     values: &mut Vec<Option<T>>,
     ends: &mut Vec<usize>,
-    elements: impl Fn(DynValue<'_>, &mut Vec<Option<T>>),
-) -> Result<(), VcfError> {
+    elements: impl Fn(DynValue<'a>, &mut Vec<Option<T>>),
+) {
     values.clear();
     ends.clear();
-    for i in 0..n {
+    for v in column {
         let start = values.len();
-        if let Some(v) = column.sample(i)? {
+        if let Some(v) = v {
             elements(v, values);
         }
         if values.len() == start {
@@ -548,7 +543,6 @@ fn gather<T: Copy>(
         }
         ends.push(values.len());
     }
-    Ok(())
 }
 
 /// The per-sample slices of `values` that `ends` delimits.

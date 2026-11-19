@@ -161,11 +161,16 @@ pub(crate) fn skip_typed_value(bytes: &[u8]) -> Result<usize, BcfValueError> {
     TypedValue::parse(bytes).map(|(_, len)| len)
 }
 
-/// One typed value: its type, element count and the bytes of its elements.
+/// Typed values of one field: one value (an INFO field's, a site column's,
+/// one sample's), or a FORMAT column of `n` samples, each `count` elements
+/// laid out sample after sample under one descriptor.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TypedValue<'a> {
     ty: BcfType,
+    /// Elements per sample (for [`BcfType::Missing`], with no bytes behind them).
     count: usize,
+    /// How many samples' elements `payload` holds: 1 but in a FORMAT column.
+    n: usize,
     payload: &'a [u8],
 }
 
@@ -174,10 +179,16 @@ impl<'a> TypedValue<'a> {
     /// The typed value at the start of `bytes`, and its encoded length
     /// (descriptor and elements), so the caller can step to the next one.
     pub(crate) fn parse(bytes: &'a [u8]) -> Result<(Self, usize), BcfValueError> {
+        Self::parse_column(bytes, 1)
+    }
+
+    /// The values of `n` samples at the start of `bytes` (a FORMAT field's,
+    /// after its key), and their encoded length.
+    pub(crate) fn parse_column(bytes: &'a [u8], n: usize) -> Result<(Self, usize), BcfValueError> {
         let (ty, count, header) = descriptor(bytes)?;
-        let len = payload_len(ty, count, 1)?;
+        let len = payload_len(ty, count, n)?;
         let payload = take(bytes, header, len)?;
-        Ok((Self { ty, count, payload }, header.saturating_add(len)))
+        Ok((Self { ty, count, n, payload }, header.saturating_add(len)))
     }
 
     #[cfg(test)]
@@ -185,52 +196,64 @@ impl<'a> TypedValue<'a> {
         self.ty
     }
 
-    /// The payload's length in bytes (the value after its descriptor).
-    pub(crate) fn stored_len(&self) -> usize {
-        self.payload.len()
+    /// The elements' bytes, every sample's.
+    pub(crate) fn payload(&self) -> &'a [u8] {
+        self.payload
     }
 
-    /// The element count the descriptor declares (for [`BcfType::Missing`],
-    /// with no bytes behind it).
+    /// The element count the descriptor declares per sample (for
+    /// [`BcfType::Missing`], with no bytes behind it).
     pub(crate) fn count(&self) -> usize {
         self.count
     }
 
-    /// Whether the elements are of a type `T` reads.
-    pub(crate) fn reads_as<T: BcfNumber>(&self) -> bool {
-        T::check(self.ty).is_ok()
+    /// How many samples' values this holds.
+    pub(crate) fn n(&self) -> usize {
+        self.n
     }
 
-    /// Whether the elements are integers and `ok` holds for every one of
-    /// them, past any end-of-vector too; missing and end-of-vector pass.
-    pub(crate) fn every_int(&self, ok: impl Fn(i32) -> bool) -> bool {
-        let width = self.ty.width();
-        self.reads_as::<i32>()
-            && (width == 0
-                || self.payload.chunks_exact(width).all(|e| match i32::decode(self.ty, e) {
-                    Slot::Value(v) => ok(v),
-                    Slot::Missing | Slot::End => true,
-                }))
+    /// Sample `i`'s values, `None` past the last sample. `parse_column`
+    /// checked that every sample's bytes are there.
+    #[inline]
+    pub(crate) fn sample(&self, i: usize) -> Option<Self> {
+        if i >= self.n {
+            return None;
+        }
+        let stride = self.count.saturating_mul(self.ty.width());
+        let start = i.checked_mul(stride)?;
+        let payload = self.payload.get(start..start.checked_add(stride)?)?;
+        Some(Self { n: 1, payload, ..*self })
     }
 
-    /// The elements as integers, at their stored width.
-    pub(crate) fn ints(self) -> Result<BcfVec<'a, i32>, BcfValueError> {
-        BcfVec::new(self)
+    /// Every sample's values, in order.
+    pub(crate) fn samples(self) -> impl Iterator<Item = Self> {
+        (0..self.n).map_while(move |i| self.sample(i))
     }
 
-    /// The elements as floats.
-    pub(crate) fn floats(self) -> Result<BcfVec<'a, f32>, BcfValueError> {
-        BcfVec::new(self)
+    /// The elements as `T` (integers at their stored width, or floats),
+    /// failing unless they are of a type `T` reads.
+    pub(crate) fn numbers<T: BcfNumber>(self) -> Result<BcfVec<'a, T>, BcfValueError> {
+        T::check(self.ty)?;
+        Ok(BcfVec::new(self))
     }
 
     // r[impl vcf_values.gt+2]
-    /// One sample's GT vector. `first_phase_is_read` is false for VCF 4.3 and
-    /// earlier, whose first allele's phase bit is treated as unphased
-    /// (`r[vcf_record.gt_first_phase+3]`).
-    #[inline]
-    pub(crate) fn gt(self, first_phase_is_read: bool) -> Result<BcfGt<'a>, BcfValueError> {
-        let alleles = BcfVec::checked(self, |v| gt_allele(v).map(drop))?;
-        Ok(BcfGt { alleles, first: true, first_phase_is_read })
+    /// Check every sample's GT elements: integers, each up to its sample's
+    /// end-of-vector `(allele + 1) << 1 | phased` with the allele at most
+    /// 65535 (or missing). Fails as reading the samples one by one fails first.
+    pub(crate) fn check_gt(self) -> Result<(), BcfValueError> {
+        i32::check(self.ty)?;
+        // Every int8 byte up to 0x81 is a valid element, missing or the end:
+        // diploid int8 genotypes, nearly every GT column, need no walk.
+        if self.ty == BcfType::Int8 && self.payload.iter().fold(true, |ok, &b| ok & (b <= 0x81)) {
+            return Ok(());
+        }
+        for sample in self.samples() {
+            if let Some(value) = BcfVec::<i32>::new(sample).flatten().find(|&v| !is_gt_value(v)) {
+                return Err(BcfValueError::InvalidGenotype { value });
+            }
+        }
+        Ok(())
     }
 
     // r[impl vcf_values.text_strings]
@@ -252,59 +275,6 @@ fn payload_len(ty: BcfType, count: usize, samples: usize) -> Result<usize, BcfVa
         .checked_mul(ty.width())
         .and_then(|n| n.checked_mul(samples))
         .ok_or(BcfValueError::LengthOverflow { count, ty, samples })
-}
-
-/// A FORMAT field's values: one typed descriptor, then the same number of
-/// elements for each sample, sample after sample.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FormatColumn<'a> {
-    ty: BcfType,
-    /// Length of the type descriptor (with its overflow count).
-    header: usize,
-    per_sample: usize,
-    n_samples: usize,
-    stride: usize,
-    payload: &'a [u8],
-}
-
-impl<'a> FormatColumn<'a> {
-    /// The values of `n_samples` samples at the start of `bytes` (the bytes
-    /// after the field's key), and their encoded length.
-    pub(crate) fn parse(bytes: &'a [u8], n_samples: usize) -> Result<(Self, usize), BcfValueError> {
-        let (ty, per_sample, header) = descriptor(bytes)?;
-        let len = payload_len(ty, per_sample, n_samples)?;
-        let payload = take(bytes, header, len)?;
-        let stride = per_sample.saturating_mul(ty.width());
-        let column = Self { ty, header, per_sample, n_samples, stride, payload };
-        Ok((column, header.saturating_add(len)))
-    }
-
-    /// The length of the type descriptor at the start of the column's bytes.
-    pub(crate) fn header_len(&self) -> usize {
-        self.header
-    }
-
-    /// Every sample's elements as one value, and how many each sample has.
-    pub(crate) fn all(&self) -> (TypedValue<'a>, usize) {
-        let count = self.per_sample.saturating_mul(self.n_samples);
-        (TypedValue { ty: self.ty, count, payload: self.payload }, self.per_sample)
-    }
-
-    /// The bytes of sample `i`'s elements, `None` past the last sample.
-    pub(crate) fn sample_bytes(&self, i: usize) -> Option<&'a [u8]> {
-        if i >= self.n_samples {
-            return None;
-        }
-        let start = i.checked_mul(self.stride)?;
-        self.payload.get(start..start.checked_add(self.stride)?)
-    }
-
-    /// Sample `i`'s values, `None` past the last sample.
-    #[inline]
-    pub(crate) fn sample(&self, i: usize) -> Option<TypedValue<'a>> {
-        let payload = self.sample_bytes(i)?;
-        Some(TypedValue { ty: self.ty, count: self.per_sample, payload })
-    }
 }
 
 /// One stored element.
@@ -390,35 +360,19 @@ pub(crate) struct BcfVec<'a, T> {
 }
 
 impl<'a, T: BcfNumber> BcfVec<'a, T> {
-    fn new(value: TypedValue<'a>) -> Result<Self, BcfValueError> {
-        Self::checked(value, |_| Ok(()))
-    }
-
-    /// The vector, with `check` run on each element up to the end in the
-    /// same walk that finds the end.
+    /// The elements of `value` up to the first end-of-vector; none if they
+    /// are not of a type `T` reads (which [`TypedValue::numbers`] checks).
     #[inline]
-    fn checked(
-        value: TypedValue<'a>,
-        check: impl Fn(T) -> Result<(), BcfValueError>,
-    ) -> Result<Self, BcfValueError> {
-        T::check(value.ty)?;
-        if value.ty == BcfType::Missing {
-            return Ok(Self { rest: &[], ty: BcfType::Int32, _t: PhantomData });
+    pub(crate) fn new(value: TypedValue<'a>) -> Self {
+        let empty = Self { rest: &[], ty: BcfType::Int32, _t: PhantomData };
+        if value.ty == BcfType::Missing || T::check(value.ty).is_err() {
+            return empty;
         }
         let width = value.ty.width();
-        let mut len = value.count;
-        for (i, e) in value.payload.chunks_exact(width).enumerate() {
-            match T::decode(value.ty, e) {
-                Slot::Value(v) => check(v)?,
-                Slot::Missing => {}
-                Slot::End => {
-                    len = i;
-                    break;
-                }
-            }
-        }
-        let rest = value.payload.get(..len.saturating_mul(width)).unwrap_or(value.payload);
-        Ok(Self { rest, ty: value.ty, _t: PhantomData })
+        let mut elements = value.payload.chunks_exact(width);
+        let len = elements.position(|e| matches!(T::decode(value.ty, e), Slot::End));
+        let len = len.map_or(value.payload.len(), |n| n.saturating_mul(width));
+        Self { rest: value.payload.get(..len).unwrap_or_default(), ty: value.ty, _t: PhantomData }
     }
 
     /// Element `i` of those not yet yielded; `None` past the end.
@@ -460,31 +414,33 @@ impl<T: BcfNumber> Iterator for BcfVec<'_, T> {
 
 impl<T: BcfNumber> ExactSizeIterator for BcfVec<'_, T> {}
 
-/// The allele of a GT element `(allele + 1) << 1 | phased`: `None` for `.`.
-pub(crate) fn gt_allele(value: i32) -> Result<Option<u16>, BcfValueError> {
-    if value < 0 {
-        return Err(BcfValueError::InvalidGenotype { value });
-    }
-    match value >> 1 {
-        0 => Ok(None),
-        n => u16::try_from(n.saturating_sub(1))
-            .map(Some)
-            .map_err(|_| BcfValueError::InvalidGenotype { value }),
-    }
+/// Whether a GT element is `(allele + 1) << 1 | phased` with the allele at
+/// most 65535, or a missing allele (0 or 1).
+fn is_gt_value(value: i32) -> bool {
+    (0..=((65536 << 1) | 1)).contains(&value)
 }
 
 // r[impl vcf_values.gt+2]
 /// One sample's GT alleles, each with its phase bit; a ploidy below the
 /// field's is padded with end-of-vector, which ends it. The int missing value
 /// (htslib's fill for a sample without GT) is a missing, unphased allele.
+/// Built from elements [`TypedValue::check_gt`] passed; an element it would
+/// reject reads as a missing allele.
 #[derive(Debug, Clone)]
 pub(crate) struct BcfGt<'a> {
     alleles: BcfVec<'a, i32>,
     first: bool,
+    /// False for VCF 4.3 and earlier, whose first allele's phase bit is read
+    /// as unphased (`r[vcf_record.gt_first_phase+3]`).
     first_phase_is_read: bool,
 }
 
-impl BcfGt<'_> {
+impl<'a> BcfGt<'a> {
+    #[inline]
+    pub(crate) fn new(value: TypedValue<'a>, first_phase_is_read: bool) -> Self {
+        Self { alleles: BcfVec::new(value), first: true, first_phase_is_read }
+    }
+
     /// Whether the genotype is `.`: no alleles, or one missing allele.
     pub(crate) fn is_missing(&self) -> bool {
         match self.alleles.len() {
@@ -505,10 +461,11 @@ impl Iterator for BcfGt<'_> {
         let Some(value) = element else {
             return Some(GtAllele { allele: None, phased: false });
         };
-        let allele = gt_allele(value);
-        debug_assert!(allele.is_ok(), "gt() checked every element");
+        // `None` for a missing allele (0 or 1), the allele for any value
+        // `is_gt_value` takes.
+        let allele = u16::try_from((value >> 1).saturating_sub(1)).ok();
         let phased = value & 1 == 1 && (self.first_phase_is_read || !first);
-        Some(GtAllele { allele: allele.unwrap_or(None), phased })
+        Some(GtAllele { allele, phased })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -534,11 +491,11 @@ mod tests {
     use hegel::prelude::*;
 
     fn ints(bytes: &[u8]) -> Vec<Option<i32>> {
-        TypedValue::parse(bytes).unwrap().0.ints().unwrap().collect()
+        TypedValue::parse(bytes).unwrap().0.numbers::<i32>().unwrap().collect()
     }
 
     fn float_bits(bytes: &[u8]) -> Vec<Option<u32>> {
-        let v = TypedValue::parse(bytes).unwrap().0.floats().unwrap();
+        let v = TypedValue::parse(bytes).unwrap().0.numbers::<f32>().unwrap();
         v.map(|f| f.map(f32::to_bits)).collect()
     }
 
@@ -578,7 +535,7 @@ mod tests {
         assert_eq!(len, buf.len() - trailing.len());
         assert_eq!(skip_typed_value(&buf).unwrap(), len);
         assert_eq!(value.count(), values.len() + pad);
-        let v = value.ints().unwrap();
+        let v = value.numbers::<i32>().unwrap();
         assert_eq!(v.len(), values.len());
         for (i, &expected) in values.iter().enumerate() {
             assert_eq!(v.get(i), Some(expected), "element {i}");
@@ -643,10 +600,10 @@ mod tests {
             }
         }
         assert_eq!(read_typed_int(&buf).unwrap(), (3, key_len));
-        let (column, len) = FormatColumn::parse(&buf[key_len..], samples.len()).unwrap();
+        let (column, len) = TypedValue::parse_column(&buf[key_len..], samples.len()).unwrap();
         assert_eq!(key_len + len, buf.len());
         for (i, s) in samples.iter().enumerate() {
-            let got: Vec<_> = column.sample(i).unwrap().ints().unwrap().collect();
+            let got: Vec<_> = column.sample(i).unwrap().numbers::<i32>().unwrap().collect();
             assert_eq!(&got, s, "sample {i}");
         }
         assert!(column.sample(samples.len()).is_none());
@@ -661,14 +618,14 @@ mod tests {
         let n_samples = tc.draw(gs::integers::<usize>().max_value(4));
         if let Ok((v, len)) = TypedValue::parse(&bytes) {
             assert!(len <= bytes.len());
-            let _ = v.ints().map(Iterator::count);
-            let _ = v.floats().map(Iterator::count);
+            let _ = v.numbers::<i32>().map(Iterator::count);
+            let _ = v.numbers::<f32>().map(Iterator::count);
             let _ = v.str();
         }
-        if let Ok((c, len)) = FormatColumn::parse(&bytes, n_samples) {
+        if let Ok((c, len)) = TypedValue::parse_column(&bytes, n_samples) {
             assert!(len <= bytes.len());
             for i in 0..=n_samples {
-                let _ = c.sample(i).map(|s| s.ints().map(Iterator::count));
+                let _ = c.sample(i).map(|s| s.numbers::<i32>().map(Iterator::count));
             }
         }
         let _ = read_typed_int(&bytes);
@@ -705,8 +662,8 @@ mod tests {
     fn missing_type_is_empty_whatever_its_count() {
         let (v, len) = TypedValue::parse(&[0x30, 0xAA]).unwrap();
         assert_eq!((v.ty(), v.count(), len), (BcfType::Missing, 3, 1));
-        assert_eq!(v.ints().unwrap().len(), 0);
-        assert_eq!(v.floats().unwrap().len(), 0);
+        assert_eq!(v.numbers::<i32>().unwrap().len(), 0);
+        assert_eq!(v.numbers::<f32>().unwrap().len(), 0);
         assert_eq!(v.str().unwrap(), "");
     }
 
@@ -719,7 +676,7 @@ mod tests {
             let (v, len) = TypedValue::parse(&buf).unwrap();
             assert_eq!(len, buf.len());
             assert_eq!(
-                v.ints().unwrap().flatten().collect::<Vec<_>>(),
+                v.numbers::<i32>().unwrap().flatten().collect::<Vec<_>>(),
                 (1..=16).collect::<Vec<_>>()
             );
         }
@@ -762,15 +719,15 @@ mod tests {
             Err(E::Truncated { .. } | E::LengthOverflow { .. })
         ));
         assert!(matches!(
-            FormatColumn::parse(&huge, usize::MAX),
+            TypedValue::parse_column(&huge, usize::MAX),
             Err(E::LengthOverflow { ty: BcfType::Int32, .. })
         ));
         // Asking for the wrong kind.
         let (int, _) = TypedValue::parse(&[0x11, 1]).unwrap();
-        assert!(matches!(int.floats(), Err(E::NotFloat { found: BcfType::Int8 })));
+        assert!(matches!(int.numbers::<f32>(), Err(E::NotFloat { found: BcfType::Int8 })));
         assert!(matches!(int.str(), Err(E::NotChar { found: BcfType::Int8 })));
         let (float, _) = TypedValue::parse(&[0x15, 0, 0, 0, 0]).unwrap();
-        assert!(matches!(float.ints(), Err(E::NotInteger { found: BcfType::Float })));
+        assert!(matches!(float.numbers::<i32>(), Err(E::NotInteger { found: BcfType::Float })));
         let (bad, _) = TypedValue::parse(&[0x27, 0xC3, 0x28]).unwrap();
         assert!(matches!(bad.str(), Err(E::Utf8(_))));
     }
@@ -786,10 +743,39 @@ mod tests {
     }
 
     // r[verify vcf_values.gt+2]
+    // r[verify vcf_fields.samples]
+    /// An int8 GT column checks as reading its samples one by one does:
+    /// each sample's elements up to its end-of-vector are values from 0 to
+    /// 127 or missing, and the first that is not (negative) is the error.
+    #[hegel::test]
+    fn int8_gt_columns_check_as_their_samples(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().max_value(5));
+        let per_sample = tc.draw(gs::integers::<usize>().max_value(4));
+        let byte = gs::sampled_from(vec![0u8, 2, 3, 5, 0x7F, 0x80, 0x81, 0x82, 0xFB, 0xFF]);
+        let elements = tc.draw(gs::vecs(byte).min_size(n * per_sample).max_size(n * per_sample));
+        let mut bytes = Vec::new();
+        encode_type_byte(&mut bytes, per_sample, BCF_BT_INT8);
+        bytes.extend(&elements);
+        let expected = elements
+            .chunks(per_sample.max(1))
+            .flat_map(|s| s.iter().take_while(|&&b| b != 0x81))
+            .find(|&&b| b > 0x81)
+            .map(|&b| i32::from(b.cast_signed()));
+        let (column, _) = TypedValue::parse_column(&bytes, n).unwrap();
+        match (column.check_gt(), expected) {
+            (Ok(()), None) => {}
+            (Err(BcfValueError::InvalidGenotype { value }), Some(e)) => assert_eq!(value, e),
+            (got, expected) => panic!("{got:?}, expected {expected:?}"),
+        }
+    }
+
+    // r[verify vcf_values.gt+2]
     #[test]
     fn malformed_bcf_genotypes_are_typed_errors() {
         fn gt(bytes: &[u8]) -> Result<BcfGt<'_>, BcfValueError> {
-            TypedValue::parse(bytes)?.0.gt(true)
+            let value = TypedValue::parse(bytes)?.0;
+            value.check_gt()?;
+            Ok(BcfGt::new(value, true))
         }
         assert!(matches!(
             gt(&[0x21, 0x02, 0xFB]),

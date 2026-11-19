@@ -146,7 +146,7 @@ impl SiteParts {
             let (value, len) = TypedValue::parse(rest).map_err(|e| value_error(part, e))?;
             let s = value.str().map_err(|e| value_error(part, e))?;
             // The payload, as `str` read it: after the descriptor, cut at NUL.
-            let start = at.saturating_add(len).saturating_sub(value.stored_len());
+            let start = at.saturating_add(len).saturating_sub(value.payload().len());
             *at = at.saturating_add(len);
             span(start, s.len())
         };
@@ -165,7 +165,7 @@ impl SiteParts {
         let rest = shared.get(at..).unwrap_or_default();
         let (value, len) =
             TypedValue::parse(rest).map_err(|e| value_error(RecordPart::Filter, e))?;
-        let ids = value.ints().map_err(|e| value_error(RecordPart::Filter, e))?;
+        let ids = value.numbers::<i32>().map_err(|e| value_error(RecordPart::Filter, e))?;
         for index in ids.flatten() {
             let declared = usize::try_from(index).ok().and_then(|i| file.filters.get(i)?.as_ref());
             let id = declared.ok_or(RecordError::UnknownKey { index, kind: KeyKind::Filter })?;
