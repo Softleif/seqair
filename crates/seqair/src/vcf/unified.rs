@@ -1627,6 +1627,19 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
     fn info_string(&mut self, id: &FieldId, value: &str) -> Result<(), VcfError> {
         self.info_str(id, value.as_bytes(), Escape::Percent)
     }
+    // r[impl record_encoder.string_list]
+    fn info_strings(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        id.check_count(self.n_allele_count(), None, values.len())?;
+        let mut joined = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                joined.push(b',');
+            }
+            percent_encode_into(&mut joined, v.as_bytes());
+        }
+        self.info_str(id, if values.is_empty() { b"." } else { &joined }, Escape::Encoded)
+    }
     // r[impl record_encoder.reserved_rejection]
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
         self.check_key(id)?;
@@ -1768,6 +1781,8 @@ pub(crate) enum Escape {
     /// and the section's separator (`;` for INFO, `:` for FORMAT), which
     /// would break the line.
     Structure(u8),
+    /// Already percent-encoded (a list joined from encoded elements).
+    Encoded,
 }
 
 impl Escape {
@@ -1788,6 +1803,7 @@ impl Escape {
 
     fn write(self, buf: &mut Vec<u8>, bytes: &[u8]) {
         match self {
+            Self::Encoded => buf.extend_from_slice(bytes),
             // r[impl vcf_writer.percent_encoding]
             Self::Percent => percent_encode_into(buf, bytes),
             Self::Structure(sep) => {

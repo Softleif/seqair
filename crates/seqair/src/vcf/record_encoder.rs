@@ -397,6 +397,10 @@ pub trait InfoEncoder {
     /// [`VcfError::ForeignKey`] if `id` is from another header.
     fn info_string(&mut self, id: &FieldId, value: &str) -> Result<(), VcfError>;
     /// # Errors
+    /// [`VcfError::ForeignKey`] if `id` is from another header,
+    /// `CountMismatch` if the declared `Number` disagrees with the count.
+    fn info_strings(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError>;
+    /// # Errors
     /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any concrete value is reserved.
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError>;
     // r[impl vcf_passthrough.opt_arrays]
@@ -551,6 +555,22 @@ impl InfoKey<Str> {
         value: &str,
     ) -> Result<(), VcfError> {
         enc.info_string(&self.0, value)
+    }
+
+    // r[impl record_encoder.string_list]
+    /// Encode a list of strings (`Number=.`, `A`, …): each element is
+    /// percent-encoded, then they are joined with `,`, so an element may
+    /// hold a comma. An empty list is `.`.
+    ///
+    /// # Errors
+    /// [`VcfError::ForeignKey`] if the key is from another header,
+    /// `CountMismatch` if the declared `Number` disagrees with the count.
+    pub fn encode_list(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        values: &[&str],
+    ) -> Result<(), VcfError> {
+        enc.info_strings(&self.0, values)
     }
 }
 
@@ -931,8 +951,8 @@ macro_rules! field_def_constructors {
                 Self { name, number, description, _marker: PhantomData }
             }
         }
-        // One string either way; `Number=.` is how real files declare a list
-        // the caller joins with commas.
+        // One string either way; `Number=.` is how real files declare a list,
+        // which `InfoKey<Str>::encode_list` writes.
         impl $def<Str> {
             pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
                 Self { name, number, description, _marker: PhantomData }
