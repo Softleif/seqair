@@ -30,8 +30,11 @@
 //!    later access returns). FORMAT is scanned whole on first access
 //!    (`FormatIndex::finish`), then looked up the same way;
 //! 3. takes the value's bytes (`InfoSource::value`, a sample's cell for
-//!    FORMAT) and decodes them with the key's marker (`ReadKind::decode`,
-//!    `access.rs`).
+//!    FORMAT), checks them as the key's marker reads them (`Valid::check`,
+//!    the only step that fails), and reads the checked value
+//!    (`ReadKind::read`, `access.rs`). [`SamplesRef::column`] checks every
+//!    sample first (a BCF column at once), so its [`Column`] reads each
+//!    without a check.
 //!
 //! No borrow of the index outlives the method that takes it (iteration and
 //! a VCF text [`Column`] borrow again per item), so the `RefCell` never
@@ -43,11 +46,12 @@
 //! |---|---|---|
 //! | compile time | the result's shape, `V::Out<'a>` | the marker `V` of `InfoKey<V>` / `FormatKey<V>` |
 //! | once per key (`file.info_key::<V>(name)`) | that `V` reads the declared `Type` and `Number`; the field's `DictId`, `Type`, whether it is GT, and its header | `check_kind`, kept in the key's `FieldId` |
-//! | per record | only that the bytes are well formed | `V::decode`, failing with a [`FieldError`] |
+//! | per record | only that the bytes are well formed | `V::check`, failing with a [`FieldError`]; `V::read` then cannot fail |
 //!
 //! An access never consults the header: [`Any`] decodes by the `Type` its
 //! key carries. Generic iteration has no key, and reads each field's
-//! definition from the file's field table (`keys.rs`) by id.
+//! definition from the file's field table (`keys.rs`) by id, which also
+//! knows the id of `GT`.
 
 mod access;
 pub(crate) mod bcf_value;

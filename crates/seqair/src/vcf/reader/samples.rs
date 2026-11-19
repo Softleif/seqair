@@ -1,6 +1,6 @@
 //! FORMAT values: one sample ([`OnlySample`], [`Sample`]) or all
 //! ([`Samples`]), by sample or by column (`r[vcf_fields.only_sample]`,
-//! `r[vcf_fields.sample]`, `r[vcf_fields.samples]`).
+//! `r[vcf_fields.sample]`, `r[vcf_fields.samples+2]`).
 
 use super::access::{Any, DecodeCx, DynValue, ReadCx, ReadKind, Stored, StoredRepr, Valid};
 use super::bcf_value::{BcfValueError, TypedValue, read_typed_int};
@@ -278,6 +278,7 @@ impl<'a> FieldAt<'a> {
         }
     }
 
+    // r[impl vcf_fields.samples+2]
     /// The column of field `id`, every sample's value checked as `V`: a BCF
     /// column at once, VCF text cell by cell.
     fn column<V: ReadKind>(

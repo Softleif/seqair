@@ -87,8 +87,10 @@ r[vcf_fields.only_sample]
 r[vcf_fields.sample+2]
 `Sample` MUST read the sample the builder's `.sample(sel)` selects — a name (`&str`, `SmolStr`) or a `SampleIdx` — failing to plan with `PlanError::Key(KeyError::UnknownSample { name })` for a name the header lacks, `ForeignKey` for a `SampleIdx` of another header, and `SampleNotSelected { n }` when nothing was selected and the header has more than one sample (with exactly one, it reads that one). It exposes the same `get`/`has` as `OnlySample` and `name()`.
 
-r[vcf_fields.samples]
+r[vcf_fields.samples+2]
 `Samples` MUST hold every sample and expose both views of the field-major FORMAT data: `column(&FormatKey<V>)`, an `ExactSizeIterator` over all samples' values with `get(SampleIdx)`, and `sample(SampleIdx)`, one sample's view with the same `get` as `OnlySample`. For VCF text the per-sample column offsets are built lazily (`r[vcf_fields.lazy+4]`) in one vectorised pass.
+
+`column` MUST check every sample's value before it returns, once — a BCF column at once, VCF text cell by cell — failing with the error the first malformed sample's `get` returns, so the column it returns yields values and never fails; a column of no samples never fails. Each value is checked once: a column that checked its values and then decoded each sample again behind an assertion, and a genotype iterator that checked every allele a third time, made reading GT of 2504 samples 2.5× slower than htslib. A property test MUST check that a column reads, for every marker, what each sample's `get` reads, on BCF columns of every type and integer width with sentinels and invalid values, and on VCF text cells with malformed values and dropped trailing fields.
 
 r[vcf_fields.sample_idx]
 `SampleIdx` MUST be obtainable only from a header (`header.sample(name)`, `header.samples()`) and carry the header's `HeaderId`; using it with a record from another header MUST fail with `ForeignKey`. A raw `usize` cannot name a sample.

@@ -476,7 +476,7 @@ fn files_and_readers_cross_threads() {
 }
 
 // r[verify vcf_fields.sample+2]
-// r[verify vcf_fields.samples]
+// r[verify vcf_fields.samples+2]
 // r[verify vcf_fields.only_sample]
 #[test]
 fn one_sample_reads_what_all_samples_read_for_it() {
@@ -1490,7 +1490,7 @@ fn text_records_read_their_columns() {
     assert_eq!(recs[1].samples().sample(s2).get(&ad).unwrap().map(|v| v.count()), None);
 }
 
-// r[verify vcf_fields.samples]
+// r[verify vcf_fields.samples+2]
 // r[verify vcf_values.access+2]
 // r[verify vcf_values.duplicates+2]
 // r[verify vcf_reader.field_table]
@@ -2091,7 +2091,7 @@ fn column_reads_as_each_sample<V: seqair::vcf::ReadKind>(
     }
 }
 
-// r[verify vcf_fields.samples]
+// r[verify vcf_fields.samples+2]
 // r[verify vcf_values.access+2]
 /// A column reads, for every marker, what each sample's `get` reads, and
 /// fails with the first malformed sample's error: BCF columns of every type

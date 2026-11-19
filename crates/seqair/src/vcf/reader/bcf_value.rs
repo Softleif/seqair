@@ -759,7 +759,7 @@ mod tests {
     }
 
     // r[verify vcf_values.gt+2]
-    // r[verify vcf_fields.samples]
+    // r[verify vcf_fields.samples+2]
     /// An int8 GT column checks as reading its samples one by one does:
     /// each sample's elements up to its end-of-vector are values from 0 to
     /// 127 or missing, and the first that is not (negative) is the error.

@@ -248,7 +248,7 @@ fn warn_duplicate_id(file: &FileShared, id: DictId) {
 }
 
 impl FormatIndex {
-    // r[impl vcf_fields.samples]
+    // r[impl vcf_fields.samples+2]
     // r[impl vcf_reader.field_table]
     /// Index VCF text FORMAT data: `keys` (the FORMAT column) and `samples`
     /// (`n_samples` TAB-separated columns), in one pass over the samples. A

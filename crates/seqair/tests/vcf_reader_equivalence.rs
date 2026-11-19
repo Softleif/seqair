@@ -649,7 +649,7 @@ fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec
 // r[verify vcf_values.qual]
 // r[verify vcf_fields.site+2]
 // r[verify vcf_fields.info+2]
-// r[verify vcf_fields.samples]
+// r[verify vcf_fields.samples+2]
 // r[verify vcf_reader.formats]
 // r[verify vcf_reader.oracles+2]
 /// Random headers and records, written with seqair's writer as VCF text,
