@@ -680,6 +680,13 @@ pub(crate) fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiErro
             offset = offset.wrapping_add(bsize);
             continue; // EOF block
         }
+        // r[impl io.fuzz.alloc_limits]
+        // ISIZE is untrusted: no BGZF block inflates past 64 KiB.
+        if isize > 65536 {
+            return Err(BaiError::Bgzf {
+                source: BgzfError::UncompressedSizeTooLarge { isize_value: isize },
+            });
+        }
 
         // Compressed data starts at offset 18, ends at bsize - 8 (before CRC32 + ISIZE)
         if bsize < 26 {
@@ -1177,6 +1184,25 @@ mod tests {
         assert!(
             matches!(err, BaiError::Bgzf { source: BgzfError::BlockSizeTooSmall { .. } }),
             "expected BlockSizeTooSmall, got {err:?}"
+        );
+    }
+
+    // r[verify io.fuzz.alloc_limits]
+    // r[verify bam.index.bgzf_block_validation]
+    /// An index block whose footer claims ~4 GiB is refused before anything
+    /// is allocated (`fuzz_vcf_query` found it: `VcfFile::from_bytes` with a
+    /// BGZF-compressed index).
+    #[test]
+    fn decompress_bgzf_rejects_an_isize_past_a_block() {
+        let mut block = vec![0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff];
+        block.extend_from_slice(&[0x06, 0x00, b'B', b'C', 0x02, 0x00]);
+        block.extend_from_slice(&27u16.to_le_bytes()); // BSIZE - 1: 28 bytes
+        block.extend_from_slice(&[0x03, 0x00, 0, 0, 0, 0]); // deflate, CRC32
+        block.extend_from_slice(&(u32::MAX - 300).to_le_bytes()); // ISIZE
+        let err = decompress_bgzf_file(&block).unwrap_err();
+        assert!(
+            matches!(err, BaiError::Bgzf { source: BgzfError::UncompressedSizeTooLarge { .. } }),
+            "got {err:?}"
         );
     }
 
