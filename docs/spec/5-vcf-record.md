@@ -34,8 +34,8 @@ Genotypes MUST store per-allele indices (0=REF, 1+=ALT, None=missing) and per-se
 r[vcf_record.alleles_typed]
 Alleles MUST be represented via a type-safe enum with variants for common VCF allele patterns: reference-only (REF with no ALT), SNV (single-base REF and ALT), insertion (anchor base + inserted bases), deletion (anchor base + deleted bases), and complex (arbitrary REF/ALT strings for MNVs, symbolic alleles, or mixed multi-allelic sites). Construction MUST validate structural invariants: SNV alts must differ from ref, insertion/deletion sequences must be non-empty.
 
-r[vcf_record.alleles_rlen]
-The reference length (rlen) MUST be derived from the alleles variant: 1 for Reference, SNV, and Insertion; `1 + deleted.len()` for Deletion; `ref_allele.len()` for Complex.
+r[vcf_record.alleles_rlen+2]
+`Alleles::rlen()` — the REF allele's length — MUST be derived from the alleles variant: 1 for Reference, SNV, and Insertion; `1 + deleted.len()` for Deletion; `ref_allele.len()` for Complex. It is where a record's reference length starts, not what it is: INFO END, SVLEN and FORMAT LEN can extend it, and the writer computes the record's at `emit()` (`r[record_encoder.rlen]`).
 
 r[vcf_record.alleles_serialization]
 VCF REF/ALT text serialization MUST be handled by the alleles type. Each variant produces the correct VCF encoding: Insertion emits `anchor` as REF and `anchor+inserted` as ALT; Deletion emits `anchor+deleted` as REF and `anchor` as ALT; Reference emits the ref base with `.` as ALT.

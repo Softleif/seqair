@@ -238,7 +238,7 @@ fn bcftools_line(bytes: &[u8], suffix: &str) -> String {
     line
 }
 
-// r[verify record_encoder.count_check+2]
+// r[verify record_encoder.count_check+3]
 #[hegel::test(test_cases = pinned::cases(60))]
 fn the_writer_accepts_exactly_the_declared_counts(tc: TestCase) {
     let s = setup();

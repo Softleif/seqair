@@ -16,10 +16,16 @@
     reason = "test code with known small values"
 )]
 
+#[path = "support/index_parse.rs"]
+mod index_parse;
 #[path = "../src/pinned.rs"]
 mod pinned;
+use index_parse::{assert_same_index, parse_index};
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, Gt, InfoFieldDef, InfoInt, Scalar};
-use seqair::vcf::{Alleles, ContigDef, Genotype, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{
+    Alleles, ContigDef, CoordinateIndex, Genotype, IndexKind, OutputFormat, VcfError, VcfHeader,
+    Writer,
+};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -59,7 +65,7 @@ fn write_vcf_gz_with_index(
     let vcf_path = dir.join("test.vcf.gz");
     let file = std::fs::File::create(&vcf_path).unwrap();
 
-    let writer = Writer::new(file, OutputFormat::VcfGz);
+    let writer = Writer::new(file, OutputFormat::VcfGz).index_kind(IndexKind::Tbi);
     let mut writer = writer.write_header(&setup.header).unwrap();
 
     let positions = [100u32, 500, 1000, 5000, 20000, 50000, 100000];
@@ -90,8 +96,9 @@ fn write_vcf_gz_with_index(
     enc.emit().unwrap();
 
     let (_inner, index) = writer.finish().unwrap();
-    let index = index.expect("VcfGz writer should produce TBI index").into_builder();
-    (vcf_path, index)
+    let index = index.expect("VcfGz writer should produce TBI index");
+    assert_eq!((index.kind(), index.suffix()), (IndexKind::Tbi, "tbi"));
+    (vcf_path, index.into_builder())
 }
 
 /// Write seqair's TBI index to a file.
@@ -480,99 +487,6 @@ fn empty_vcf_produces_valid_tbi(tc: TestCase) {
 
 // ── Whole-index comparison ─────────────────────────────────────────────
 
-/// A bin's CSI `loffset` (TBI: `None`) and its chunks.
-type Bin = (Option<u64>, Vec<(u64, u64)>);
-
-/// One reference's index: bins (id → loffset for CSI, chunks), linear index.
-#[derive(Debug, PartialEq, Eq)]
-struct RefIndex {
-    bins: std::collections::BTreeMap<u32, Bin>,
-    linear: Vec<u64>,
-}
-
-/// A parsed TBI or CSI: the references' indexes and the `n_no_coor` trailer.
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedIndex {
-    refs: Vec<RefIndex>,
-    n_no_coor: Option<u64>,
-}
-
-struct Cursor<'a>(&'a [u8]);
-impl Cursor<'_> {
-    fn take(&mut self, n: usize) -> &[u8] {
-        let (head, tail) = self.0.split_at(n);
-        self.0 = tail;
-        head
-    }
-    fn i32(&mut self) -> i32 {
-        i32::from_le_bytes(self.take(4).try_into().unwrap())
-    }
-    fn u32(&mut self) -> u32 {
-        u32::from_le_bytes(self.take(4).try_into().unwrap())
-    }
-    fn u64(&mut self) -> u64 {
-        u64::from_le_bytes(self.take(8).try_into().unwrap())
-    }
-}
-
-/// Parse a decompressed TBI (`csi == false`) or CSI. Bins are keyed by id, so
-/// htslib's hash-table bin order does not matter.
-fn parse_index(data: &[u8], csi: bool) -> ParsedIndex {
-    let mut c = Cursor(data);
-    let n_ref = if csi {
-        assert_eq!(c.take(4), b"CSI\x01");
-        let _min_shift = c.i32();
-        let _depth = c.i32();
-        let l_aux = c.i32() as usize;
-        c.take(l_aux);
-        c.i32()
-    } else {
-        assert_eq!(c.take(4), b"TBI\x01");
-        let n_ref = c.i32();
-        c.take(24); // format, col_seq, col_beg, col_end, meta, skip
-        let l_nm = c.i32() as usize;
-        c.take(l_nm);
-        n_ref
-    };
-    let refs = (0..n_ref)
-        .map(|_| {
-            let n_bin = c.i32();
-            let bins = (0..n_bin)
-                .map(|_| {
-                    let id = c.u32();
-                    let loffset = csi.then(|| c.u64());
-                    let n_chunk = c.i32();
-                    let chunks = (0..n_chunk).map(|_| (c.u64(), c.u64())).collect();
-                    (id, (loffset, chunks))
-                })
-                .collect();
-            let linear = if csi {
-                Vec::new()
-            } else {
-                let n_intv = c.i32();
-                (0..n_intv).map(|_| c.u64()).collect()
-            };
-            RefIndex { bins, linear }
-        })
-        .collect();
-    let n_no_coor = (c.0.len() == 8).then(|| c.u64());
-    assert!(c.0.is_empty(), "{} bytes left over", c.0.len());
-    ParsedIndex { refs, n_no_coor }
-}
-
-/// Equal, or a panic naming the first bin (or linear-index entry) that differs.
-fn assert_same_index(ours: &ParsedIndex, theirs: &ParsedIndex, what: &str) {
-    assert_eq!(ours.refs.len(), theirs.refs.len(), "{what}: n_ref");
-    for (i, (a, b)) in ours.refs.iter().zip(&theirs.refs).enumerate() {
-        let ids: std::collections::BTreeSet<_> = a.bins.keys().chain(b.bins.keys()).collect();
-        for id in ids {
-            assert_eq!(a.bins.get(id), b.bins.get(id), "{what}: ref {i} bin {id} (ours, theirs)");
-        }
-        assert_eq!(a.linear, b.linear, "{what}: ref {i} linear index");
-    }
-    assert_eq!(ours.n_no_coor, theirs.n_no_coor, "{what}: n_no_coor");
-}
-
 /// Write `n` records at sorted positions over a contig long enough that the
 /// file spans many BGZF blocks, so `compress_binning` has bins to move; return
 /// the VCF.gz path and the index builder the writer co-produced.
@@ -580,7 +494,8 @@ fn write_large_vcf(
     dir: &std::path::Path,
     positions: &[u32],
     format: OutputFormat,
-) -> (std::path::PathBuf, seqair::io::IndexBuilder, Vec<seqair_types::SmolStr>) {
+    kind: IndexKind,
+) -> (std::path::PathBuf, CoordinateIndex) {
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef::new(Some(100_000_000))).unwrap();
     let mut builder = builder.infos();
@@ -589,6 +504,7 @@ fn write_large_vcf(
     let header = Arc::new(builder.formats().samples().build().unwrap());
     let vcf_path = dir.join(if format == OutputFormat::Bcf { "large.bcf" } else { "large.vcf.gz" });
     let mut writer = Writer::new(std::fs::File::create(&vcf_path).unwrap(), format)
+        .index_kind(kind)
         .write_header(&header)
         .unwrap();
     for (i, &pos) in positions.iter().enumerate() {
@@ -601,8 +517,7 @@ fn write_large_vcf(
         enc.emit().unwrap();
     }
     let (_inner, index) = writer.finish().unwrap();
-    let names = header.contigs().map(|(c, _)| c.name().clone()).collect();
-    (vcf_path, index.expect("should produce index").into_builder(), names)
+    (vcf_path, index.expect("should produce index"))
 }
 
 // r[verify index_builder.tbi_format]
@@ -610,10 +525,13 @@ fn write_large_vcf(
 // r[verify index_builder.no_coor_trailer]
 // r[verify vcf_writer.index_amend_last]
 // r[verify csi.write_format]
+// r[verify record_encoder.index_kind]
+// r[verify record_encoder.finish+2]
 /// The indexes seqair co-produces hold exactly what `bcftools index` builds
 /// for the same file: every bin with its chunks (after `compress_binning`),
 /// the TBI linear index, the CSI `loffset`s, and the `n_no_coor` trailer —
-/// TBI for VCF.gz (`-t`) and CSI for BCF (`-c`). (A VCF.gz CSI is not
+/// TBI for VCF.gz (`-t`, the writer set to `IndexKind::Tbi`, the index
+/// serialized as `Writer::finish` returns it) and CSI for BCF (`-c`). (A VCF.gz CSI is not
 /// compared: htslib's tabix path gives it at least six levels at
 /// `min_shift` 14, seqair the fewest that cover the contigs.)
 #[hegel::test(test_cases = crate::pinned::cases(10))]
@@ -629,15 +547,12 @@ fn whole_tbi_and_csi_match_bcftools(tc: TestCase) {
 
     for format in [OutputFormat::VcfGz, OutputFormat::Bcf] {
         let dir = tempfile::tempdir().unwrap();
-        let (path, index, names) = write_large_vcf(dir.path(), &positions, format);
         let csi = format == OutputFormat::Bcf;
+        let kind = if csi { IndexKind::Csi } else { IndexKind::Tbi };
+        let (path, index) = write_large_vcf(dir.path(), &positions, format, kind);
+        assert_eq!(index.kind(), kind);
         let ours = dir.path().join("ours.idx");
-        let file = std::fs::File::create(&ours).unwrap();
-        if csi {
-            index.write_csi(file, names.len(), &[]).unwrap();
-        } else {
-            index.write_tbi(file, &names).unwrap();
-        }
+        index.write_to_path(&ours).unwrap();
         let theirs = dir.path().join("theirs.idx");
         let out = std::process::Command::new("bcftools")
             .args(["index", if csi { "-c" } else { "-t" }, "-o"])
@@ -649,5 +564,126 @@ fn whole_tbi_and_csi_match_bcftools(tc: TestCase) {
         let ours = parse_index(&decompress_tbi(&ours), csi);
         let theirs = parse_index(&decompress_tbi(&theirs), csi);
         assert_same_index(&ours, &theirs, &format!("{format:?}"));
+    }
+}
+
+// ── Choosing the index ─────────────────────────────────────────────────
+
+// r[verify record_encoder.index_kind]
+// r[verify record_encoder.writer_new+2]
+/// VCF.gz is indexed by CSI unless told otherwise, and BCF by CSI only: a
+/// writer asked for a TBI of a BCF refuses at `write_header`, before writing.
+#[test]
+fn csi_is_the_default_and_bcf_has_no_tbi() {
+    let setup = make_index_setup();
+    let (_, index) = Writer::new(Vec::new(), OutputFormat::VcfGz)
+        .write_header(&setup.header)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let index = index.expect("VCF.gz is indexed");
+    assert_eq!((index.kind(), index.suffix()), (IndexKind::Csi, "csi"));
+    assert_eq!(IndexKind::Tbi.suffix(), "tbi");
+
+    let mut out = Vec::new();
+    let err = Writer::new(&mut out, OutputFormat::Bcf)
+        .index_kind(IndexKind::Tbi)
+        .write_header(&setup.header)
+        .err();
+    assert!(matches!(err, Some(VcfError::TbiForBcf)), "{err:?}");
+    assert!(out.is_empty(), "nothing is written");
+
+    let (_, index) = Writer::new(Vec::new(), OutputFormat::Vcf)
+        .index_kind(IndexKind::Tbi)
+        .write_header(&setup.header)
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert!(index.is_none(), "plain VCF is not indexed, whatever the kind");
+}
+
+// r[verify record_encoder.index_kind]
+/// The TBI the writer returns is read by `tabix` (which lists the contigs
+/// with records and answers a region from it) and by seqair's own TBI
+/// parser, which finds the same chunks in it as in the TBI `bcftools index
+/// -t` builds for the same file.
+#[test]
+fn tabix_and_seqair_read_the_returned_tbi() {
+    if !has_bcftools() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let positions: Vec<u32> = (1..4000).map(|i| i * 997).collect();
+    let (path, index) =
+        write_large_vcf(dir.path(), &positions, OutputFormat::VcfGz, IndexKind::Tbi);
+    let ours = dir.path().join(format!("large.vcf.gz.{}", index.suffix()));
+    index.write_to_path(&ours).unwrap();
+
+    let tabix = |args: &[&str]| {
+        let out = std::process::Command::new("tabix").args(args).arg(&path).output().unwrap();
+        assert!(out.status.success(), "tabix: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(tabix(&["-l"]), "chr1\n");
+    let mut region = std::process::Command::new("tabix");
+    let out = region.arg(&path).arg("chr1:100000-200000").output().unwrap();
+    assert!(out.status.success(), "tabix: {}", String::from_utf8_lossy(&out.stderr));
+    let found: Vec<u32> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.split('\t').nth(1).unwrap().parse().unwrap())
+        .collect();
+    let expected: Vec<u32> =
+        positions.iter().copied().filter(|p| (100_000..=200_000).contains(p)).collect();
+    assert_eq!(found, expected);
+
+    let theirs = dir.path().join("theirs.tbi");
+    let out = std::process::Command::new("bcftools")
+        .args(["index", "-t", "-o"])
+        .arg(&theirs)
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let bam_header = seqair::bam::BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:100000000\n").unwrap();
+    let parse =
+        |p: &std::path::Path| seqair::bam::BamIndex::from_tabix_path(p, &bam_header).unwrap();
+    let (ours, theirs) = (parse(&ours), parse(&theirs));
+    for (start, end) in
+        [(0, 100_000_000), (5_000, 6_000), (1_000_000, 3_000_000), (3_900_000, 4_000_000)]
+    {
+        let q = |i: &seqair::bam::BamIndex| {
+            i.query(0, seqair::bam::Pos0::new(start).unwrap(), seqair::bam::Pos0::new(end).unwrap())
+        };
+        assert_eq!(format!("{:?}", q(&ours)), format!("{:?}", q(&theirs)), "{start}..{end}");
+    }
+}
+
+// r[verify index_builder.range_check]
+/// A TBI stops at 2^29: a record ending past it fails its `emit`, as htslib
+/// refuses it, where a CSI (the default) indexes it.
+#[test]
+fn a_tbi_refuses_a_record_past_its_bins() {
+    let mut builder = VcfHeader::builder();
+    let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1 << 30))).unwrap();
+    let header = builder.build().unwrap();
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+    let far = Pos1::new((1 << 29) + 10).unwrap();
+    for kind in [IndexKind::Csi, IndexKind::Tbi] {
+        let mut writer = Writer::new(Vec::new(), OutputFormat::VcfGz)
+            .index_kind(kind)
+            .write_header(&header)
+            .unwrap();
+        let result = writer.begin_record(&chr1, far, &alleles, None).unwrap().filter_pass().emit();
+        match kind {
+            IndexKind::Csi => result.unwrap(),
+            IndexKind::Tbi => assert!(
+                matches!(
+                    result,
+                    Err(VcfError::Index(seqair::io::IndexError::BeyondIndexRange { .. }))
+                ),
+                "{result:?}"
+            ),
+        }
     }
 }

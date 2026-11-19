@@ -35,6 +35,16 @@ impl RlenKeys {
         let len = fields.declared_name(KeyKind::Format, "LEN") == Some(Integer);
         Self { end: info("END"), svlen: info("SVLEN"), len }
     }
+
+    /// Those `header` declares `Type=Integer`: what a writer can write,
+    /// since it writes declared fields only. For a declared field this is
+    /// what [`Self::new`] gives the file it writes.
+    pub(crate) fn from_header(header: &crate::vcf::VcfHeader) -> Self {
+        use crate::vcf::ValueType::Integer;
+        let info = |name| header.infos().get(name).is_some_and(|d| d.typ == Integer);
+        let len = header.formats().get("LEN").is_some_and(|d| d.typ == Integer);
+        Self { end: info("END"), svlen: info("SVLEN"), len }
+    }
 }
 
 /// An ALT whose SVLEN is its reference length: `<CNV>`, `<DEL>`, `<DUP>`,
@@ -67,7 +77,14 @@ pub(crate) struct RlenColumns<'a> {
 // r[impl vcf_values.rlen+2]
 /// The reference length htslib gives a VCF text record at 0-based `pos`.
 pub(crate) fn text_rlen(cols: &RlenColumns<'_>, file: &FileShared, pos: i64) -> i64 {
-    let keys = file.rlen_keys;
+    rlen(cols, file.rlen_keys, pos)
+}
+
+// r[impl vcf_values.rlen+2]
+// r[impl record_encoder.rlen]
+/// [`text_rlen`] for a header's `keys`: the writer's entry point, so that what
+/// it indexes a record under is what a reader computes for it.
+pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
     let len_ref = i64::try_from(cols.reference.len()).unwrap_or(i64::MAX);
     // Bit `a` for ALT `a` (REF is 0), as htslib's `svlenals`.
     let mut sv_alts: SmallVec<u64, 2> = SmallVec::new();

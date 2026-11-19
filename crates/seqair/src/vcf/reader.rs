@@ -26,7 +26,7 @@ mod keys;
 mod locus;
 mod raw;
 mod reserved;
-mod rlen;
+pub(crate) mod rlen;
 mod samples;
 mod site;
 mod stream;

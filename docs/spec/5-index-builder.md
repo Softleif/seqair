@@ -11,6 +11,9 @@ The builder MUST validate coordinate sort order: tid MUST be non-decreasing, and
 r[index_builder.offset_convention]
 The virtual offset passed to the builder is the position AFTER writing the record (the end of the record). The builder uses the previous call's offset as the start of the current record, following htslib's convention.
 
+r[index_builder.range_check]
+`push` (and `push_unmapped`) MUST refuse a record whose `beg` or `end` lies past `2^(min_shift + 3·depth)`, the last position the builder's bins address, with `IndexError::BeyondIndexRange { tid, beg, end, max }`, before changing any state — htslib's `hts_idx_check_range` refuses the same record ("cannot be stored in a tbi index. Try using a csi index"). Binned anyway, it would land in a bin no query asks for: in the file, but unreachable through the index. A CSI sized from the header (`r[index_builder.csi_depth]`) reaches this only for a record past its contig's declared length; a TBI or BAI, fixed at depth 5, for any record ending past 2^29.
+
 r[index_builder.binning]
 The builder MUST assign each record to the smallest bin that fully contains its `[beg, end)` interval, using the parameterised `reg2bin(beg, end, min_shift, depth)` formula. Default parameters are min_shift=14, depth=5 (matching BAI/TBI).
 

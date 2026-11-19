@@ -107,7 +107,7 @@ fn filters_contigs_and_samples_resolve() {
     assert_eq!(all, [h.sample("NA12878").unwrap(), hg002]);
 }
 
-// r[verify vcf_header.brand+2]
+// r[verify vcf_header.brand+3]
 // r[verify vcf_values.header_brand+2]
 // r[verify vcf_fields.sample_idx]
 /// Two parses of the same text are two headers: their keys, contigs and

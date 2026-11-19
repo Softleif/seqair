@@ -1,15 +1,16 @@
 //! Unified VCF/BCF writer with typestate enforcement.
 
-use super::OutputFormat;
 use super::alleles::Alleles;
 use super::bcf_encoding::*;
 use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker};
-use super::error::VcfError;
+use super::error::{RecordIdProblem, VcfError};
 use super::field_set::FieldSet;
 use super::header::{HeaderId, VcfHeader};
+use super::reader::rlen::{RlenColumns, RlenKeys, rlen};
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
+use super::{IndexKind, OutputFormat};
 use crate::bam::bgzf_writer::BgzfSink;
 use crate::io::IndexBuilder;
 use crate::io::{BgzfWriter, CompressionLevel};
@@ -117,7 +118,146 @@ pub struct Writer<W: Write, S = Unstarted> {
     header: Option<HeaderId>,
     /// BGZF settings for `VcfGz` and `Bcf`, applied by `write_header`.
     compression: Compression,
+    /// The index `VcfGz` co-produces; `Bcf` takes only CSI.
+    index_kind: IndexKind,
+    /// Per-record state outside the format's encoder, reused across records.
+    record: RecordState,
     _state: PhantomData<S>,
+}
+
+/// What a record carries besides its bytes, for checks and for its length.
+#[derive(Default)]
+struct RecordState {
+    rlen: RlenState,
+    /// Each sample's GT ploidy once GT is encoded, for `Number=G` counts
+    /// (`r[record_encoder.count_check+3]`); empty before GT.
+    ploidies: Vec<usize>,
+}
+
+impl RecordState {
+    fn begin(&mut self, alleles: &Alleles) {
+        self.ploidies.clear();
+        self.rlen.begin(alleles);
+    }
+}
+
+// r[impl record_encoder.rlen]
+/// The record's INFO END/SVLEN and FORMAT LEN as VCF text, the only fields
+/// besides REF that change its length, kept for [`rlen`] at `emit`.
+#[derive(Default)]
+struct RlenState {
+    keys: RlenKeys,
+    /// Dictionary indices of the three, where the header declares them
+    /// `Type=Integer` (`None` otherwise: they cannot change the length).
+    end: Option<u32>,
+    svlen: Option<u32>,
+    len: Option<u32>,
+    /// The record's REF and ALT columns, written only when one of the three is declared.
+    reference: Vec<u8>,
+    alt: Vec<u8>,
+    /// `END=…`, `SVLEN=…` and `LEN\t…\t…` as encoded; empty if not encoded.
+    end_text: Vec<u8>,
+    svlen_text: Vec<u8>,
+    len_text: Vec<u8>,
+    info: Vec<u8>,
+}
+
+impl RlenState {
+    fn new(header: &VcfHeader) -> Self {
+        let keys = RlenKeys::from_header(header);
+        let idx = |declared: bool, name: &str| {
+            let i = header.string_map().get(name).filter(|_| declared)?;
+            u32::try_from(i).ok()
+        };
+        Self {
+            end: idx(keys.end, "END"),
+            svlen: idx(keys.svlen, "SVLEN"),
+            len: idx(keys.len, "LEN"),
+            keys,
+            ..Self::default()
+        }
+    }
+
+    fn declared(&self) -> bool {
+        self.end.is_some() || self.svlen.is_some() || self.len.is_some()
+    }
+
+    fn begin(&mut self, alleles: &Alleles) {
+        self.end_text.clear();
+        self.svlen_text.clear();
+        self.len_text.clear();
+        if self.declared() {
+            self.reference.clear();
+            alleles.write_ref_into(&mut self.reference);
+            self.alt.clear();
+            if alleles.write_alts_into(&mut self.alt) == 0 {
+                self.alt.push(b'.');
+            }
+        }
+    }
+
+    /// The buffer an INFO field's values go into, `END=`/`SVLEN=` written,
+    /// if it is one the length depends on.
+    fn info_target(&mut self, dict_idx: u32) -> Option<&mut Vec<u8>> {
+        let (buf, key): (&mut Vec<u8>, &[u8]) = if self.end == Some(dict_idx) {
+            (&mut self.end_text, b"END=")
+        } else if self.svlen == Some(dict_idx) {
+            (&mut self.svlen_text, b"SVLEN=")
+        } else {
+            return None;
+        };
+        buf.clear();
+        buf.extend_from_slice(key);
+        Some(buf)
+    }
+
+    /// The buffer FORMAT LEN's samples go into, each after a TAB.
+    fn format_target(&mut self, dict_idx: u32) -> Option<&mut Vec<u8>> {
+        if self.len != Some(dict_idx) {
+            return None;
+        }
+        self.len_text.clear();
+        self.len_text.extend_from_slice(b"LEN");
+        Some(&mut self.len_text)
+    }
+
+    /// The record's reference length: `ref_len` (REF's) unless it encoded one
+    /// of the three, else what a reader computes from the record's text.
+    fn compute(&mut self, pos_0based: i64, ref_len: i64) -> i64 {
+        if self.end_text.is_empty() && self.svlen_text.is_empty() && self.len_text.is_empty() {
+            return ref_len;
+        }
+        self.info.clear();
+        self.info.extend_from_slice(&self.end_text);
+        if !self.end_text.is_empty() && !self.svlen_text.is_empty() {
+            self.info.push(b';');
+        }
+        self.info.extend_from_slice(&self.svlen_text);
+        if self.info.is_empty() {
+            self.info.push(b'.');
+        }
+        let cols = RlenColumns {
+            reference: &self.reference,
+            alt: &self.alt,
+            info: &self.info,
+            format: &self.len_text,
+        };
+        rlen(&cols, self.keys, pos_0based)
+    }
+}
+
+/// Integers as VCF text writes them, comma-separated, `.` for a missing one.
+fn push_ints(buf: &mut Vec<u8>, values: impl IntoIterator<Item = Option<i32>>) {
+    let mut itoa = itoa::Buffer::new();
+    for (i, v) in values.into_iter().enumerate() {
+        if i > 0 {
+            buf.push(b',');
+        }
+        match v {
+            Some(v) => buf.extend_from_slice(itoa.format(v).as_bytes()),
+            None => buf.push(b'.'),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -218,7 +358,7 @@ enum WriterInner<W: Write> {
     },
 }
 
-// r[impl record_encoder.writer_new]
+// r[impl record_encoder.writer_new+2]
 impl<W: Write> Writer<W> {
     /// Create a writer for the given output format. No header is needed at this point.
     pub fn new(inner: W, format: OutputFormat) -> Self {
@@ -257,8 +397,24 @@ impl<W: Write> Writer<W> {
             contig_names: Vec::new(),
             header: None,
             compression: Compression::default(),
+            index_kind: IndexKind::default(),
+            record: RecordState::default(),
             _state: PhantomData,
         }
+    }
+
+    // r[impl record_encoder.index_kind]
+    /// The coordinate index a `VcfGz` writer co-produces: [`IndexKind::Csi`]
+    /// (the default) or [`IndexKind::Tbi`]. BCF is indexed by CSI only:
+    /// [`write_header`](Self::write_header) refuses `Tbi` for it with
+    /// [`VcfError::TbiForBcf`]. Plain VCF is not indexed and ignores this.
+    ///
+    /// A TBI addresses positions below 2^29 only; a record that ends past it
+    /// fails its `emit` with [`IndexError::BeyondIndexRange`](crate::io::IndexError::BeyondIndexRange).
+    #[must_use]
+    pub fn index_kind(mut self, kind: IndexKind) -> Self {
+        self.index_kind = kind;
+        self
     }
 
     // r[impl record_encoder.compression_level]
@@ -292,7 +448,7 @@ impl<W: Write> Writer<W> {
         if self.compression == Compression::default() {
             return Ok(self);
         }
-        let Writer { inner, contig_names, header, compression, _state } = self;
+        let Writer { inner, contig_names, header, compression, index_kind, record, _state } = self;
         let Compression { level, threads } = compression;
         let inner = match inner {
             WriterInner::Vcf { .. } => inner,
@@ -333,12 +489,16 @@ impl<W: Write> Writer<W> {
                 fmt_tracker,
             },
         };
-        Ok(Writer { inner, contig_names, header, compression, _state })
+        Ok(Writer { inner, contig_names, header, compression, index_kind, record, _state })
     }
 
     // r[impl record_encoder.write_header]
     /// Write the file header. Consumes the `Unstarted` writer and returns `Ready`.
     pub fn write_header(self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
+        // r[impl record_encoder.index_kind]
+        if self.index_kind == IndexKind::Tbi && matches!(self.inner, WriterInner::Bcf { .. }) {
+            return Err(VcfError::TbiForBcf);
+        }
         let mut writer = self.apply_compression()?;
         let header_text = header.to_vcf_text();
         // Indexed by rid: a parsed header's contig dictionary may have holes.
@@ -374,7 +534,12 @@ impl<W: Write> Writer<W> {
             }
             WriterInner::VcfGz { bgzf, index, n_samples, .. } => {
                 bgzf.write_all(header_text.as_bytes())?;
-                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.index_offset()));
+                *index = Some(match writer.index_kind {
+                    IndexKind::Csi => {
+                        IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.index_offset())
+                    }
+                    IndexKind::Tbi => IndexBuilder::tbi(n_refs, bgzf.index_offset()),
+                });
                 *n_samples = header_n_samples;
             }
             WriterInner::Bcf { bgzf, index, n_samples, .. } => {
@@ -395,6 +560,8 @@ impl<W: Write> Writer<W> {
             contig_names,
             header: Some(header.id()),
             compression: writer.compression,
+            index_kind: writer.index_kind,
+            record: RecordState { rlen: RlenState::new(header), ploidies: Vec::new() },
             _state: PhantomData,
         })
     }
@@ -418,6 +585,7 @@ impl<W: Write> Writer<W, Ready> {
         // A QUAL whose bits are the float MISSING marker would read back as an
         // absent QUAL — indistinguishable from `None`.
         reject_reserved_floats("QUAL", qual)?;
+        self.record.begin(alleles);
         let inner = match &mut self.inner {
             WriterInner::Bcf {
                 bgzf,
@@ -444,6 +612,7 @@ impl<W: Write> Writer<W, Ready> {
                     tid: 0,
                     pos_0based: 0,
                     rlen: 0,
+                    alleles_start: 0,
                     info_tracker,
                     fmt_tracker,
                 };
@@ -503,10 +672,15 @@ impl<W: Write> Writer<W, Ready> {
             }
         };
 
-        Ok(RecordEncoder { inner, header: contig.header, ploidy: None, _state: PhantomData })
+        Ok(RecordEncoder {
+            inner,
+            header: contig.header,
+            record: &mut self.record,
+            _state: PhantomData,
+        })
     }
 
-    // r[impl record_encoder.finish]
+    // r[impl record_encoder.finish+2]
     /// Finalize the writer, returning the inner writer and an optional
     /// [`CoordinateIndex`].
     ///
@@ -517,13 +691,14 @@ impl<W: Write> Writer<W, Ready> {
     /// without choosing a serializer or re-supplying contig names.
     pub fn finish(self) -> Result<(W, Option<CoordinateIndex>), VcfError> {
         let contig_names = self.contig_names;
+        let kind = self.index_kind;
         match self.inner {
             WriterInner::Vcf { output, .. } => {
                 // r[impl vcf_writer.buffered_output]
                 Ok((output.into_inner()?, None))
             }
             WriterInner::VcfGz { mut bgzf, mut index, .. } => {
-                // r[impl vcf_writer.finish]
+                // r[impl vcf_writer.finish+2]
                 // r[impl vcf_writer.index_amend_last]
                 // End the last block first, so the index ends at the next
                 // block's start, as htslib's `sam_idx_save` does.
@@ -537,6 +712,7 @@ impl<W: Write> Writer<W, Ready> {
                 let index = index.map(|builder| CoordinateIndex {
                     builder,
                     format: OutputFormat::VcfGz,
+                    kind,
                     contig_names,
                 });
                 Ok((inner, index))
@@ -556,6 +732,7 @@ impl<W: Write> Writer<W, Ready> {
                 let index = index.map(|builder| CoordinateIndex {
                     builder,
                     format: OutputFormat::Bcf,
+                    kind: IndexKind::Csi,
                     contig_names,
                 });
                 Ok((inner, index))
@@ -571,8 +748,9 @@ impl<W: Write> Writer<W, Ready> {
 /// callers serialize with one [`write`](Self::write) call instead of selecting
 /// the right `IndexBuilder` method and re-supplying names and ref counts.
 ///
-/// Convention: the index lives next to the data file with [`SUFFIX`](Self::SUFFIX)
-/// appended (e.g. `calls.bcf` → `calls.bcf.csi`).
+/// Convention: the index lives next to the data file with [`suffix`](Self::suffix)
+/// appended (e.g. `calls.bcf` → `calls.bcf.csi`, `calls.vcf.gz` → `calls.vcf.gz.tbi`
+/// for a writer set to [`IndexKind::Tbi`]).
 ///
 /// ```
 /// use seqair_types::{Base, Pos1};
@@ -596,8 +774,8 @@ impl<W: Write> Writer<W, Ready> {
 /// let (_, index) = writer.finish()?;
 /// let index = index.expect("BCF output is indexed");
 ///
-/// // Write it next to the data file, e.g. `calls.bcf.{SUFFIX}`:
-/// assert_eq!(CoordinateIndex::SUFFIX, "csi");
+/// // Write it next to the data file, e.g. `calls.bcf.{suffix}`:
+/// assert_eq!(index.suffix(), "csi");
 /// let mut csi = Vec::new();
 /// index.write(&mut csi)?;
 /// assert!(!csi.is_empty());
@@ -606,21 +784,39 @@ impl<W: Write> Writer<W, Ready> {
 pub struct CoordinateIndex {
     builder: IndexBuilder,
     format: OutputFormat,
+    kind: IndexKind,
     contig_names: Vec<SmolStr>,
 }
 
 impl CoordinateIndex {
-    /// Conventional filename suffix appended to the data file path.
-    pub const SUFFIX: &'static str = "csi";
+    /// Which index this is: what the writer was set to for VCF.gz, CSI for BCF.
+    pub fn kind(&self) -> IndexKind {
+        self.kind
+    }
 
+    /// Conventional filename suffix appended to the data file path:
+    /// [`IndexKind::suffix`] of [`kind`](Self::kind).
+    pub fn suffix(&self) -> &'static str {
+        self.kind.suffix()
+    }
+
+    // r[impl record_encoder.finish+2]
     /// Serialize the index (BGZF-compressed) to `writer`, choosing the correct
-    /// on-disk format: CSI with tabix metadata for VCF.gz, plain CSI for BCF.
+    /// on-disk format: TBI, or CSI with tabix metadata, for VCF.gz; plain CSI
+    /// for BCF.
     pub fn write<W: Write>(&self, writer: W) -> Result<(), VcfError> {
-        match self.format {
-            OutputFormat::VcfGz => self.builder.write_csi_tabix(writer, &self.contig_names)?,
-            OutputFormat::Bcf => self.builder.write_csi(writer, self.contig_names.len(), &[])?,
+        match (self.format, self.kind) {
+            (OutputFormat::VcfGz, IndexKind::Tbi) => {
+                self.builder.write_tbi(writer, &self.contig_names)?;
+            }
+            (OutputFormat::VcfGz, IndexKind::Csi) => {
+                self.builder.write_csi_tabix(writer, &self.contig_names)?;
+            }
+            (OutputFormat::Bcf, _) => {
+                self.builder.write_csi(writer, self.contig_names.len(), &[])?;
+            }
             // finish() never builds a CoordinateIndex for plain VCF.
-            OutputFormat::Vcf => {}
+            (OutputFormat::Vcf, _) => {}
         }
         Ok(())
     }
@@ -632,7 +828,7 @@ impl CoordinateIndex {
     }
 
     /// Borrow the underlying [`IndexBuilder`] for direct serialization (e.g. to
-    /// emit a `.tbi` instead of `.csi`, or to compare formats in tests).
+    /// compare formats in tests).
     pub fn builder(&self) -> &IndexBuilder {
         &self.builder
     }
@@ -694,6 +890,8 @@ struct VcfEncoderFields<'a> {
     tid: u32,
     pos_0based: u32,
     rlen: u32,
+    /// The ID column's bytes in `buf`, which `RecordEncoder::ids` replaces.
+    id_range: (usize, usize),
     n_samples: u32,
     filter_written: bool,
     info_tracker: &'a mut FieldTracker,
@@ -747,7 +945,9 @@ fn begin_vcf_record<'a>(
     let mut itoa_buf = itoa::Buffer::new();
     buf.extend_from_slice(itoa_buf.format(pos.as_u32()).as_bytes());
     buf.push(b'\t');
+    let id_start = buf.len();
     buf.push(b'.');
+    let id_range = (id_start, buf.len());
     buf.push(b'\t');
     alleles.write_ref_into(buf);
     buf.push(b'\t');
@@ -778,6 +978,7 @@ fn begin_vcf_record<'a>(
         tid: contig.tid(),
         pos_0based,
         rlen,
+        id_range,
         n_samples,
         filter_written: false,
         info_tracker,
@@ -863,9 +1064,8 @@ pub struct RecordEncoder<'a, S> {
     /// The written header's id, which every key must carry
     /// (`r[record_encoder.foreign_keys]`).
     header: HeaderId,
-    /// The ploidy of the record's GT once it is encoded, for `Number=G`
-    /// counts (`r[record_encoder.count_check+2]`).
-    ploidy: Option<usize>,
+    /// GT ploidies and what the record's length depends on.
+    record: &'a mut RecordState,
     _state: PhantomData<S>,
 }
 
@@ -874,7 +1074,7 @@ impl<'a, S> RecordEncoder<'a, S> {
         RecordEncoder {
             inner: self.inner,
             header: self.header,
-            ploidy: self.ploidy,
+            record: self.record,
             _state: PhantomData,
         }
     }
@@ -894,14 +1094,14 @@ impl<'a, S> RecordEncoder<'a, S> {
         }
     }
 
-    // r[impl record_encoder.count_check+2]
+    // r[impl record_encoder.count_check+3]
     /// Check every non-empty sample's count; an empty sample is missing (`.`).
     fn check_sample_counts<T>(&self, id: &FieldId, per_sample: &[&[T]]) -> Result<(), VcfError> {
         let n_allele = self.n_allele_count();
-        per_sample
-            .iter()
-            .filter(|s| !s.is_empty())
-            .try_for_each(|s| id.check_count(n_allele, self.ploidy, s.len()))
+        per_sample.iter().enumerate().filter(|(_, s)| !s.is_empty()).try_for_each(|(i, s)| {
+            let ploidy = self.record.ploidies.get(i).copied().filter(|&p| p > 0);
+            id.check_count(n_allele, ploidy, s.len())
+        })
     }
 }
 
@@ -936,7 +1136,7 @@ impl EncoderInner<'_> {
 
 // ── Begun → Filtered ───────────────────────────────────────────────────
 
-// r[impl record_encoder.typestate_transitions+2]
+// r[impl record_encoder.typestate_transitions+3]
 // r[impl record_encoder.filters+2]
 impl<'a> RecordEncoder<'a, Begun> {
     pub fn filter_pass(mut self) -> RecordEncoder<'a, Filtered> {
@@ -993,6 +1193,67 @@ impl<'a> RecordEncoder<'a, Begun> {
         Ok(self.into_state())
     }
 
+    // r[impl record_encoder.record_id]
+    /// Set the record's ID column: `ids` written `;`-separated, or `.` if there
+    /// are none. Calling it again replaces the column.
+    ///
+    /// # Errors
+    /// [`VcfError::InvalidRecordId`] for an identifier that is empty, `.`, or
+    /// holds whitespace or `;`, and [`VcfError::DuplicateRecordId`] for one
+    /// given twice, before anything is written; the record is not emitted.
+    pub fn ids<'i>(mut self, ids: impl IntoIterator<Item = &'i str>) -> Result<Self, VcfError> {
+        let ids: SmallVec<&str, 4> = ids.into_iter().collect();
+        for (i, &id) in ids.iter().enumerate() {
+            let problem = if id.is_empty() {
+                Some(RecordIdProblem::Empty)
+            } else if id == "." {
+                Some(RecordIdProblem::Missing)
+            } else if id.chars().any(char::is_whitespace) {
+                Some(RecordIdProblem::Whitespace)
+            } else if id.contains(';') {
+                Some(RecordIdProblem::Semicolon)
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                return Err(VcfError::InvalidRecordId { id: SmolStr::from(id), problem });
+            }
+            if ids.get(..i).is_some_and(|before| before.contains(&id)) {
+                return Err(VcfError::DuplicateRecordId { id: SmolStr::from(id) });
+            }
+        }
+        // Written at the buffer's end, then moved over the old column: no allocation.
+        let write_column = |buf: &mut Vec<u8>| {
+            for (i, id) in ids.iter().enumerate() {
+                if i > 0 {
+                    buf.push(b';');
+                }
+                buf.extend_from_slice(id.as_bytes());
+            }
+            if ids.is_empty() {
+                buf.push(b'.');
+            }
+        };
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let from = enc.shared_buf.len();
+                let len = ids.iter().map(|id| id.len().saturating_add(1)).sum::<usize>().max(2);
+                encode_type_byte(enc.shared_buf, len.saturating_sub(1), BCF_BT_CHAR);
+                write_column(enc.shared_buf);
+                let new_len = splice_appended(enc.shared_buf, 24..enc.alleles_start, from);
+                enc.alleles_start = 24usize.saturating_add(new_len);
+            }
+            EncoderInner::Vcf(vcf) => {
+                let from = vcf.buf.len();
+                write_column(vcf.buf);
+                let (start, end) = vcf.id_range;
+                let new_len = splice_appended(vcf.buf, start..end, from);
+                vcf.id_range = (start, start.saturating_add(new_len));
+            }
+        }
+        Ok(self)
+    }
+
     pub fn no_filter(mut self) -> RecordEncoder<'a, Filtered> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => encode_type_byte(enc.shared_buf, 0, BCF_BT_NULL),
@@ -1004,6 +1265,19 @@ impl<'a> RecordEncoder<'a, Begun> {
         }
         self.into_state()
     }
+}
+
+/// Move the bytes appended to `buf` at `from..` over `range`, which they
+/// replace, keeping everything between in place; returns their length.
+fn splice_appended(buf: &mut Vec<u8>, range: std::ops::Range<usize>, from: usize) -> usize {
+    debug_assert!(range.start <= range.end && range.end <= from && from <= buf.len());
+    let new_len = buf.len().saturating_sub(from);
+    if let Some(tail) = buf.get_mut(range.start..) {
+        tail.rotate_right(new_len);
+    }
+    let old = range.start.saturating_add(new_len)..range.end.saturating_add(new_len);
+    buf.drain(old);
+    new_len
 }
 
 // ── Field dedup helpers ───────────────────────────────────────────────
@@ -1155,6 +1429,10 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError> {
         self.check_key(id)?;
         reject_reserved_ints(id.name(), [value])?;
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.info_target(id.dict_idx()) {
+            push_ints(buf, [Some(value)]);
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1210,6 +1488,10 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
         reject_reserved_ints(id.name(), values.iter().copied())?;
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.info_target(id.dict_idx()) {
+            push_ints(buf, values.iter().copied().map(Some));
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1310,6 +1592,10 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
         reject_reserved_ints(id.name(), values.iter().filter_map(|v| *v))?;
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.info_target(id.dict_idx()) {
+            push_ints(buf, values.iter().copied());
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1359,7 +1645,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     }
 }
 
-// r[impl record_encoder.typestate_transitions+2]
+// r[impl record_encoder.typestate_transitions+3]
 impl<'a> RecordEncoder<'a, Filtered> {
     /// Transition to the `WithSamples` state for encoding FORMAT fields.
     ///
@@ -1383,7 +1669,7 @@ impl<'a> RecordEncoder<'a, Filtered> {
     // r[impl record_encoder.emit]
     // r[impl record_encoder.emit_no_samples]
     pub fn emit(self) -> Result<(), VcfError> {
-        emit_inner(self.inner)
+        emit_inner(self.inner, self.record)
     }
 }
 
@@ -1397,21 +1683,11 @@ impl<'a> RecordEncoder<'a, Filtered> {
 // direct (untyped) trait calls that bypass that check.
 #[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
+    // r[impl record_encoder.mixed_ploidy]
     fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(gts.len(), self.n_samples(), "one GT per sample");
-        // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
-        // diploid on chrX) is not yet supported — BCF allows per-sample padding
-        // with end-of-vector sentinels but we don't encode that.
-        let ploidy = gts.first().map_or(0, |g| g.alleles.len());
-        if let Some((i, g)) = gts.iter().enumerate().find(|(_, g)| g.alleles.len() != ploidy) {
-            return Err(VcfError::MixedPloidy {
-                first_ploidy: ploidy,
-                mismatch_index: i,
-                mismatch_ploidy: g.alleles.len(),
-            });
-        }
 
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1429,8 +1705,12 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                     .unwrap_or(0);
                 let max_val = (max_allele.saturating_add(1)).saturating_mul(2).saturating_add(1);
                 let typ = smallest_int_type(&[max_val]);
-                encode_type_byte(enc.indiv_buf, ploidy, typ);
+                // The column is as wide as the largest ploidy; a genotype with
+                // no alleles still takes one slot, its missing call.
+                let width = gts.iter().map(|g| g.alleles.len()).max().unwrap_or(0).max(1);
+                encode_type_byte(enc.indiv_buf, width, typ);
                 for gt in gts {
+                    let ploidy = gt.alleles.len();
                     for (i, allele_opt) in gt.alleles.iter().enumerate() {
                         // r[impl vcf_record.gt_first_phase+3]
                         // The first allele carries a phase bit too, and from
@@ -1453,14 +1733,24 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         };
                         encode_int_as(enc.indiv_buf, encoded, typ);
                     }
+                    if ploidy == 0 {
+                        encode_int_as(enc.indiv_buf, 0, typ);
+                    }
+                    // r[impl bcf_writer.end_of_vector]
+                    for _ in ploidy.max(1)..width {
+                        encode_int_eov(enc.indiv_buf, typ);
+                    }
                 }
                 enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                // r[impl vcf_writer.genotype_serialization]
+                // r[impl vcf_writer.genotype_serialization+2]
                 vcf.begin_format_field();
                 let mut b = itoa::Buffer::new();
                 for (si, gt) in gts.iter().enumerate() {
+                    if gt.alleles.is_empty() {
+                        vcf.sample_bufs[si].push(b'.');
+                    }
                     for (i, allele) in gt.alleles.iter().enumerate() {
                         if i > 0 {
                             let phased =
@@ -1478,7 +1768,8 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 vcf.commit_format_field(id);
             }
         }
-        self.ploidy = Some(ploidy);
+        self.record.ploidies.clear();
+        self.record.ploidies.extend(gts.iter().map(|g| g.alleles.len()));
         Ok(())
     }
     // r[impl record_encoder.reserved_rejection]
@@ -1487,6 +1778,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         reject_reserved_ints(id.name(), values.iter().copied())?;
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.format_target(id.dict_idx()) {
+            for &v in values {
+                buf.push(b'\t');
+                push_ints(buf, [Some(v)]);
+            }
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.indiv_buf.len();
@@ -1546,6 +1844,87 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.format_scalar_opt]
+    // r[impl record_encoder.reserved_rejection]
+    fn format_int_opt(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        self.inner.check_format_room(id)?;
+        debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
+        reject_reserved_ints(id.name(), values.iter().filter_map(|v| *v))?;
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.format_target(id.dict_idx()) {
+            for &v in values {
+                buf.push(b'\t');
+                push_ints(buf, [v]);
+            }
+        }
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.indiv_buf.len();
+                // r[impl bcf_writer.smallest_int_type]
+                // r[impl bcf_writer.missing_sentinels]
+                // Every sample missing leaves the iterator empty: int8, as htslib picks.
+                let tc = smallest_int_type_iter(values.iter().filter_map(|v| *v));
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, 1, tc);
+                for &v in values {
+                    encode_int_value_or_missing(enc.indiv_buf, v, tc);
+                }
+                enc.commit_format_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.begin_format_field();
+                let mut b = itoa::Buffer::new();
+                for (i, v) in values.iter().enumerate() {
+                    match v {
+                        // r[impl vcf_writer.integer_format]
+                        Some(v) => vcf.sample_bufs[i].extend_from_slice(b.format(*v).as_bytes()),
+                        // r[impl vcf_writer.missing_dot]
+                        None => vcf.sample_bufs[i].push(b'.'),
+                    }
+                }
+                vcf.commit_format_field(id);
+            }
+        }
+        Ok(())
+    }
+    // r[impl record_encoder.format_scalar_opt]
+    // r[impl record_encoder.reserved_rejection]
+    fn format_float_opt(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        self.inner.check_format_room(id)?;
+        debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
+        reject_reserved_floats(id.name(), values.iter().filter_map(|v| *v))?;
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.indiv_buf.len();
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, 1, BCF_BT_FLOAT);
+                for &v in values {
+                    // r[impl bcf_writer.missing_sentinels]
+                    match v {
+                        Some(v) => v.encode_bcf_as(enc.indiv_buf, BCF_BT_FLOAT),
+                        None => f32::encode_missing(enc.indiv_buf),
+                    }
+                }
+                enc.commit_format_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.begin_format_field();
+                for (i, v) in values.iter().enumerate() {
+                    match v {
+                        // r[impl vcf_writer.float_precision]
+                        Some(v) => write_float_g(&mut vcf.sample_bufs[i], *v)
+                            .map_err(|source| VcfError::FailedToWriteFormattedString { source })?,
+                        // r[impl vcf_writer.missing_dot]
+                        None => vcf.sample_bufs[i].push(b'.'),
+                    }
+                }
+                vcf.commit_format_field(id);
+            }
+        }
+        Ok(())
+    }
     // r[impl record_encoder.reserved_rejection]
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
         self.check_key(id)?;
@@ -1554,6 +1933,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         self.check_sample_counts(id, per_sample)?;
         reject_reserved_ints(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.format_target(id.dict_idx()) {
+            for s in per_sample {
+                buf.push(b'\t');
+                push_ints(buf, s.iter().copied().map(Some));
+            }
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.indiv_buf.len();
@@ -1812,17 +2198,30 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
 impl<'a> RecordEncoder<'a, WithSamples> {
     // r[impl record_encoder.emit]
     pub fn emit(self) -> Result<(), VcfError> {
-        emit_inner(self.inner)
+        emit_inner(self.inner, self.record)
     }
 }
 
 // ── Emit ───────────────────────────────────────────────────────────────
 
-fn emit_inner(mut inner: EncoderInner<'_>) -> Result<(), VcfError> {
+// r[impl record_encoder.rlen]
+fn emit_inner(mut inner: EncoderInner<'_>, record: &mut RecordState) -> Result<(), VcfError> {
     match &mut inner {
-        EncoderInner::Bcf(enc) => enc.emit_inner(),
-        EncoderInner::Vcf(vcf) => vcf_emit(vcf),
+        EncoderInner::Bcf(enc) => {
+            let rlen = record.rlen.compute(i64::from(enc.pos_0based), i64::from(enc.rlen));
+            enc.set_rlen(i32::try_from(rlen).map_err(|_| overflow("rlen", rlen, "i32"))?);
+            enc.emit_inner()
+        }
+        EncoderInner::Vcf(vcf) => {
+            let rlen = record.rlen.compute(i64::from(vcf.pos_0based), i64::from(vcf.rlen));
+            vcf.rlen = u32::try_from(rlen).map_err(|_| overflow("rlen", rlen, "u32"))?;
+            vcf_emit(vcf)
+        }
     }
+}
+
+fn overflow(field: &'static str, value: i64, target_type: &'static str) -> VcfError {
+    VcfError::ValueOverflow { field, value: value.unsigned_abs(), target_type }
 }
 
 fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {

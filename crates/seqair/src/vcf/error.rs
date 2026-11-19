@@ -43,6 +43,10 @@ pub enum VcfHeaderError {
     #[error("Flag INFO field {id} must have Number=0")]
     FlagNumberMismatch { id: SmolStr },
 
+    // r[impl vcf_header.file_format.single_version+4]
+    #[error("field {id}: Number={number} needs {needs}, but the header declares {version}")]
+    NumberNeedsNewerVersion { id: SmolStr, number: Number, version: VcfVersion, needs: VcfVersion },
+
     #[error("FORMAT field {id} must not be Flag type")]
     FormatFlagNotAllowed { id: SmolStr },
 
@@ -228,6 +232,32 @@ impl std::fmt::Display for ReservedMarker {
     }
 }
 
+// r[impl record_encoder.record_id]
+/// Why a record ID is not one (VCF §1.6.1: "no whitespace or semicolons permitted").
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordIdProblem {
+    /// An empty identifier, which would read back as no identifier at all.
+    Empty,
+    /// `.`, the missing value: a reader cannot tell it from no ID.
+    Missing,
+    /// It contains whitespace.
+    Whitespace,
+    /// It contains `;`, the separator between identifiers.
+    Semicolon,
+}
+
+impl std::fmt::Display for RecordIdProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "it is empty",
+            Self::Missing => "`.` is the missing value",
+            Self::Whitespace => "it contains whitespace",
+            Self::Semicolon => "it contains `;`, the separator",
+        })
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfEncodeError {
@@ -275,7 +305,7 @@ pub enum VcfError {
     #[error("{name} was resolved from another header than the one being written")]
     ForeignKey { name: SmolStr },
 
-    // r[impl record_encoder.count_check+2]
+    // r[impl record_encoder.count_check+3]
     #[error(
         "field {field} is declared Number={number}, so it takes {expected} values, not {found}"
     )]
@@ -290,10 +320,17 @@ pub enum VcfError {
     #[error("FORMAT field has {got} values but header declares {expected} samples")]
     SampleCountMismatch { expected: usize, got: usize },
 
-    #[error(
-        "mixed ploidy in GT field: first sample has ploidy {first_ploidy} but sample {mismatch_index} has ploidy {mismatch_ploidy}"
-    )]
-    MixedPloidy { first_ploidy: usize, mismatch_index: usize, mismatch_ploidy: usize },
+    // r[impl record_encoder.index_kind]
+    #[error("BCF is indexed by CSI only; a TBI index was asked for")]
+    TbiForBcf,
+
+    // r[impl record_encoder.record_id]
+    #[error("record ID {id:?} is not an identifier: {problem}")]
+    InvalidRecordId { id: SmolStr, problem: RecordIdProblem },
+
+    // r[impl record_encoder.record_id]
+    #[error("record ID {id} is given twice")]
+    DuplicateRecordId { id: SmolStr },
 
     #[error("header text too large for BCF (exceeds u32::MAX)")]
     HeaderTooLarge,

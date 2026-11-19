@@ -48,6 +48,24 @@ pub enum Number {
 }
 
 impl Number {
+    // r[impl vcf_header.file_format.single_version+4]
+    /// The first VCF version that defines this cardinality: 4.4 for `P`, 4.5
+    /// for `M`, `LA`, `LR` and `LG`, 4.0 for the rest.
+    pub const fn min_version(self) -> VcfVersion {
+        match self {
+            Self::Ploidy => VcfVersion::V4_4,
+            Self::BaseModification
+            | Self::LocalAlternateBases
+            | Self::LocalReferenceAlternateBases
+            | Self::LocalGenotypes => VcfVersion::V4_5,
+            Self::Count(_)
+            | Self::AlternateBases
+            | Self::ReferenceAlternateBases
+            | Self::Genotypes
+            | Self::Unknown => VcfVersion::V4_0,
+        }
+    }
+
     /// VCF text representation.
     pub fn as_str(&self) -> SmolStr {
         match self {
@@ -250,6 +268,17 @@ impl StringMap {
         Some(idx32)
     }
 
+    // r[impl vcf_header.remove]
+    /// Make `id`'s slot a hole, as htslib's `bcf_hdr_remove` does: every other
+    /// id keeps its index, and the slot is never reused.
+    pub(crate) fn remove(&mut self, id: &str) {
+        if let Some(idx) = self.ids.remove(id)
+            && let Some(slot) = self.slots.get_mut(idx as usize)
+        {
+            *slot = None;
+        }
+    }
+
     /// Put a new `id` at `idx`, growing the map with holes up to it. On a
     /// conflict, returns the id already there; the map is unchanged.
     pub(crate) fn insert_at(&mut self, id: &SmolStr, idx: u32) -> Result<(), SmolStr> {
@@ -289,7 +318,7 @@ fn unknown_field(name: &str, kind: KeyKind) -> KeyError {
     KeyError::UnknownField { name: SmolStr::from(name), kind }
 }
 
-// r[impl vcf_header.brand+2]
+// r[impl vcf_header.brand+3]
 /// Identifies one header within the process. Every header built or parsed
 /// gets a fresh one; a clone keeps it. Keys resolved from a header carry it,
 /// so a key cannot silently read a field of another file that happens to
@@ -352,7 +381,7 @@ pub struct VcfHeader {
 }
 
 impl VcfHeader {
-    // r[impl vcf_header.file_format.single_version+2]
+    // r[impl vcf_header.file_format.single_version+4]
     /// The VCF version a built header declares. There is no setter: a
     /// cardinality is versioned (`Number=M` is 4.5 and nothing earlier), so a
     /// header that could declare an older version could promise a grammar it
@@ -362,6 +391,50 @@ impl VcfHeader {
     /// Start building a new header.
     pub fn builder() -> VcfHeaderBuilder {
         VcfHeaderBuilder::new()
+    }
+
+    // r[impl vcf_header.to_builder]
+    /// A builder seeded with every line of this header — version, other
+    /// lines, definitions, contigs, samples — and its dictionaries as they
+    /// are, under a fresh [`HeaderId`]: `h.to_builder().build()` is `h` but
+    /// for the id, so keys resolved from `h` must be resolved again from the
+    /// new header.
+    ///
+    /// The builder starts in the [`Contigs`] phase, so every phase is
+    /// reachable. A registration appends to the dictionary past every index
+    /// already taken (a new FILTER may land after the copied INFO ids);
+    /// [`to_vcf_text`](Self::to_vcf_text) then writes `IDX=` so a reader
+    /// assigns the indices the writer encodes with.
+    ///
+    /// ```
+    /// use seqair::vcf::record_encoder::{FormatFieldDef, Scalar, Str};
+    /// use seqair::vcf::{Number, VcfHeader};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // An input file's header, which declares PS as a String.
+    /// let mut input = VcfHeader::builder().formats();
+    /// input.register_format(&FormatFieldDef::<Str>::new("PS", Number::Count(1), "Old phase set"))?;
+    /// let mut input = input.samples();
+    /// input.add_sample("S1")?;
+    /// let input = input.build()?;
+    ///
+    /// let mut builder = input.to_builder();
+    /// assert!(builder.remove_format("PS"));
+    /// builder.add_other_line("phaser_version=1.0");
+    /// let mut builder = builder.formats();
+    /// let ps = builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set"))?;
+    /// let header = builder.build()?;
+    /// assert_eq!(header.samples(), ["S1"]);
+    /// assert_eq!(header.version(), input.version());
+    /// assert_ne!(header.string_map().get("PS"), input.string_map().get("PS"));
+    /// # let _ = ps;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_builder(&self) -> VcfHeaderBuilder<Contigs> {
+        let mut header = self.clone();
+        header.id = HeaderId::next();
+        VcfHeaderBuilder { header, _phase: PhantomData }
     }
 
     // r[impl vcf_header.file_format+2]
@@ -497,7 +570,7 @@ impl VcfHeader {
         (0..n).map(|index| SampleIdx { index, header: self.id })
     }
 
-    // r[impl vcf_header.brand+2]
+    // r[impl vcf_header.brand+3]
     /// This header's identity: distinct from every other header's in the
     /// process, kept by a clone.
     pub fn id(&self) -> HeaderId {
@@ -813,12 +886,68 @@ impl<P> VcfHeaderBuilder<P> {
             .ok_or(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
-    /// Append a `##key=value` metadata line (e.g. `##source=myapp`).
+    // r[impl vcf_header.set_samples]
+    /// Append a `##key=value` metadata line, given without the `##` (e.g.
+    /// `source=myapp`).
     ///
     /// Available from any phase — metadata does not affect BCF string
     /// dictionary ordering.
     pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
         self.header.other_lines.push(line.into());
+    }
+
+    // r[impl vcf_header.remove]
+    /// Remove the INFO definition `id`; returns whether there was one. Its
+    /// dictionary slot becomes a hole unless a FILTER or FORMAT `id` keeps it.
+    pub fn remove_info(&mut self, id: &str) -> bool {
+        let removed = self.header.infos.shift_remove(id).is_some();
+        self.release(id);
+        removed
+    }
+
+    // r[impl vcf_header.remove]
+    /// Remove the FORMAT definition `id`; returns whether there was one. Its
+    /// dictionary slot becomes a hole unless a FILTER or INFO `id` keeps it.
+    pub fn remove_format(&mut self, id: &str) -> bool {
+        let removed = self.header.formats.shift_remove(id).is_some();
+        self.release(id);
+        removed
+    }
+
+    // r[impl vcf_header.remove]
+    /// Remove the FILTER definition `id`; returns whether there was one.
+    /// `PASS` is index 0 in every header and is not removed: `false`.
+    pub fn remove_filter(&mut self, id: &str) -> bool {
+        if id == "PASS" {
+            return false;
+        }
+        let removed = self.header.filters.shift_remove(id).is_some();
+        self.release(id);
+        removed
+    }
+
+    // r[impl vcf_header.file_format.single_version+4]
+    /// Refuse a `Number` newer than the header's version, which a derived
+    /// header keeps from its source.
+    fn check_number_version(&self, id: &SmolStr, number: Number) -> Result<(), VcfHeaderError> {
+        let (version, needs) = (self.header.version, number.min_version());
+        if version < needs {
+            return Err(VcfHeaderError::NumberNeedsNewerVersion {
+                id: id.clone(),
+                number,
+                version,
+                needs,
+            });
+        }
+        Ok(())
+    }
+
+    /// Drop `id` from the dictionary if no category declares it any more.
+    fn release(&mut self, id: &str) {
+        let h = &self.header;
+        if !(h.filters.contains_key(id) || h.infos.contains_key(id) || h.formats.contains_key(id)) {
+            self.header.string_map.remove(id);
+        }
     }
 
     // r[impl vcf_header.builder]
@@ -970,6 +1099,7 @@ impl VcfHeaderBuilder<Infos> {
         if def.typ == ValueType::Flag && def.number != Number::Count(0) {
             return Err(VcfHeaderError::FlagNumberMismatch { id });
         }
+        self.check_number_version(&id, def.number)?;
         let dict_idx = self.push_dict_entry(&id)?;
         self.header.infos.insert(id, def);
         Ok(dict_idx)
@@ -1023,6 +1153,7 @@ impl VcfHeaderBuilder<Formats> {
         if def.typ == ValueType::Flag {
             return Err(VcfHeaderError::FormatFlagNotAllowed { id });
         }
+        self.check_number_version(&id, def.number)?;
         let dict_idx = self.push_dict_entry(&id)?;
         self.header.formats.insert(id, def);
         Ok(dict_idx)
@@ -1067,6 +1198,29 @@ impl VcfHeaderBuilder<Formats> {
 // ── Samples phase ────────────────────────────────────────────────────
 
 impl VcfHeaderBuilder<Samples> {
+    // r[impl vcf_header.set_samples]
+    /// Replace the samples with `names`, in order. On an error (a name given
+    /// twice, more than [`MAX_SAMPLES`]) the samples are left as they were.
+    pub fn set_samples<S: Into<SmolStr>>(
+        &mut self,
+        names: impl IntoIterator<Item = S>,
+    ) -> Result<(), VcfHeaderError> {
+        let mut samples: Vec<SmolStr> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for name in names {
+            let name = name.into();
+            if samples.len() >= MAX_SAMPLES {
+                return Err(VcfHeaderError::TooManySamples { max: MAX_SAMPLES });
+            }
+            if !seen.insert(name.clone()) {
+                return Err(VcfHeaderError::DuplicateSample { name });
+            }
+            samples.push(name);
+        }
+        self.header.samples = samples;
+        Ok(())
+    }
+
     // r[impl vcf_header.sample_names]
     pub fn add_sample(&mut self, name: impl Into<SmolStr>) -> Result<(), VcfHeaderError> {
         let name = name.into();
@@ -1226,7 +1380,7 @@ mod tests {
         assert!(!builder.header.formats.contains_key("overflow"));
     }
 
-    // r[verify vcf_header.brand+2]
+    // r[verify vcf_header.brand+3]
     #[test]
     fn every_header_has_its_own_id_and_a_clone_keeps_it() {
         use crate::vcf::record_encoder::{InfoFieldDef, Scalar};
@@ -1245,7 +1399,7 @@ mod tests {
         assert_eq!(dp.0.header, header.id(), "a registered key carries the header's id");
     }
 
-    // r[verify vcf_header.brand+2]
+    // r[verify vcf_header.brand+3]
     // r[verify vcf_values.header_brand+2]
     #[test]
     fn the_writer_refuses_a_contig_of_another_header() {

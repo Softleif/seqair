@@ -230,6 +230,8 @@ pub struct BcfRecordEncoder<'a> {
     pub(crate) tid: u32,
     pub(crate) pos_0based: i32,
     pub(crate) rlen: i32,
+    /// Where REF starts in `shared_buf`: the ID column is `24..alleles_start`.
+    pub(crate) alleles_start: usize,
     // Dedup trackers (borrowed from WriterInner for cross-record reuse)
     pub(crate) info_tracker: &'a mut FieldTracker,
     pub(crate) fmt_tracker: &'a mut FieldTracker,
@@ -262,6 +264,15 @@ impl<W: Write> BgzfWrite for BgzfSink<W> {
 }
 
 impl<'a> BcfRecordEncoder<'a> {
+    // r[impl record_encoder.rlen]
+    /// Set the record's `rlen`, in the fixed header and for the index.
+    pub(crate) fn set_rlen(&mut self, rlen: i32) {
+        self.rlen = rlen;
+        if let Some(dest) = self.shared_buf.get_mut(8..12) {
+            dest.copy_from_slice(&rlen.to_le_bytes());
+        }
+    }
+
     // r[impl bcf_encoder.emit]
     /// Patch the header, write the record to BGZF, push to index.
     #[allow(dead_code, reason = "called by unified.rs do_emit_bcf")]
@@ -382,9 +393,10 @@ impl Alleles {
         // Placeholder for n_fmt|n_sample (patched at emit)
         enc.shared_buf.extend_from_slice(&0u32.to_le_bytes());
 
-        // ID = "."
+        // ID = "." until `RecordEncoder::ids` replaces it.
         encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
         enc.shared_buf.push(b'.');
+        enc.alleles_start = enc.shared_buf.len();
 
         // REF allele (zero-alloc): compute length, write type header, then data.
         let ref_len = self.ref_byte_len();
@@ -450,6 +462,7 @@ mod tests {
             tid: 0,
             pos_0based: 0,
             rlen: 0,
+            alleles_start: 0,
             info_tracker,
             fmt_tracker,
         }

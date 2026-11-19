@@ -2,13 +2,14 @@
 //!
 //! Use [`Writer`] with [`OutputFormat`] for all VCF/BCF output:
 //! - `.vcf` → plain text VCF (no index)
-//! - `.vcf.gz` → BGZF-compressed VCF; [`Writer::finish`] returns a CSI [`CoordinateIndex`]
+//! - `.vcf.gz` → BGZF-compressed VCF; [`Writer::finish`] returns a CSI
+//!   [`CoordinateIndex`], or a TBI with [`Writer::index_kind`]
 //! - `.bcf` → BCF binary; [`Writer::finish`] returns a CSI [`CoordinateIndex`]
 //!
 //! For compressed output, [`Writer::finish`] hands back a [`CoordinateIndex`]
 //! alongside the inner writer; write it next to the data file (e.g.
-//! `calls.bcf.csi`) with [`CoordinateIndex::write`] or
-//! [`write_to_path`](CoordinateIndex::write_to_path).
+//! `calls.bcf.csi`, the suffix being [`CoordinateIndex::suffix`]) with
+//! [`CoordinateIndex::write`] or [`write_to_path`](CoordinateIndex::write_to_path).
 //!
 //! Records are encoded through a typestate [`RecordEncoder`] that enforces
 //! the correct field ordering at compile time.
@@ -191,8 +192,8 @@ pub(crate) mod writer;
 
 pub use alleles::Alleles;
 pub use error::{
-    AllelesError, KeyError, KeyKind, MetaLineError, ReservedMarker, VcfEncodeError, VcfError,
-    VcfHeaderError,
+    AllelesError, KeyError, KeyKind, MetaLineError, RecordIdProblem, ReservedMarker,
+    VcfEncodeError, VcfError, VcfHeaderError,
 };
 // The builder's `Samples` phase stays at `header::Samples`: `vcf::Samples` is
 // the reader's component.
@@ -229,10 +230,32 @@ pub use unified::{
 pub enum OutputFormat {
     /// Plain text VCF.
     Vcf,
-    /// BGZF-compressed VCF (.vcf.gz) with TBI index.
+    /// BGZF-compressed VCF (.vcf.gz), indexed by CSI or TBI ([`IndexKind`]).
     VcfGz,
     /// BCF binary with CSI index.
     Bcf,
+}
+
+// r[impl record_encoder.index_kind]
+/// The coordinate index a compressed [`Writer`] co-produces
+/// ([`Writer::index_kind`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum IndexKind {
+    /// CSI: addresses every contig length. The default, and BCF's only index.
+    #[default]
+    Csi,
+    /// TBI (tabix): `.vcf.gz` only, and only positions below 2^29.
+    Tbi,
+}
+
+impl IndexKind {
+    /// The index file's suffix: it lives at `<data path>.<suffix>`.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::Csi => "csi",
+            Self::Tbi => "tbi",
+        }
+    }
 }
 
 impl OutputFormat {

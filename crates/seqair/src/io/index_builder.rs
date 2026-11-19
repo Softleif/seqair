@@ -61,6 +61,14 @@ pub enum IndexError {
     /// reference) must all come at the end, as in a coordinate-sorted file.
     #[error("record on tid={tid} follows a record with no reference")]
     PlacedAfterUnplaced { tid: u32 },
+
+    // r[impl index_builder.range_check]
+    /// A record reaches past the last position the index's bins address:
+    /// `max` is `2^(min_shift + 3·depth)`, 2^29 for TBI and BAI.
+    #[error(
+        "record on tid={tid} spans {beg}..{end}, past the {max} this index addresses; a CSI sized for the contig holds it"
+    )]
+    BeyondIndexRange { tid: u32, beg: u64, end: u64, max: u64 },
 }
 
 /// Per-reference accumulated index data.
@@ -228,6 +236,11 @@ impl IndexBuilder {
     ) -> Result<(), IndexError> {
         if self.n_no_coor > 0 {
             return Err(IndexError::PlacedAfterUnplaced { tid });
+        }
+        // r[impl index_builder.range_check]
+        let max = maxpos(self.min_shift, self.depth);
+        if beg > max || end > max {
+            return Err(IndexError::BeyondIndexRange { tid, beg, end, max });
         }
         // Validate sort order
         if let Some(last_tid) = self.last_tid
@@ -965,6 +978,30 @@ mod tests {
         let mut decompressed = Vec::new();
         reader.read_to_end(&mut decompressed).unwrap();
         assert_eq!(&decompressed[..4], b"TBI\x01");
+    }
+
+    // r[verify index_builder.range_check]
+    /// TBI stops at 2^29, as htslib's `hts_idx_check_range` does: up to it a
+    /// record is binned, one base past it is refused without touching the
+    /// builder, and a CSI deep enough for the contig takes it.
+    #[test]
+    fn a_record_past_the_bins_is_refused() {
+        let max = 1u64 << 29;
+        let mut tbi = IndexBuilder::tbi(1, VirtualOffset(0));
+        tbi.push(0, max - 10, max, VirtualOffset(100)).unwrap();
+        let err = tbi.push(0, max - 5, max + 1, VirtualOffset(200)).unwrap_err();
+        assert!(
+            matches!(err, IndexError::BeyondIndexRange { tid: 0, end, max: m, .. } if end == max + 1 && m == max),
+            "{err:?}"
+        );
+        assert_eq!(
+            tbi.last_off,
+            VirtualOffset(100),
+            "a refused record leaves the builder as it was"
+        );
+
+        let mut csi = IndexBuilder::csi(1, 14, Some(max * 4), VirtualOffset(0));
+        csi.push(0, max - 5, max + 1, VirtualOffset(200)).unwrap();
     }
 
     // r[verify csi.write_format]

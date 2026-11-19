@@ -215,7 +215,7 @@ fn expect_ints(row: &[i32]) -> String {
     }
 }
 
-// r[verify record_encoder.format_methods]
+// r[verify record_encoder.format_methods+2]
 /// Every integer of every sample must come back from bcftools unchanged,
 /// whatever widths the other samples in the same column needed.
 #[hegel::test(test_cases = crate::pinned::cases(40))]
@@ -258,7 +258,7 @@ fn format_int_arrays_round_trip_through_bcftools(tc: TestCase) {
     }
 }
 
-// r[verify record_encoder.format_methods]
+// r[verify record_encoder.format_methods+2]
 /// The same for float rows, which are fixed-width but still padded per sample.
 #[hegel::test(test_cases = crate::pinned::cases(40))]
 fn format_float_arrays_round_trip_through_bcftools(tc: TestCase) {
@@ -297,7 +297,7 @@ fn format_float_arrays_round_trip_through_bcftools(tc: TestCase) {
     }
 }
 
-// r[verify record_encoder.format_methods]
+// r[verify record_encoder.format_methods+2]
 // r[verify vcf_writer.format_serialization]
 /// seqair writes the sample columns twice over: as VCF text, and as BCF that
 /// bcftools turns back into VCF text. The two paths share no encoding code, so

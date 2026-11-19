@@ -217,7 +217,7 @@ pub struct FieldId {
     pub(crate) dict_idx: u32,
     pub(crate) name: SmolStr,
     /// The declared `Number`, which the writer checks a value's count against
-    /// (`r[record_encoder.count_check+2]`).
+    /// (`r[record_encoder.count_check+3]`).
     pub(crate) number: Number,
     /// The header the index was resolved from (`r[vcf_values.header_brand]`).
     pub(crate) header: HeaderId,
@@ -234,7 +234,7 @@ impl FieldId {
         self.number
     }
 
-    // r[impl record_encoder.count_check+2]
+    // r[impl record_encoder.count_check+3]
     /// Check that `found` values fit the declared `Number` in a record of
     /// `n_allele` alleles. `ploidy` is the record's GT ploidy once GT is
     /// encoded; without it `G` is not checked.
@@ -329,7 +329,7 @@ impl FilterId {
 
 // ── Typed field keys ───────────────────────────────────────────────────
 
-// r[impl record_encoder.key_types]
+// r[impl record_encoder.key_types+2]
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InfoKey<V>(pub(crate) FieldId, pub(crate) PhantomData<V>);
@@ -375,7 +375,7 @@ pub type FormatString = FormatKey<Str>;
 /// [`VcfError::ForeignKey`] for a key of another header
 /// (`r[record_encoder.foreign_keys]`) and, for arrays, with
 /// [`VcfError::CountMismatch`] for a count its `Number` does not allow
-/// (`r[record_encoder.count_check+2]`), before writing anything.
+/// (`r[record_encoder.count_check+3]`), before writing anything.
 pub trait InfoEncoder {
     // r[impl record_encoder.reserved_rejection]
     /// # Errors
@@ -405,7 +405,7 @@ pub trait InfoEncoder {
 
 // ── FormatEncoder trait ────────────────────────────────────────────────
 
-// r[impl record_encoder.format_methods]
+// r[impl record_encoder.format_methods+2]
 /// Object-safe trait for encoding FORMAT fields. Every method fails with
 /// [`VcfError::ForeignKey`] for a key of another header and, for arrays, with
 /// [`VcfError::CountMismatch`] for a sample whose count its `Number` does not
@@ -417,6 +417,13 @@ pub trait FormatEncoder {
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError>;
     /// Encode a scalar float FORMAT field for all samples.
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError>;
+    /// Like [`format_int`](Self::format_int), but a sample may be missing
+    /// (`None`): `.` in VCF text, the missing value of the column's integer
+    /// type in BCF.
+    fn format_int_opt(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError>;
+    /// Like [`format_float`](Self::format_float), but a sample may be missing
+    /// (`None`): `.` in VCF text, the float missing value in BCF.
+    fn format_float_opt(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError>;
     /// Encode a multi-valued integer FORMAT field. `per_sample` holds one slice
     /// per sample (its length MUST equal the sample count); each inner slice is
     /// that sample's values. For BCF a single integer type is chosen across all
@@ -448,7 +455,7 @@ pub trait FormatEncoder {
 
 // ── Key encode methods ─────────────────────────────────────────────────
 
-// r[impl record_encoder.key_encode]
+// r[impl record_encoder.key_encode+2]
 
 impl InfoKey<Scalar<i32>> {
     /// Encode a scalar integer INFO value.
@@ -552,11 +559,11 @@ impl InfoKey<OptArr<i32>> {
 }
 
 impl FormatKey<Gt> {
-    /// Encode a GT FORMAT field. `gts` must have exactly one entry per sample.
+    /// Encode a GT FORMAT field. `gts` must have exactly one entry per sample;
+    /// samples may differ in ploidy (`r[record_encoder.mixed_ploidy]`).
     ///
     /// # Errors
     /// Returns [`VcfError::SampleCountMismatch`] if `gts.len() != n_samples`.
-    /// Returns [`VcfError::MixedPloidy`] if samples have different ploidy.
     pub fn encode(
         &self,
         enc: &mut (impl FormatEncoder + ?Sized),
@@ -590,6 +597,29 @@ impl FormatKey<Scalar<i32>> {
         }
         enc.format_int(&self.0, values)
     }
+
+    // r[impl record_encoder.format_scalar_opt]
+    /// Encode a scalar integer FORMAT field where a sample may be missing:
+    /// `None` is `.` in VCF text and the missing value of the column's
+    /// integer width in BCF. `values` must have exactly one entry per sample.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `values.len() != n_samples`,
+    /// and [`crate::vcf::VcfEncodeError::ReservedIntValue`] for a concrete value
+    /// BCF reserves.
+    pub fn encode_opt(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[Option<i32>],
+    ) -> Result<(), VcfError> {
+        if values.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: values.len(),
+            });
+        }
+        enc.format_int_opt(&self.0, values)
+    }
 }
 
 impl FormatKey<Scalar<f32>> {
@@ -609,6 +639,29 @@ impl FormatKey<Scalar<f32>> {
             });
         }
         enc.format_float(&self.0, values)
+    }
+
+    // r[impl record_encoder.format_scalar_opt]
+    /// Encode a scalar float FORMAT field where a sample may be missing:
+    /// `None` is `.` in VCF text and the float missing value in BCF. `values`
+    /// must have exactly one entry per sample.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `values.len() != n_samples`,
+    /// and [`crate::vcf::VcfEncodeError::ReservedFloatValue`] for a concrete
+    /// value BCF reserves.
+    pub fn encode_opt(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[Option<f32>],
+    ) -> Result<(), VcfError> {
+        if values.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: values.len(),
+            });
+        }
+        enc.format_float_opt(&self.0, values)
     }
 }
 
@@ -883,7 +936,7 @@ mod tests {
     use crate::vcf::header::ContigDef;
     use crate::vcf::record::Genotype;
     use crate::vcf::unified::Writer;
-    use seqair_types::{Base, Pos1};
+    use seqair_types::{Base, Pos1, SmallVec};
     use std::sync::Arc;
 
     // r[verify record_encoder.field_def_const]
@@ -1145,8 +1198,8 @@ mod tests {
     }
 
     // r[verify record_encoder.info_methods+2]
-    // r[verify record_encoder.format_methods]
-    // r[verify record_encoder.key_encode]
+    // r[verify record_encoder.format_methods+2]
+    // r[verify record_encoder.key_encode+2]
     // r[verify record_encoder.bcf_encoding]
     #[test]
     fn typestate_api_bcf() {
@@ -1285,7 +1338,7 @@ mod tests {
         (header, contig, dp_info, gt_fmt, dp_fmt)
     }
 
-    // r[verify record_encoder.format_methods]
+    // r[verify record_encoder.format_methods+2]
     #[test]
     fn multi_sample_bcf() {
         let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
@@ -1312,7 +1365,7 @@ mod tests {
         assert!(!buf.is_empty());
     }
 
-    // r[verify record_encoder.format_methods]
+    // r[verify record_encoder.format_methods+2]
     #[test]
     fn multi_sample_vcf_text() {
         let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
@@ -1347,7 +1400,7 @@ mod tests {
         assert_eq!(cols[11], "1/1:38", "sample 3");
     }
 
-    // r[verify record_encoder.format_methods]
+    // r[verify record_encoder.format_methods+2]
     #[test]
     fn single_sample_slice_api() {
         let setup = TestSetup::new();
@@ -1472,24 +1525,55 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // r[verify record_encoder.mixed_ploidy]
+    // r[verify bcf_writer.gt_encoding]
+    /// Haploid, diploid and triploid samples share one BCF GT column three
+    /// wide, each shorter sample padded with int8 end-of-vector (`0x81`), and
+    /// a genotype with no alleles is one missing call. The bytes are the BCF2
+    /// table's: `(allele + 1) << 1 | phased`, a haploid call phased.
     #[test]
-    fn format_gt_panics_on_mixed_ploidy() {
-        let (header, contig, _dp_info, gt_fmt, _dp_fmt) = multi_sample_setup();
+    fn mixed_ploidy_pads_with_end_of_vector() {
+        let mut builder = crate::vcf::header::VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
+        let mut builder = builder.formats();
+        let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+        let mut builder = builder.samples();
+        for name in ["S1", "S2", "S3", "S4"] {
+            builder.add_sample(name).unwrap();
+        }
+        let header = builder.build().unwrap();
         let mut buf = Vec::new();
-        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
-        let mut writer = writer.write_header(&header).unwrap();
+        let mut writer = Writer::new(&mut buf, OutputFormat::Bcf).write_header(&header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let enc = writer
-            .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+        let mut enc = writer
+            .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, None)
             .unwrap()
-            .filter_pass();
-        let mut enc = enc.begin_samples();
-        // Haploid + diploid + diploid — must return Err
-        let result = gt_fmt.encode(
-            &mut enc,
-            &[Genotype::haploid(0), Genotype::unphased(0, 1), Genotype::unphased(1, 1)],
-        );
-        assert!(result.is_err());
+            .filter_pass()
+            .begin_samples();
+        let triploid = Genotype {
+            alleles: [Some(0), Some(1), Some(1)].into_iter().collect(),
+            phased: [false, false].into_iter().collect(),
+        };
+        let none = Genotype { alleles: SmallVec::new(), phased: SmallVec::new() };
+        gt_fmt
+            .encode(&mut enc, &[Genotype::haploid(0), Genotype::unphased(0, 1), triploid, none])
+            .unwrap();
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+
+        let mut data = Vec::new();
+        crate::bam::bgzf::BgzfReader::from_reader(std::io::Cursor::new(buf))
+            .read_to_end(&mut data)
+            .unwrap();
+        let gt_idx = u8::try_from(header.string_map().get("GT").unwrap()).unwrap();
+        let expected = [
+            0x11, gt_idx, 0x31, // key, then 3 × int8
+            0x03, 0x81, 0x81, // 0
+            0x02, 0x04, 0x81, // 0/1
+            0x02, 0x04, 0x04, // 0/1/1
+            0x00, 0x81, 0x81, // no alleles: a missing call
+        ];
+        assert!(data.ends_with(&expected), "{:02x?}", &data[data.len() - expected.len()..]);
     }
 
     // ── INFO dedup tests ────────────────────────────────────────────

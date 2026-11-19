@@ -951,7 +951,7 @@ fn the_encoder_state_queries_report_the_record_being_encoded(tc: TestCase) {
     enc.emit().unwrap();
 }
 
-// r[verify record_encoder.format_methods]
+// r[verify record_encoder.format_methods+2]
 /// A per-sample slice of the wrong length is refused by value: the error says
 /// how many samples the header declares and how many values it was handed.
 #[hegel::test]
@@ -991,35 +991,6 @@ fn a_format_slice_of_the_wrong_length_reports_both_counts(tc: TestCase) {
     };
     assert_eq!(expected, n_samples, "`expected` must be the header's sample count");
     assert_eq!(reported, got, "`got` must be the slice length that was passed");
-}
-
-// r[verify record_encoder.format_methods]
-/// Genotypes of differing ploidy cannot share one BCF column. The error names
-/// the first sample's ploidy, the index of the sample that disagreed, and its
-/// ploidy — three fields, all of which a wrongly-built variant would get wrong.
-#[test]
-fn mixed_ploidy_names_the_sample_that_disagreed() {
-    let setup = vcf_setup(&["a", "b", "c"]);
-    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
-    let mut out = Vec::new();
-    let writer = Writer::new(&mut out, OutputFormat::Bcf);
-    let mut writer = writer.write_header(&setup.header).unwrap();
-    let enc = writer
-        .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
-        .unwrap()
-        .filter_pass();
-    let mut enc = enc.begin_samples();
-
-    let gts = [Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::haploid(1)];
-    let err = setup.gt.encode(&mut enc, &gts).expect_err("ploidy must be uniform");
-    let VcfError::MixedPloidy { first_ploidy, mismatch_index, mismatch_ploidy } = err else {
-        panic!("expected MixedPloidy, got {err:?}");
-    };
-    assert_eq!(
-        (first_ploidy, mismatch_index, mismatch_ploidy),
-        (2, 2, 1),
-        "the diploid first sample, and the haploid third one",
-    );
 }
 
 // r[verify vcf_header.no_duplicates]

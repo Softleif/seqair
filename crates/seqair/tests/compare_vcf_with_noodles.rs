@@ -500,3 +500,65 @@ fn multi_sample_bcf_readable_by_bcftools() {
     assert!(cols[10].starts_with("1|1"), "sample S2 GT should be 1|1 (phased), got {}", cols[10]);
     assert!(cols[11].starts_with("0/0"), "sample S3 GT should be 0/0, got {}", cols[11]);
 }
+
+// ── A dictionary with a hole ───────────────────────────────────────────
+
+// r[verify vcf_header.remove]
+// r[verify vcf_header.parse.preserve]
+/// A derived header with a removed INFO id leaves a hole in the dictionary,
+/// which the written header spells with `IDX=`. noodles honours it: the BCF
+/// it reads renders, field for field, as the VCF text seqair writes.
+#[test]
+fn noodles_reads_a_bcf_whose_dictionary_has_a_hole() {
+    use seqair::vcf::record_encoder::{InfoFieldDef as Def, Scalar as S};
+    let mut builder = VcfHeader::builder();
+    builder.add_contig("chr1", ContigDef::new(Some(1000))).unwrap();
+    let mut builder = builder.infos();
+    for name in ["DP", "XX", "ZZ"] {
+        builder.register_info(&Def::<S<i32>>::new(name, "x")).unwrap();
+    }
+    let mut builder = builder.formats();
+    builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+    builder.register_format(&FormatFieldDef::<S<i32>>::new("GQ", "Quality")).unwrap();
+    let mut builder = builder.samples();
+    builder.add_sample("S1").unwrap();
+    let mut builder = builder.build().unwrap().to_builder();
+    assert!(builder.remove_info("XX"));
+    let header = builder.build().unwrap();
+    assert!(header.to_vcf_text().contains(",IDX="), "a hole is spelled with IDX");
+
+    let dp: InfoInt = header.info_key("DP").unwrap();
+    let zz: InfoInt = header.info_key("ZZ").unwrap();
+    let gt: FormatGt = header.format_key("GT").unwrap();
+    let gq: FormatInt = header.format_key("GQ").unwrap();
+    let chr1 = header.contig("chr1").unwrap();
+    let write = |format| {
+        let mut out = Vec::new();
+        let mut writer = Writer::new(&mut out, format).write_header(&header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&chr1, Pos1::new(7).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        dp.encode(&mut enc, 42).unwrap();
+        zz.encode(&mut enc, 3).unwrap();
+        let mut enc = enc.begin_samples();
+        gt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        gq.encode(&mut enc, &[30]).unwrap();
+        enc.emit().unwrap();
+        drop(writer.finish().unwrap());
+        out
+    };
+    let text = String::from_utf8(write(OutputFormat::Vcf)).unwrap();
+    let ours = text.lines().last().unwrap().to_owned();
+
+    let bcf = write(OutputFormat::Bcf);
+    let mut reader = noodles::bcf::io::Reader::new(Cursor::new(&bcf));
+    let noodles_header = reader.read_header().unwrap();
+    let record = reader.record_bufs(&noodles_header).next().unwrap().unwrap();
+    use noodles::vcf::variant::io::Write as _;
+    let mut rendered = noodles::vcf::io::Writer::new(Vec::new());
+    rendered.write_variant_record(&noodles_header, &record).unwrap();
+    let theirs = String::from_utf8(rendered.into_inner()).unwrap();
+    assert_eq!(theirs.trim_end(), ours);
+}

@@ -43,7 +43,7 @@ fn write(format: OutputFormat, values: &[Option<f32>]) -> (Vec<u8>, Result<(), V
     (out, result)
 }
 
-// r[verify record_encoder.format_methods]
+// r[verify record_encoder.format_methods+2]
 // r[verify vcf_writer.missing_dot]
 #[test]
 fn vcf_text_writes_dot_for_none() {

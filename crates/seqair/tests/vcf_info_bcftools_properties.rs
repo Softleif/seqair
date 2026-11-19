@@ -381,7 +381,7 @@ fn assert_floats_match(printed: &str, want: &[f32], what: &str) {
 
 // ── Properties ─────────────────────────────────────────────────────────
 
-// r[verify record_encoder.key_encode]
+// r[verify record_encoder.key_encode+2]
 // r[verify bcf_writer.typed_values]
 // r[verify bcf_writer.string_encoding]
 // r[verify bcf_writer.flag_encoding]
@@ -409,7 +409,7 @@ fn info_scalar_types_round_trip_through_bcftools(tc: TestCase) {
     tc.event(if records.iter().any(|r| r.flag) { "a flag is set" } else { "no flag set" });
 }
 
-// r[verify record_encoder.key_encode]
+// r[verify record_encoder.key_encode+2]
 // r[verify bcf_writer.shared_variable]
 // r[verify vcf_header.info_def]
 /// The `Number` cardinalities that are derived from the ALT count — `A`, `R`,

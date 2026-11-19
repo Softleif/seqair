@@ -222,7 +222,7 @@ impl Alleles {
         }
     }
 
-    // r[impl vcf_record.alleles_rlen]
+    // r[impl vcf_record.alleles_rlen+2]
     /// Reference length for BCF rlen field.
     pub fn rlen(&self) -> usize {
         match self {
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(a.n_allele(), 3);
     }
 
-    // r[verify vcf_record.alleles_rlen]
+    // r[verify vcf_record.alleles_rlen+2]
     #[test]
     fn rlen_for_each_variant() {
         assert_eq!(Alleles::reference(Base::G).rlen(), 1);
@@ -447,7 +447,7 @@ mod properties {
         }
     }
 
-    // r[verify vcf_record.alleles_rlen]
+    // r[verify vcf_record.alleles_rlen+2]
     #[hegel::test]
     fn rlen_matches_ref_text_length(tc: TestCase) {
         let alleles = tc.draw(arb_alleles().print_as_debug());

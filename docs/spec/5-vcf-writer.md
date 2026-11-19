@@ -23,8 +23,8 @@ FORMAT keys MUST be colon-separated. Per-sample values MUST be colon-separated i
 
 > _[VCF43] §1.3.2 "Genotype fields" — GT: `allele[sep allele]_`, sep is `/`or`|`, missing allele `.`\*
 
-r[vcf_writer.genotype_serialization]
-GT values MUST be serialized as allele indices separated by `/` (unphased) or `|` (phased). Missing alleles MUST be `.`. Examples: `0/1`, `1|0`, `./.`, `0|0|1` (triploid).
+r[vcf_writer.genotype_serialization+2]
+GT values MUST be serialized as allele indices separated by `/` (unphased) or `|` (phased). Missing alleles MUST be `.`. Examples: `0/1`, `1|0`, `./.`, `0|0|1` (triploid). Each sample MUST be written at its own ploidy — `0`, `0/1` and `0/1/1` in one record — with no padding (`r[record_encoder.mixed_ploidy]`); a genotype with no alleles is written `.`.
 
 r[vcf_writer.float_precision]
 Float values MUST be written exactly as C's `%g` with 6 significant digits writes them, which is what htslib and bcftools emit, so seqair's VCF text can be diffed against theirs. Concretely: trailing zeros after the decimal point and a bare trailing decimal point MUST be omitted; the form is scientific when the value's decimal exponent — *after* rounding to 6 significant digits, so `0.0001` is `0.0001` and not `1e-04` — is below `-4` or at least `6`, and fixed otherwise; and a scientific exponent MUST carry a sign and at least two digits (`1e-05`, `1.23457e+06`). Negative zero MUST be written `-0`. Every finite value MUST be writable — p-values in INFO fields reach magnitudes whose fixed form would not fit six significant digits in any fixed-size buffer, and the scientific form always does.
@@ -53,5 +53,5 @@ Plain (uncompressed) VCF output MUST reach the caller's writer through an intern
 r[vcf_writer.index_amend_last]
 The VCF.gz and BCF writers MUST name a record end that falls on a block boundary the way `bcftools index` names it reading the file back — by the next block's `(offset, 0)` — calling `IndexBuilder::amend_last` after `flush_if_needed` before each record, and ending the last block before `finish` (`r[index_builder.amend_last]`). htslib's `vcf_write` and `sam_idx_save` do the same. Otherwise the co-produced TBI or CSI holds the same positions under the other name and differs from `bcftools index`'s.
 
-r[vcf_writer.finish]
-`finish()` MUST flush all buffered data and, for BGZF output, write the EOF marker block and finalize the TBI index.
+r[vcf_writer.finish+2]
+`finish()` MUST flush all buffered data and, for BGZF output, write the EOF marker block and finalize the coordinate index — CSI unless TBI was selected (`r[record_encoder.index_kind]`).
