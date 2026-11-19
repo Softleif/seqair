@@ -124,7 +124,7 @@ fn ends(file: &VcfFile) -> Vec<Result<(VcfPos, VcfPos), String>> {
 }
 
 // r[verify vcf_values.rlen+3]
-// r[verify vcf_reader.oracles]
+// r[verify vcf_reader.oracles+2]
 /// Every generated record ends where the BCF bcftools writes from the same
 /// text says it ends, whatever the version the file declares.
 #[hegel::test(test_cases = pinned::cases(100))]

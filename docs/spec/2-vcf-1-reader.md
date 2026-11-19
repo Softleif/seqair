@@ -140,9 +140,9 @@ r[vcf_reader.passthrough_header]
 
 ## Testing
 
-r[vcf_reader.oracles]
+r[vcf_reader.oracles+2]
 Reading MUST be checked against independent oracles:
 
 - seqair's own writer, as a generator: random records written as VCF, VCF.gz and BCF MUST read back with the values that were written (`r[vcf_values.equivalence]`);
-- bcftools: `bcftools view` of a file and seqair's reading of it MUST agree on every field of every record, for VCF text and BCF, on generated files and on real ones (GIAB, rastair output, a gnomAD slice, a multi-sample panel slice);
+- bcftools: `bcftools view` of a file and seqair's reading of it MUST agree on every field of every record, for VCF text and BCF, on generated files and on real ones (GIAB, rastair output, a multi-sample panel slice);
 - noodles: the same comparison on VCF text, as a second implementation.

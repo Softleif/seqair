@@ -125,7 +125,7 @@ fn render_alt(a: Allele<'_>) -> String {
     String::from_utf8(a.as_bytes().to_vec()).unwrap()
 }
 
-// r[verify vcf_reader.oracles]
+// r[verify vcf_reader.oracles+2]
 // r[verify vcf_values.access+2]
 // r[verify vcf_values.dynamic+2]
 // r[verify vcf_values.qual]
@@ -297,7 +297,7 @@ fn same_or_missing(ours: &[Tok], theirs: &[Tok]) -> bool {
     same(ours, theirs) || (ours == [Tok::Str(".".to_owned())] && theirs.is_empty())
 }
 
-// r[verify vcf_reader.oracles]
+// r[verify vcf_reader.oracles+2]
 /// Every field of every record of a VCF text fixture, read through
 /// `FullRecord`, equals what noodles reads.
 fn check_against_noodles(name: &str) {

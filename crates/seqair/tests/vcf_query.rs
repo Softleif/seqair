@@ -418,7 +418,7 @@ fn bcftools_keys(bin: &str, flag: &str, region: &str, path: &Path) -> Vec<String
 
 // r[verify vcf_reader.query+2]
 // r[verify vcf_reader.query.overlap+2]
-// r[verify vcf_reader.oracles]
+// r[verify vcf_reader.oracles+2]
 /// On every fixture (TBI and CSI), `query` equals `bcftools view -r` and
 /// `StartsIn` equals `-t`, over regions inside, across and between records.
 #[test]

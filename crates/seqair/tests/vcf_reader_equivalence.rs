@@ -651,7 +651,7 @@ fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec
 // r[verify vcf_fields.info+2]
 // r[verify vcf_fields.samples]
 // r[verify vcf_reader.formats]
-// r[verify vcf_reader.oracles]
+// r[verify vcf_reader.oracles+2]
 /// Random headers and records, written with seqair's writer as VCF text,
 /// BGZF VCF and BCF, read back through `FullRecord` as written (floats as
 /// the writer's 6-digit `%g` reads back, in text): every value kind,
