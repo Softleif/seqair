@@ -14,6 +14,9 @@ The reader MUST read plain-text VCF, BGZF-compressed VCF and BCF 2.2 (BGZF-frame
 r[vcf_reader.file+2]
 `VcfFile::open(path)` MUST parse the header (`r[vcf_header.parse]`) and locate an index by the names of `r[index.locate]` (VCF: `csi`, then `tbi`; BCF: `csi`). `VcfFile::from_bytes(data, index)` takes the index's bytes and MUST tell TBI from CSI by content (BGZF-compressed or not). A missing index MUST NOT fail the open: sequential reading works without one, `has_index()` is `false`, and only a query or `partitions` fails, with `VcfReadError::NoIndex`. An index that exists but does not parse MUST fail the open.
 
+r[vcf_reader.file.header_only]
+Opening a BGZF file MUST inflate no block past the one its header ends in: where records start is the header's end in that block or, for a header ending at a block's end (bcftools and htslib write it so), the next block's offset, which the block's length gives. HiPhase opens a file per block of work, and inflating the read-ahead batch after the header cost ~340 µs per open.
+
 r[vcf_reader.file.shared+2]
 `VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the field table (`r[vcf_reader.field_table]`) and its text-key lookup (`r[vcf_values.text_resolution+2]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared+3]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
 
