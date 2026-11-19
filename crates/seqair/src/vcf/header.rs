@@ -485,7 +485,8 @@ impl VcfHeader {
     /// lines, definitions, contigs, samples, in their order and as written —
     /// and its dictionaries as they are, under a fresh [`HeaderId`]:
     /// `h.to_builder().build()` is `h` but for the id, so keys resolved from
-    /// `h` must be resolved again from the new header.
+    /// `h` must be resolved again from the new header, and for the lineage,
+    /// which names `h` as its [`parent`](Self::parent).
     ///
     /// The builder starts in the [`Contigs`] phase, so every phase is
     /// reachable. As htslib's `bcf_hdr_append`, every line added goes after
