@@ -168,14 +168,12 @@ impl SiteParts {
         let ids = value.ints().map_err(|e| value_error(RecordPart::Filter, e))?;
         for index in ids.flatten() {
             let declared = usize::try_from(index).ok().and_then(|i| file.filters.get(i)?.as_ref());
-            let id = declared
-                .and_then(|f| DictId::new(f.dict_idx))
-                .ok_or(RecordError::UnknownKey { index, kind: KeyKind::Filter })?;
-            self.filter_ids.push(id);
+            let id = declared.ok_or(RecordError::UnknownKey { index, kind: KeyKind::Filter })?;
+            self.filter_ids.push(id.id);
         }
         self.filter = match self.filter_ids.as_slice() {
             [] => FilterColumn::Missing,
-            [id] if id.get() == 0 => FilterColumn::Pass,
+            [DictId::PASS] => FilterColumn::Pass,
             _ => FilterColumn::Failed,
         };
         self.qual = (qual != FLOAT_MISSING).then(|| f32::from_bits(qual));
@@ -431,7 +429,7 @@ impl<'a> FiltersRef<'a> {
         {
             return Err(VcfReadError::ForeignKey { name: filter.name.clone() });
         }
-        Ok(self.ids.iter().any(|id| id.get() == filter.dict_idx))
+        Ok(self.ids.contains(&filter.id))
     }
 
     // r[impl vcf_reader.undeclared.filter+2]

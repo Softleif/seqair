@@ -202,6 +202,9 @@ pub const MAX_DICT_ENTRIES: usize = 65_536;
 pub(crate) struct DictId(u16);
 
 impl DictId {
+    /// `PASS`, index 0 in every header (`r[vcf_header.filter_def]`).
+    pub(crate) const PASS: Self = Self(0);
+
     /// `None` for an index no header can declare.
     pub(crate) fn new(index: u32) -> Option<Self> {
         u16::try_from(index).ok().map(Self)
@@ -687,8 +690,8 @@ impl VcfHeader {
         if !self.filters.contains_key(name) {
             return Err(unknown());
         }
-        let dict_idx = self.string_map.index(name).ok_or_else(unknown)?;
-        Ok(FilterId { dict_idx, name: SmolStr::from(name), header: Some(self.id) })
+        let id = self.string_map.index(name).and_then(DictId::new).ok_or_else(unknown)?;
+        Ok(FilterId { id, name: SmolStr::from(name), header: Some(self.id) })
     }
 
     // r[impl vcf_values.keys+2]
@@ -1269,14 +1272,14 @@ impl VcfHeaderBuilder<Filters> {
     // r[impl vcf_header.filter_def]
     /// Insert a FILTER definition, returning its BCF dict index. A refused
     /// definition leaves the builder unchanged.
-    fn insert_filter(&mut self, id: SmolStr, def: FilterDef) -> Result<u32, VcfHeaderError> {
+    fn insert_filter(&mut self, id: SmolStr, def: FilterDef) -> Result<DictId, VcfHeaderError> {
         if self.header.filters.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateFilter { id });
         }
         let dict_idx = self.push_dict_entry(&id)?;
         self.header.push_line(Line::Def { kind: LineKind::Filter, id: id.clone(), form: None });
         self.header.filters.insert(id, def);
-        Ok(dict_idx.get())
+        Ok(dict_idx)
     }
 
     pub fn add_filter(
@@ -1295,8 +1298,8 @@ impl VcfHeaderBuilder<Filters> {
         def: &super::record_encoder::FilterFieldDef,
     ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        let dict_idx = self.insert_filter(id.clone(), FilterDef::new(def.description))?;
-        Ok(super::record_encoder::FilterId { dict_idx, name: id, header: Some(self.header.id) })
+        let dict_id = self.insert_filter(id.clone(), FilterDef::new(def.description))?;
+        Ok(super::record_encoder::FilterId { id: dict_id, name: id, header: Some(self.header.id) })
     }
 
     /// Advance to the [`Infos`] phase.

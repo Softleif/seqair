@@ -335,7 +335,9 @@ impl ContigId {
 /// Resolved filter identifier carrying both dictionary index and name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FilterId {
-    pub(crate) dict_idx: u32,
+    /// The BCF dictionary id, narrowed where the filter is resolved so no
+    /// record access does.
+    pub(crate) id: DictId,
     pub(crate) name: SmolStr,
     /// The header the index was resolved from; `None` for [`Self::PASS`],
     /// which is index 0 in every header (`r[vcf_header.filter_def]`).
@@ -344,12 +346,12 @@ pub struct FilterId {
 
 impl FilterId {
     pub const PASS: FilterId =
-        Self { dict_idx: 0, name: SmolStr::new_inline("PASS"), header: None };
+        Self { id: DictId::PASS, name: SmolStr::new_inline("PASS"), header: None };
     pub fn name(&self) -> &str {
         &self.name
     }
     pub fn dict_idx(&self) -> u32 {
-        self.dict_idx
+        self.id.get()
     }
 }
 
@@ -1217,7 +1219,7 @@ mod tests {
     #[test]
     fn filter_id_pass() {
         let pass = FilterId::PASS;
-        assert_eq!(pass.dict_idx, 0);
+        assert_eq!(pass.dict_idx(), 0);
         assert_eq!(pass.name(), "PASS");
     }
 
