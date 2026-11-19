@@ -46,7 +46,19 @@ pub struct WithSamples;
 /// FORMAT fields may be encoded, replaced or removed in any order.
 pub struct Edit;
 
-/// A copied record open for edits: see [`Writer::copy_record`].
+// r[verify vcf_passthrough.edit.alleles]
+/// A copied record open for edits: see [`Writer::copy_record`]. Its alleles
+/// are the input's: every `Number=A`, `R` and `G` field and every GT names
+/// them, so nothing changes REF or ALT.
+///
+/// ```compile_fail,E0599
+/// use seqair::vcf::{Alleles, RecordEdit};
+///
+/// fn realign(edit: &mut RecordEdit<'_>, alleles: &Alleles) {
+///     // ERROR: a copy's alleles cannot be replaced
+///     edit.set_alleles(alleles);
+/// }
+/// ```
 pub type RecordEdit<'a> = RecordEncoder<'a, Edit>;
 
 mod phase {
