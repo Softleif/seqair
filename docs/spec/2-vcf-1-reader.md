@@ -129,9 +129,6 @@ There MUST be fuzz targets for BCF records, VCF text records, header parsing, an
 r[vcf_reader.reuse_io+2]
 Decompression MUST go through the existing `BgzfStream` (sequential) and `RegionBuf` (queries); index parsing through `BamIndex`'s tabix parser and `CsiIndex`. A tabix index numbers only the sequences it lists, by name (the TBI header, or a CSI's tabix aux block), and those names MUST map to the file's contig table; a CSI without names (BCF) numbers the header's contig dictionary. The reader MUST NOT add a second BGZF or index implementation.
 
-r[vcf_reader.features]
-The `cram` cargo feature (default on) MUST gate the CRAM reader and its codec dependencies; without it the crate MUST build, the unified reader MUST refuse a CRAM file with a typed error, and every other format MUST behave as with it. The `log` feature MUST forward `tracing` events to the `log` crate (`tracing/log`), for applications that install a `log` logger and no `tracing` subscriber.
-
 r[vcf_reader.text_scan]
 Line, tab, `;`, `=`, `,` and `:` scanning in VCF text MUST be vectorised with `fearless_simd` (`r[io.simd_portable]`), building one bitmask of separators per vector and walking its set bits rather than calling `memchr` once per field: per-entry `memchr` measured 2–3× slower on real INFO columns, whose entries average 10–25 bytes. A scalar version MUST exist and property tests MUST check both produce identical splits (`r[io.platform_optimizations]`).
 

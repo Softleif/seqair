@@ -480,7 +480,7 @@ impl<K: RecordKind> IndexedReaderBuilder<K> {
                 )?;
                 IndexedReader::Cram(Box::new(reader))
             }
-            // r[impl vcf_reader.features]
+            // r[impl io.features]
             #[cfg(not(feature = "cram"))]
             Format::Cram => return Err(FormatDetectionError::CramDisabled { path }.into()),
         };

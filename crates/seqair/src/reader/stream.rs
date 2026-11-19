@@ -605,7 +605,7 @@ impl<K: RecordKind> AlignmentStream<K> {
             let text: Box<dyn BufRead + Send> = Box::new(Cursor::new(magic).chain(gzip));
             return Self::sam(text, StreamFormat::GzipSam, fields);
         }
-        // r[impl vcf_reader.features]
+        // r[impl io.features]
         #[cfg(not(feature = "cram"))]
         if prefix.starts_with(b"CRAM") {
             return Err(AlignmentStreamError::CramDisabled);

@@ -356,7 +356,7 @@ fn readers_open_cram() {
     assert!(readers.header().target_count() > 0);
 }
 
-// r[verify vcf_reader.features]
+// r[verify io.features]
 /// Without the `cram` feature a CRAM is still recognised, and refused by
 /// name, from a path and from a stream.
 #[cfg(not(feature = "cram"))]
