@@ -89,15 +89,16 @@ impl FieldMap {
                 output: outs.get(index).cloned(),
             });
         }
-        let contigs = in_header
-            .contigs()
-            .map(|(contig, _)| {
-                output
-                    .contig(contig.name())
-                    .map(Some)
-                    .map_err(|_| FieldMapError::MissingContig { name: contig.name().clone() })
-            })
-            .collect::<Result<_, _>>()?;
+        // By tid, holes included: a contig dictionary may skip indices (`IDX=`).
+        let mut contigs = vec![None; in_header.contig_map().len()];
+        for (contig, _) in in_header.contigs() {
+            let out = output
+                .contig(contig.name())
+                .map_err(|_| FieldMapError::MissingContig { name: contig.name().clone() })?;
+            if let Some(slot) = contigs.get_mut(contig.tid() as usize) {
+                *slot = Some(out);
+            }
+        }
         let table = &input.0.fields;
         let ids = (0..table.base()).filter_map(|i| DictId::new(u32::try_from(i).ok()?));
         let (mut info, mut format) = (Vec::new(), Vec::new());

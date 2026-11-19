@@ -499,6 +499,28 @@ fn contigs_and_samples_are_checked_once() {
     );
 }
 
+// r[verify vcf_passthrough.field_map.contigs]
+/// A contig dictionary with holes (`IDX=` gaps, as htslib leaves after a
+/// removal): every record is copied to its own contig, in every format, as
+/// bcftools prints the input.
+#[test]
+fn contigs_map_by_index_across_dictionary_holes() {
+    if !bcftools() {
+        return;
+    }
+    let text = "##fileformat=VCFv4.3\n##contig=<ID=a,length=100,IDX=0>\n\
+                ##contig=<ID=b,length=100,IDX=2>\n##contig=<ID=c,length=100,IDX=3>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                a\t1\t.\tA\tG\t.\t.\t.\nb\t2\t.\tA\tG\t.\t.\t.\nc\t3\t.\tA\tG\t.\t.\t.\n";
+    let dir = tempfile::tempdir().unwrap();
+    let vcf = dir.path().join("in.vcf");
+    std::fs::write(&vcf, text).unwrap();
+    let file = VcfFile::open(&vcf).unwrap();
+    for format in FORMATS {
+        assert_eq!(text_of(&copy(&file, format), format), view(&vcf), "{format:?}");
+    }
+}
+
 // r[verify vcf_passthrough.copy]
 #[test]
 fn a_record_or_writer_of_another_map_is_refused() {
