@@ -4,7 +4,9 @@
 
 use super::access::{DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
-use super::entries::{BcfEntries, FormatIndex, LazyIndex, index_bcf, index_text_format};
+use super::entries::{
+    BcfEntries, Cursor, FormatIndex, LazyIndex, Scan, index_bcf, index_text_format,
+};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
@@ -182,12 +184,12 @@ impl<'a> FormatView<'a> {
     fn index(&self) -> Result<&'a FormatIndex, VcfReadError> {
         let Self { keys, samples, n_fmt, n_samples, file, at, .. } = *self;
         self.index
-            .get(|index| {
+            .get(|index: &mut FormatIndex, cursor: &mut Cursor, _| {
                 if file.is_text() {
-                    index_text_format(index, keys, samples, n_samples, file)
+                    index_text_format(index, keys, samples, n_samples, file).map(|()| Scan::End)
                 } else {
-                    let entries = BcfEntries::new(samples, n_fmt, Some(n_samples));
-                    index_bcf(&mut index.keys, entries, KeyKind::Format, file)
+                    let entries = BcfEntries::new(samples, n_fmt, Some(n_samples), *cursor);
+                    index_bcf(&mut index.keys, entries, cursor, None, KeyKind::Format, file)
                 }
             })
             .map_err(|e| at.error(file, e.clone()))

@@ -1,5 +1,5 @@
 //! Walking a BCF INFO or FORMAT section entry by entry, and the lazily built
-//! index of one (`r[vcf_fields.lazy]`, `r[vcf_values.index]`).
+//! index of one (`r[vcf_fields.lazy]`, `r[vcf_values.index+2]`).
 
 use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
@@ -21,8 +21,9 @@ pub(crate) struct BcfEntries<'a> {
 }
 
 impl<'a> BcfEntries<'a> {
-    pub(crate) fn new(bytes: &'a [u8], n: usize, samples: Option<usize>) -> Self {
-        Self { bytes, at: 0, left: n, samples }
+    /// The `n` entries of `bytes`, from `cursor` on.
+    pub(crate) fn new(bytes: &'a [u8], n: usize, samples: Option<usize>, cursor: Cursor) -> Self {
+        Self { bytes, at: cursor.at, left: n.saturating_sub(cursor.walked), samples }
     }
 
     /// Where the entries walked so far end.
@@ -132,15 +133,36 @@ impl Iterator for BcfEntries<'_> {
     }
 }
 
-/// Index a BCF INFO or FORMAT section: every key must be a declared field of
-/// its kind (`r[vcf_reader.field_table]`), and the entries must fill it.
+/// How far an index got: it stopped at the key asked for, or indexed the
+/// whole section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scan {
+    Found,
+    End,
+}
+
+/// Where an incremental index stopped: the byte after the last entry
+/// indexed, and how many entries that was.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Cursor {
+    pub(crate) at: usize,
+    pub(crate) walked: usize,
+}
+
+// r[impl vcf_values.index+2]
+/// Index a BCF INFO or FORMAT section from `cursor` on, stopping after the
+/// first entry of `stop`: every key must be a declared field of its kind
+/// (`r[vcf_reader.field_table]`), and the entries must fill the section.
 pub(crate) fn index_bcf(
     index: &mut FieldIndex,
     mut entries: BcfEntries<'_>,
+    cursor: &mut Cursor,
+    stop: Option<DictId>,
     kind: KeyKind,
     file: &FileShared,
-) -> Result<(), RecordError> {
+) -> Result<Scan, RecordError> {
     let part = if kind == KeyKind::Format { RecordPart::Format } else { RecordPart::Info };
+    let left = entries.left;
     for entry in &mut entries {
         let (key, span) = entry.map_err(|source| RecordError::Value { part, source })?;
         let id = u32::try_from(key)
@@ -153,13 +175,17 @@ pub(crate) fn index_bcf(
         };
         if !index.push(Entry { id, start, end }) {
             warn_duplicate_id(file, id);
+        } else if stop == Some(id) {
+            cursor.at = entries.at;
+            cursor.walked = cursor.walked.saturating_add(left.saturating_sub(entries.left));
+            return Ok(Scan::Found);
         }
     }
     let len = entries.bytes.len().saturating_sub(entries.end());
     if len > 0 {
         return Err(RecordError::TrailingBytes { part, len });
     }
-    Ok(())
+    Ok(Scan::End)
 }
 
 #[cold]
@@ -203,29 +229,43 @@ impl Rebuild for FormatIndex {
 /// [`LazyIndex`] states.
 const EMPTY: u8 = 0;
 const BUILDING: u8 = 1;
-const DONE: u8 = 2;
+const PARTIAL: u8 = 2;
+const DONE: u8 = 3;
+
+/// Indexes a section from a cursor on, stopping after the first entry of
+/// the key given, if any.
+pub(crate) trait Step<T>:
+    FnOnce(&mut T, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>
+{
+}
+impl<T, F: FnOnce(&mut T, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>> Step<T> for F {}
 
 // r[impl vcf_fields.lazy+2]
+// r[impl vcf_values.index+2]
 /// A section's index, built on first access, in place: its buffers stay
-/// for the next record's build. A failed build is kept and returned on
-/// every access.
+/// for the next record's build. A lookup ([`find`](LazyIndex::find)) indexes
+/// no further than the key it asks for; [`get`](Self::get) indexes the rest.
+/// A failed build is kept and returned on every access that reaches it.
 ///
-/// One atomic byte guards the cells: `EMPTY`, then `BUILDING` while the one
-/// thread that won the swap from `EMPTY` builds, then `DONE` until
-/// [`reset`](Self::reset). A `std::sync::OnceLock` plus a mutex for the
-/// buffers cost four locked atomics per record; this costs one swap.
+/// One atomic byte guards the cells: `EMPTY`, `BUILDING` while the one
+/// thread that won the swap from `EMPTY` or `PARTIAL` indexes, `PARTIAL`
+/// between lookups that stopped early, and `DONE` once the section is
+/// indexed, until [`reset`](Self::reset). A `std::sync::OnceLock` plus a
+/// mutex for the buffers cost four locked atomics per record; this costs
+/// one swap per access until `DONE`, and none after.
 pub(crate) struct LazyIndex<T = FieldIndex> {
     state: AtomicU8,
     index: UnsafeCell<T>,
+    cursor: UnsafeCell<Cursor>,
     /// The build's outcome, written by the builder before `DONE`.
     result: UnsafeCell<Result<(), RecordError>>,
 }
 
-// SAFETY: the cells are written only by the thread that moved `state` from
-// `EMPTY` to `BUILDING` (or through `&mut self`), and read only after an
-// `Acquire` load saw the `Release` store of `DONE`, after which nothing
-// writes them until `reset` takes `&mut self`. So `&LazyIndex` hands out
-// `&T` and `&RecordError` across threads, which needs `T: Sync`, and the
+// SAFETY: the cells are written only by the thread that moved `state` to
+// `BUILDING` (or through `&mut self`), and read either by that thread or
+// after an `Acquire` load saw the `Release` store of `DONE`, after which
+// nothing writes them until `reset` takes `&mut self`. So `&LazyIndex` hands
+// out `&T` and `&RecordError` across threads, which needs `T: Sync`, and the
 // builder may be another thread than the owner, which needs `T: Send`.
 unsafe impl<T: Send + Sync> Sync for LazyIndex<T> {}
 
@@ -234,19 +274,21 @@ impl<T: Default> Default for LazyIndex<T> {
         Self {
             state: AtomicU8::new(EMPTY),
             index: UnsafeCell::new(T::default()),
+            cursor: UnsafeCell::new(Cursor::default()),
             result: UnsafeCell::new(Ok(())),
         }
     }
 }
 
 impl<T: Clone + Default> Clone for LazyIndex<T> {
-    /// A built index is cloned; one not built (or being built) is not, and
-    /// the clone builds its own on first access.
+    /// A built index is cloned; one not built (or partly, or being built)
+    /// is not, and the clone builds its own on first access.
     fn clone(&self) -> Self {
         match self.done() {
             Some((index, result)) => Self {
                 state: AtomicU8::new(DONE),
                 index: UnsafeCell::new(index.clone()),
+                cursor: UnsafeCell::new(Cursor::default()),
                 result: UnsafeCell::new(result.clone()),
             },
             None => Self::default(),
@@ -265,7 +307,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LazyIndex<T> {
 }
 
 impl<T> LazyIndex<T> {
-    /// The index and the build's outcome, once built.
+    /// The index and the build's outcome, once the whole section is indexed.
     #[inline]
     fn done(&self) -> Option<(&T, &Result<(), RecordError>)> {
         if self.state.load(Ordering::Acquire) != DONE {
@@ -277,17 +319,17 @@ impl<T> LazyIndex<T> {
     }
 }
 
-/// Ends a build: stores `DONE` once it finished, or puts `state` back to
-/// `EMPTY` if it panicked, so another access builds again instead of
-/// waiting for ever.
+/// Holds `BUILDING`; stores `next` when dropped: `PARTIAL` or `DONE` as the
+/// build got, `EMPTY` (the default) if it panicked, so another access
+/// builds again instead of waiting for ever.
 struct Building<'a> {
     state: &'a AtomicU8,
-    finished: bool,
+    next: u8,
 }
 
 impl Drop for Building<'_> {
     fn drop(&mut self) {
-        self.state.store(if self.finished { DONE } else { EMPTY }, Ordering::Release);
+        self.state.store(self.next, Ordering::Release);
     }
 }
 
@@ -298,62 +340,145 @@ impl<T: Rebuild> LazyIndex<T> {
         *self.state.get_mut() = EMPTY;
     }
 
-    /// The index, built by `build` on first access.
+    /// The whole index, built by `step` on first access.
     #[inline]
-    pub(crate) fn get(
-        &self,
-        build: impl FnOnce(&mut T) -> Result<(), RecordError>,
-    ) -> Result<&T, &RecordError> {
+    pub(crate) fn get(&self, step: impl Step<T>) -> Result<&T, &RecordError> {
         let (index, result) = match self.done() {
             Some(done) => done,
-            None => self.build(build),
+            None => self.build(step),
         };
         result.as_ref().map(|()| index)
     }
 
     #[cold]
     #[inline(never)]
-    fn build(
-        &self,
-        build: impl FnOnce(&mut T) -> Result<(), RecordError>,
-    ) -> (&T, &Result<(), RecordError>) {
+    fn build(&self, step: impl Step<T>) -> (&T, &Result<(), RecordError>) {
+        let Some(mut building) = self.lock() else { return self.wait_done() };
+        // SAFETY: `lock` gave this thread `BUILDING`, so it is the only one
+        // touching the cells until `building` is dropped.
+        unsafe {
+            let result = match step(&mut *self.index.get(), &mut *self.cursor.get(), None) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            };
+            *self.result.get() = result;
+        }
+        building.next = DONE;
+        drop(building);
+        self.wait_done()
+    }
+
+    /// `BUILDING`, taken from `EMPTY` (restarting the index) or `PARTIAL`;
+    /// `None` once the index is `DONE`.
+    fn lock(&self) -> Option<Building<'_>> {
+        let mut from = EMPTY;
         loop {
             match self.state.compare_exchange_weak(
-                EMPTY,
+                from,
                 BUILDING,
                 Ordering::Acquire,
                 Ordering::Acquire,
             ) {
                 Ok(_) => break,
-                Err(DONE) => {
-                    if let Some(done) = self.done() {
-                        return done;
-                    }
-                }
-                // Another thread builds, or a weak exchange failed spuriously.
+                Err(DONE) => return None,
+                Err(now @ (EMPTY | PARTIAL)) => from = now,
+                // Another thread indexes.
                 Err(_) => std::thread::yield_now(),
             }
         }
-        let mut building = Building { state: &self.state, finished: false };
-        // SAFETY: this thread moved `state` from `EMPTY` to `BUILDING`, so it
-        // is the only one touching the cells until it stores `DONE`: readers
-        // wait for `DONE`, and no reference from an earlier `DONE` outlives
-        // the `reset(&mut self)` that made it `EMPTY`.
-        unsafe {
-            let index = &mut *self.index.get();
-            index.restart();
-            *self.result.get() = build(index);
+        if from == EMPTY {
+            // SAFETY: this thread holds `BUILDING` (see `build`).
+            unsafe {
+                (*self.index.get()).restart();
+                *self.cursor.get() = Cursor::default();
+            }
         }
-        building.finished = true;
-        drop(building);
-        // SAFETY: as in `done`; the exclusive borrows above have ended.
-        unsafe { (&*self.index.get(), &*self.result.get()) }
+        Some(Building { state: &self.state, next: EMPTY })
     }
 
-    /// Whether the index has been built (or failed), for tests.
+    /// The index once `DONE`, which the caller saw or stored.
+    fn wait_done(&self) -> (&T, &Result<(), RecordError>) {
+        loop {
+            if let Some(done) = self.done() {
+                return done;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Whether anything has been indexed (or failed), for tests.
     #[cfg(test)]
     pub(crate) fn is_built(&self) -> bool {
-        self.done().is_some()
+        self.state.load(Ordering::Acquire) != EMPTY
+    }
+}
+
+impl LazyIndex<FieldIndex> {
+    /// The first entry of `id`, indexing the section no further than that
+    /// (`r[vcf_values.index+2]`). Malformed data fails the lookup only if the
+    /// index meets it before `id`.
+    #[inline]
+    pub(crate) fn find(
+        &self,
+        id: DictId,
+        step: impl Step<FieldIndex>,
+    ) -> Result<Option<Entry>, &RecordError> {
+        match self.done() {
+            Some((index, result)) => found(index, result, id),
+            None => self.find_on(id, step),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn find_on(
+        &self,
+        id: DictId,
+        step: impl Step<FieldIndex>,
+    ) -> Result<Option<Entry>, &RecordError> {
+        let Some(mut building) = self.lock() else {
+            let (index, result) = self.wait_done();
+            return found(index, result, id);
+        };
+        // SAFETY: `lock` gave this thread `BUILDING`.
+        let (index, cursor) = unsafe { (&mut *self.index.get(), &mut *self.cursor.get()) };
+        if let Some(entry) = index.get(id) {
+            building.next = PARTIAL;
+            return Ok(Some(entry));
+        }
+        let (entry, result) = match step(index, cursor, Some(id)) {
+            Ok(Scan::Found) => {
+                building.next = PARTIAL;
+                return Ok(index.get(id));
+            }
+            Ok(Scan::End) => (index.get(id), Ok(())),
+            Err(e) => (None, Err(e)),
+        };
+        // SAFETY: as above.
+        unsafe { *self.result.get() = result };
+        building.next = DONE;
+        drop(building);
+        match entry {
+            Some(entry) => Ok(Some(entry)),
+            None => {
+                let (index, result) = self.wait_done();
+                found(index, result, id)
+            }
+        }
+    }
+}
+
+/// What a lookup of `id` in a whole index reads: its entry if it has one
+/// (indexed before any malformed data), else the build's error or absent.
+fn found<'a>(
+    index: &FieldIndex,
+    result: &'a Result<(), RecordError>,
+    id: DictId,
+) -> Result<Option<Entry>, &'a RecordError> {
+    match (index.get(id), result) {
+        (Some(entry), _) => Ok(Some(entry)),
+        (None, Ok(())) => Ok(None),
+        (None, Err(e)) => Err(e),
     }
 }
 
@@ -366,40 +491,49 @@ fn span32(r: Range<usize>) -> Result<(u32, u32), RecordError> {
 }
 
 // r[impl vcf_reader.field_table]
-// r[impl vcf_values.duplicates]
+// r[impl vcf_values.duplicates+2]
 /// Index a VCF text INFO column: each key's span is what follows it (empty,
 /// or `=` and the value). A key the field table does not hold yet is
 /// added to it; `.` and empty entries hold nothing.
 pub(crate) fn index_text_info(
     index: &mut FieldIndex,
     info: &[u8],
+    cursor: &mut Cursor,
+    stop: Option<DictId>,
     file: &FileShared,
-) -> Result<(), RecordError> {
-    if info == b"." {
-        return Ok(());
-    }
-    let flow = for_each_info_entry(info, |entry| {
-        let key = info.get(entry.key.clone()).unwrap_or_default();
+) -> Result<Scan, RecordError> {
+    let base = cursor.at;
+    let Some(rest) = info.get(base..).filter(|_| info != b".") else { return Ok(Scan::End) };
+    let flow = for_each_info_entry(rest, |entry| {
+        let (key_start, key_end) =
+            (base.saturating_add(entry.key.start), base.saturating_add(entry.key.end));
+        let key = info.get(key_start..key_end).unwrap_or_default();
         if key.is_empty() {
             return ControlFlow::Continue(());
         }
         let Some(id) = file.fields.text_id(KeyKind::Info, key) else {
             return ControlFlow::Continue(());
         };
-        let end = entry.value.map_or(entry.key.end, |v| v.end);
-        match span32(entry.key.end..end) {
-            Ok((start, end)) => {
-                if !index.push(Entry { id, start, end }) {
+        let end = entry.value.map_or(key_end, |v| base.saturating_add(v.end));
+        match span32(key_end..end) {
+            Ok((start, span_end)) => {
+                if !index.push(Entry { id, start, end: span_end }) {
                     file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
+                } else if stop == Some(id) {
+                    return ControlFlow::Break(Ok(end.saturating_add(1)));
                 }
                 ControlFlow::Continue(())
             }
-            Err(e) => ControlFlow::Break(e),
+            Err(e) => ControlFlow::Break(Err(e)),
         }
     });
     match flow {
-        ControlFlow::Break(e) => Err(e),
-        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(Ok(next)) => {
+            cursor.at = next;
+            Ok(Scan::Found)
+        }
+        ControlFlow::Break(Err(e)) => Err(e),
+        ControlFlow::Continue(()) => Ok(Scan::End),
     }
 }
 
@@ -497,7 +631,7 @@ mod tests {
     /// checked way too: both must agree on each span, and the walk on the
     /// first error.
     fn walk(bytes: &[u8], n: usize, samples: Option<usize>) -> (usize, usize) {
-        let mut entries = BcfEntries::new(bytes, n, samples);
+        let mut entries = BcfEntries::new(bytes, n, samples, Cursor::default());
         let mut quick = 0;
         for _ in 0..n {
             let mut checked = entries.clone();
@@ -565,11 +699,11 @@ mod tests {
             std::thread::scope(|s| {
                 for _ in 0..threads {
                     s.spawn(|| {
-                        let got = lazy.get(|index| {
+                        let got = lazy.get(|index: &mut FieldIndex, _: &mut Cursor, _| {
                             builds.fetch_add(1, Ordering::Relaxed);
                             assert!(index.entries().is_empty(), "restarted");
                             index.push(entry);
-                            if fails { Err(RecordError::Truncated) } else { Ok(()) }
+                            if fails { Err(RecordError::Truncated) } else { Ok(Scan::End) }
                         });
                         match got {
                             Ok(index) => {
@@ -584,7 +718,13 @@ mod tests {
             assert_eq!(builds.load(Ordering::Relaxed), 1, "round {round}");
             assert!(lazy.is_built());
             if !fails {
-                assert_eq!(lazy.clone().get(|_| unreachable!()).unwrap().get(id), Some(entry));
+                assert_eq!(
+                    lazy.clone()
+                        .get(|_: &mut FieldIndex, _: &mut Cursor, _| unreachable!())
+                        .unwrap()
+                        .get(id),
+                    Some(entry)
+                );
             }
         }
     }
@@ -594,11 +734,11 @@ mod tests {
     fn a_panicking_build_is_retried() {
         let lazy = LazyIndex::<FieldIndex>::default();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = lazy.get(|_| panic!("build"));
+            let _ = lazy.get(|_: &mut FieldIndex, _: &mut Cursor, _| panic!("build"));
         }));
         assert!(panicked.is_err());
         assert!(!lazy.is_built());
-        assert!(lazy.get(|_| Ok(())).is_ok());
+        assert!(lazy.get(|_: &mut FieldIndex, _: &mut Cursor, _| Ok(Scan::End)).is_ok());
     }
 
     /// The common entries take the quick path, a flag ending the section
@@ -614,5 +754,131 @@ mod tests {
         // A FORMAT column of two samples, int16 key.
         let format = [0x12, 0x00, 0x01, 0x21, 1, 2, 3, 4];
         assert_eq!(walk(&format, 1, Some(2)), (1, format.len()));
+    }
+}
+
+#[cfg(test)]
+mod incremental {
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        reason = "test sizes below 100"
+    )]
+
+    use super::*;
+    use crate::vcf::bcf_encoding::{BCF_BT_INT8, encode_type_byte, encode_typed_int_key};
+    use crate::vcf::reader::VcfFile;
+    use hegel::prelude::*;
+
+    const KEYS: usize = 8;
+
+    /// A file whose header declares INFO keys `K0`..`K7`.
+    fn file() -> VcfFile {
+        use std::fmt::Write as _;
+        let mut text = String::from("##fileformat=VCFv4.3\n##contig=<ID=chr1>\n");
+        for k in 0..KEYS {
+            writeln!(text, "##INFO=<ID=K{k},Number=.,Type=Integer,Description=\"\">").unwrap();
+        }
+        text.push_str("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n");
+        VcfFile::from_bytes(text.into_bytes(), None).unwrap()
+    }
+
+    /// The id of `Kk`, or of a key the header does not declare.
+    fn id(file: &FileShared, k: usize) -> DictId {
+        file.fields.get(format!("K{k}").as_bytes()).unwrap_or(DictId::new(60_000).unwrap())
+    }
+
+    /// One access: a lookup of key `k`, or (`None`) the whole index.
+    fn accesses(tc: &TestCase) -> Vec<Option<usize>> {
+        tc.draw(gs::vecs(gs::optional(gs::integers::<usize>().max_value(KEYS + 1))).max_size(6))
+    }
+
+    /// Lookups (and whole-index accesses) on one lazy index, against the
+    /// index built whole at once: a lookup reads what the whole index has
+    /// for its key, or its error if it has none.
+    fn check(
+        file: &FileShared,
+        accesses: &[Option<usize>],
+        step: impl Fn(&mut FieldIndex, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>,
+    ) {
+        let mut whole = FieldIndex::default();
+        whole.begin();
+        let result = step(&mut whole, &mut Cursor::default(), None).map(drop);
+        let mut lazy = LazyIndex::<FieldIndex>::default();
+        for _ in 0..2 {
+            lazy.reset();
+            for &access in accesses {
+                match access {
+                    Some(k) => {
+                        let id = id(file, k);
+                        let expected = found(&whole, &result, id).map_err(Clone::clone);
+                        assert_eq!(lazy.find(id, &step).map_err(Clone::clone), expected, "K{k}");
+                    }
+                    None => {
+                        let got = lazy.get(&step).map(|i| i.entries().to_vec());
+                        let expected = result.as_ref().map(|()| whole.entries().to_vec());
+                        assert_eq!(got, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    // r[verify vcf_values.index+2]
+    // r[verify vcf_values.duplicates+2]
+    /// BCF INFO sections of declared keys (repeats included), maybe with an
+    /// undeclared key, a value cut short, a wrong entry count or trailing
+    /// bytes.
+    #[hegel::test]
+    fn bcf_lookups_read_what_the_whole_index_reads(tc: TestCase) {
+        let file = file();
+        let file = &*file.0;
+        let keys = tc.draw(gs::vecs(gs::integers::<usize>().max_value(KEYS)).max_size(12));
+        let mut bytes = Vec::new();
+        for &k in &keys {
+            encode_typed_int_key(&mut bytes, id(file, k).get().min(100));
+            let len = tc.draw(gs::integers::<usize>().max_value(3));
+            encode_type_byte(&mut bytes, len, BCF_BT_INT8);
+            bytes.extend(std::iter::repeat_n(1u8, len));
+        }
+        let cut = tc.draw(
+            gs::integers::<usize>().min_value(bytes.len().saturating_sub(2)).max_value(bytes.len()),
+        );
+        bytes.truncate(cut);
+        bytes.extend(tc.draw(gs::binary().max_size(2)));
+        let n = (keys.len() + tc.draw(gs::integers::<usize>().max_value(2))).saturating_sub(1);
+        check(file, &accesses(&tc), |index, cursor, stop| {
+            index_bcf(
+                index,
+                BcfEntries::new(&bytes, n, None, *cursor),
+                cursor,
+                stop,
+                KeyKind::Info,
+                file,
+            )
+        });
+    }
+
+    // r[verify vcf_values.index+2]
+    // r[verify vcf_values.duplicates+2]
+    /// VCF text INFO columns of declared keys, flags and values, repeats
+    /// and empty entries included.
+    #[hegel::test]
+    fn text_lookups_read_what_the_whole_index_reads(tc: TestCase) {
+        let file = file();
+        let file = &*file.0;
+        let entries = tc.draw(gs::vecs(gs::integers::<usize>().max_value(KEYS + 1)).max_size(12));
+        let info: Vec<String> = entries
+            .iter()
+            .map(|&k| match k {
+                KEYS => String::new(),
+                k if k % 3 == 0 => format!("K{k}"),
+                k => format!("K{k}={k},{k}"),
+            })
+            .collect();
+        let info = info.join(";");
+        check(file, &accesses(&tc), |index, cursor, stop| {
+            index_text_info(index, info.as_bytes(), cursor, stop, file)
+        });
     }
 }

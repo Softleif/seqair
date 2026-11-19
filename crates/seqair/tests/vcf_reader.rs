@@ -1171,7 +1171,7 @@ fn text_records_read_their_columns() {
 
 // r[verify vcf_fields.samples]
 // r[verify vcf_values.access+2]
-// r[verify vcf_values.duplicates]
+// r[verify vcf_values.duplicates+2]
 // r[verify vcf_reader.field_table]
 // r[verify vcf_reader.undeclared.filter]
 /// A sample may drop trailing FORMAT fields (they read as missing); a

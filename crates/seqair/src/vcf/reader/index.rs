@@ -1,4 +1,4 @@
-//! A record section's index of present fields (`r[vcf_values.index]`).
+//! A record section's index of present fields (`r[vcf_values.index+2]`).
 
 /// A string-dictionary index: a header declares at most
 /// [`MAX_DICT_ENTRIES`](crate::vcf::header::MAX_DICT_ENTRIES) = 2^16 ids.
@@ -30,7 +30,7 @@ impl Entry {
     }
 }
 
-// r[impl vcf_values.index]
+// r[impl vcf_values.index+2]
 /// The fields of one section in record order, and a table with one `u32` per
 /// dictionary id, `epoch << 16 | slot`: a lookup is one table read, an epoch
 /// compare and one list read, and an id whose stamp is from another epoch is
@@ -69,7 +69,7 @@ impl FieldIndex {
     }
 
     /// Add a field; `false`, leaving the index unchanged, when its id is
-    /// already present (the first occurrence wins, `r[vcf_values.duplicates]`).
+    /// already present (the first occurrence wins, `r[vcf_values.duplicates+2]`).
     #[inline]
     pub(crate) fn push(&mut self, entry: Entry) -> bool {
         let id = entry.id.0 as usize;
@@ -114,8 +114,8 @@ mod tests {
     use hegel::prelude::*;
     use std::collections::HashMap;
 
-    // r[verify vcf_values.index]
-    // r[verify vcf_values.duplicates]
+    // r[verify vcf_values.index+2]
+    // r[verify vcf_values.duplicates+2]
     /// Against a map that keeps each id's first entry, over many records on
     /// one index, starting next to the epoch's wrap.
     #[hegel::test]

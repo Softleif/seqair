@@ -2,11 +2,11 @@
 
 use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::TypedValue;
-use super::entries::{BcfEntries, LazyIndex, index_bcf, index_text_info};
+use super::entries::{BcfEntries, Cursor, LazyIndex, Scan, index_bcf, index_text_info};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
-use super::index::{DictId, FieldIndex};
+use super::index::{DictId, Entry, FieldIndex};
 use super::raw::RawRecord;
 use crate::vcf::header::{InfoDef, ValueType};
 use crate::vcf::record_encoder::{FieldId, InfoKey};
@@ -97,17 +97,21 @@ pub(crate) fn debug_fields<'a, D: 'a>(
     map.finish()
 }
 
-/// Index an INFO column as its file's format lays it out.
-fn build(
+/// Index an INFO column as its file's format lays it out, from `cursor` on
+/// and up to the first entry of `stop`.
+fn step(
     index: &mut FieldIndex,
+    cursor: &mut Cursor,
+    stop: Option<DictId>,
     bytes: &[u8],
     n: usize,
     file: &FileShared,
-) -> Result<(), RecordError> {
+) -> Result<Scan, RecordError> {
     if file.is_text() {
-        index_text_info(index, bytes, file)
+        index_text_info(index, bytes, cursor, stop, file)
     } else {
-        index_bcf(index, BcfEntries::new(bytes, n, None), KeyKind::Info, file)
+        let entries = BcfEntries::new(bytes, n, None, *cursor);
+        index_bcf(index, entries, cursor, stop, KeyKind::Info, file)
     }
 }
 
@@ -143,7 +147,21 @@ impl<'a> InfoRef<'a> {
 
     fn index(&self) -> Result<&'a FieldIndex, VcfReadError> {
         let Self { bytes, n, file, at, .. } = *self;
-        self.index.get(|index| build(index, bytes, n, file)).map_err(|e| at.error(file, e.clone()))
+        self.index
+            .get(|index: &mut FieldIndex, cursor: &mut Cursor, stop| {
+                step(index, cursor, stop, bytes, n, file)
+            })
+            .map_err(|e| at.error(file, e.clone()))
+    }
+
+    /// The first entry of `id`, indexing no further than that.
+    fn find(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
+        let Self { bytes, n, file, at, .. } = *self;
+        self.index
+            .find(id, |index: &mut FieldIndex, cursor: &mut Cursor, stop| {
+                step(index, cursor, stop, bytes, n, file)
+            })
+            .map_err(|e| at.error(file, e.clone()))
     }
 
     fn value(&self, span: std::ops::Range<usize>) -> Result<Stored<'a>, VcfReadError> {
@@ -161,7 +179,7 @@ impl<'a> InfoRef<'a> {
     pub fn get<V: ReadKind>(&self, key: &InfoKey<V>) -> Result<V::Out<'a>, VcfReadError> {
         check_brand(&key.0, self.file)?;
         let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(V::absent()) };
-        match self.index()?.get(id) {
+        match self.find(id)? {
             Some(entry) => {
                 decode::<V>(self.value(entry.span())?, &key.0, KeyKind::Info, self.file, self.at)
             }
@@ -178,7 +196,7 @@ impl<'a> InfoRef<'a> {
     pub fn has<V>(&self, key: &InfoKey<V>) -> Result<bool, VcfReadError> {
         check_brand(&key.0, self.file)?;
         let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(false) };
-        Ok(self.index()?.get(id).is_some())
+        Ok(self.find(id)?.is_some())
     }
 
     // r[impl vcf_values.dynamic+2]

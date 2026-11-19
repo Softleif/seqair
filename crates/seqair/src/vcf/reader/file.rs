@@ -206,7 +206,7 @@ impl FileShared {
         }
     }
 
-    // r[impl vcf_values.duplicates]
+    // r[impl vcf_values.duplicates+2]
     /// Log, once per file, that a record holds `name` twice.
     pub(crate) fn warn_duplicate(&self, name: &str) {
         if !self.warned_duplicate.swap(true, Ordering::Relaxed) {
