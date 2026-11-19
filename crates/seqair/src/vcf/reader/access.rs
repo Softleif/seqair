@@ -1,7 +1,7 @@
 //! Typed access (`r[vcf_values.access]`): what each key marker reads a stored
 //! value as, and the untyped [`DynValue`] for generic tools.
 
-use super::bcf_value::TypedValue;
+use super::bcf_value::{TypedValue, gt_allele};
 use super::error::FieldError;
 use super::text_value::{TextGt, TextNumber, TextVec, text_str};
 use super::values::{GenotypeRef, GtAlleles, OptValues, Values};
@@ -78,6 +78,14 @@ pub trait ReadKind: FieldKind + sealed::Sealed {
 
     #[doc(hidden)]
     fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError>;
+
+    /// `true` if every sample's value decodes, as the type of the whole
+    /// column (`column`, every sample's elements, `per_sample` each) alone
+    /// shows; `false` when each sample must be decoded to tell.
+    #[doc(hidden)]
+    fn column_decodes(_column: Stored<'_>, _per_sample: usize) -> bool {
+        false
+    }
 }
 
 fn ints(value: Stored<'_>) -> Result<OptValues<'_, i32>, FieldError> {
@@ -102,6 +110,10 @@ macro_rules! numeric_kinds {
 
             fn absent<'a>() -> Self::Out<'a> {
                 None
+            }
+
+            fn column_decodes(column: Stored<'_>, per_sample: usize) -> bool {
+                matches!(column.0, StoredRepr::Bcf(v) if per_sample <= 1 && v.reads_as::<$t>())
             }
 
             fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
@@ -139,6 +151,10 @@ macro_rules! numeric_kinds {
                 None
             }
 
+            fn column_decodes(column: Stored<'_>, _: usize) -> bool {
+                matches!(column.0, StoredRepr::Bcf(v) if v.reads_as::<$t>())
+            }
+
             fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
                 let v = $read(value)?;
                 Ok((!v.is_missing()).then_some(v))
@@ -155,6 +171,10 @@ impl ReadKind for Flag {
 
     fn absent<'a>() -> Self::Out<'a> {
         false
+    }
+
+    fn column_decodes(_: Stored<'_>, _: usize) -> bool {
+        true
     }
 
     /// Present is set, whatever value a writer gave it.
@@ -188,6 +208,11 @@ impl ReadKind for Gt {
         None
     }
 
+    fn column_decodes(column: Stored<'_>, per_sample: usize) -> bool {
+        matches!(column.0, StoredRepr::Bcf(v)
+            if per_sample <= MAX_PLOIDY && v.every_int(|x| gt_allele(x).is_ok()))
+    }
+
     // r[impl vcf_values.gt+2]
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
@@ -195,7 +220,8 @@ impl ReadKind for Gt {
         let gt = match value.0 {
             StoredRepr::Bcf(v) => {
                 check_ploidy(v.count())?;
-                GtAlleles::Bcf(v.gt(cx.first_phase_is_read)?)
+                let gt = v.gt(cx.first_phase_is_read)?;
+                return Ok((!gt.is_missing()).then_some(GenotypeRef(GtAlleles::Bcf(gt))));
             }
             StoredRepr::Text(t) => {
                 let t = text_value(t.unwrap_or_default());
@@ -320,5 +346,73 @@ impl<'a> DynValue<'a> {
             ValueType::Flag => Self::Flag,
             ValueType::String | ValueType::Character => Self::Str(Str::decode(value, cx)?),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::arithmetic_side_effects, reason = "test sizes below 100")]
+
+    use super::*;
+    use crate::vcf::bcf_encoding::encode_type_byte;
+    use crate::vcf::reader::bcf_value::FormatColumn;
+    use hegel::prelude::*;
+
+    /// Whether `column_decodes` vouches for `column`, checked against
+    /// decoding every sample.
+    fn vouches<V: ReadKind>(column: &FormatColumn<'_>, n: usize) -> bool {
+        let (all, per_sample) = column.all();
+        let cx =
+            DecodeCx { first_phase_is_read: true, declared: ValueType::String, genotype: false };
+        let vouched = V::column_decodes(Stored(StoredRepr::Bcf(all)), per_sample);
+        if vouched {
+            for i in 0..n {
+                let value = Stored(StoredRepr::Bcf(column.sample(i).unwrap()));
+                assert!(V::decode(value, cx).is_ok(), "sample {i}");
+            }
+        }
+        vouched
+    }
+
+    // r[verify vcf_fields.samples]
+    /// A column the type check vouches for decodes for every sample, on
+    /// columns of every type with arbitrary elements (sentinels included).
+    #[hegel::test]
+    fn a_vouched_column_decodes_for_every_sample(tc: TestCase) {
+        let code = tc.draw(gs::sampled_from(vec![0u8, 1, 2, 3, 5, 7]));
+        let per_sample = tc.draw(gs::integers::<usize>().max_value(3));
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+        let width = [0, 1, 2, 4, 0, 4, 0, 1][usize::from(code)];
+        let mut bytes = Vec::new();
+        encode_type_byte(&mut bytes, per_sample, code);
+        let payload = tc.draw(
+            gs::vecs(gs::sampled_from(vec![0u8, 1, 2, 3, 4, 0x7F, 0x80, 0x81, 0xFF]))
+                .min_size(per_sample * width * n)
+                .max_size(per_sample * width * n),
+        );
+        bytes.extend(payload);
+        let (column, _) = FormatColumn::parse(&bytes, n).unwrap();
+        let all = [
+            vouches::<Gt>(&column, n),
+            vouches::<Scalar<i32>>(&column, n),
+            vouches::<OptArr<i32>>(&column, n),
+            vouches::<Scalar<f32>>(&column, n),
+            vouches::<OptArr<f32>>(&column, n),
+            vouches::<Flag>(&column, n),
+        ];
+        if code == 1 && per_sample <= 1 {
+            assert!(all[1] && all[2]);
+        }
+    }
+
+    /// Diploid int8 genotypes, haploid ones padded, and missing ones are vouched for.
+    #[test]
+    fn common_gt_columns_are_vouched_for() {
+        let bytes = [0x21, 2, 4, 3, 0x81, 0, 0, 0x80, 0x81];
+        let (column, _) = FormatColumn::parse(&bytes, 4).unwrap();
+        assert!(vouches::<Gt>(&column, 4));
+        let bad = [0x21, 2, 0xFB];
+        let (column, _) = FormatColumn::parse(&bad, 1).unwrap();
+        assert!(!vouches::<Gt>(&column, 1));
     }
 }

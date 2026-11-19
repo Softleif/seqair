@@ -420,9 +420,18 @@ impl<'a> SamplesRef<'a> {
     ) -> Result<Option<Column<'a, V>>, VcfReadError> {
         let Some(field) = self.view.field(&key.0)? else { return Ok(None) };
         let (file, at, n) = (self.view.file, self.view.at, self.view.n_samples);
-        for i in 0..n {
-            if let Some(value) = field.sample(i) {
-                decode::<V>(value, &key.0, KeyKind::Format, file, at)?;
+        let checked = match field {
+            FieldAt::Bcf(column) => {
+                let (all, per_sample) = column.all();
+                V::column_decodes(Stored(StoredRepr::Bcf(all)), per_sample)
+            }
+            FieldAt::Text { .. } => false,
+        };
+        if !checked {
+            for i in 0..n {
+                if let Some(value) = field.sample(i) {
+                    decode::<V>(value, &key.0, KeyKind::Format, file, at)?;
+                }
             }
         }
         let key = key.0.clone();

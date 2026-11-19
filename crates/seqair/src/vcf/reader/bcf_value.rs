@@ -196,6 +196,23 @@ impl<'a> TypedValue<'a> {
         self.count
     }
 
+    /// Whether the elements are of a type `T` reads.
+    pub(crate) fn reads_as<T: BcfNumber>(&self) -> bool {
+        T::check(self.ty).is_ok()
+    }
+
+    /// Whether the elements are integers and `ok` holds for every one of
+    /// them, past any end-of-vector too; missing and end-of-vector pass.
+    pub(crate) fn every_int(&self, ok: impl Fn(i32) -> bool) -> bool {
+        let width = self.ty.width();
+        self.reads_as::<i32>()
+            && (width == 0
+                || self.payload.chunks_exact(width).all(|e| match i32::decode(self.ty, e) {
+                    Slot::Value(v) => ok(v),
+                    Slot::Missing | Slot::End => true,
+                }))
+    }
+
     /// The elements as integers, at their stored width.
     pub(crate) fn ints(self) -> Result<BcfVec<'a, i32>, BcfValueError> {
         BcfVec::new(self)
@@ -211,10 +228,7 @@ impl<'a> TypedValue<'a> {
     /// earlier, whose first allele's phase bit is treated as unphased
     /// (`r[vcf_record.gt_first_phase+3]`).
     pub(crate) fn gt(self, first_phase_is_read: bool) -> Result<BcfGt<'a>, BcfValueError> {
-        let alleles = self.ints()?;
-        for value in alleles.clone().flatten() {
-            gt_allele(value)?;
-        }
+        let alleles = BcfVec::checked(self, |v| gt_allele(v).map(drop))?;
         Ok(BcfGt { alleles, first: true, first_phase_is_read })
     }
 
@@ -267,6 +281,12 @@ impl<'a> FormatColumn<'a> {
     /// The length of the type descriptor at the start of the column's bytes.
     pub(crate) fn header_len(&self) -> usize {
         self.header
+    }
+
+    /// Every sample's elements as one value, and how many each sample has.
+    pub(crate) fn all(&self) -> (TypedValue<'a>, usize) {
+        let count = self.per_sample.saturating_mul(self.n_samples);
+        (TypedValue { ty: self.ty, count, payload: self.payload }, self.per_sample)
     }
 
     /// The bytes of sample `i`'s elements, `None` past the last sample.
@@ -369,16 +389,32 @@ pub(crate) struct BcfVec<'a, T> {
 
 impl<'a, T: BcfNumber> BcfVec<'a, T> {
     fn new(value: TypedValue<'a>) -> Result<Self, BcfValueError> {
+        Self::checked(value, |_| Ok(()))
+    }
+
+    /// The vector, with `check` run on each element up to the end in the
+    /// same walk that finds the end.
+    #[inline]
+    fn checked(
+        value: TypedValue<'a>,
+        check: impl Fn(T) -> Result<(), BcfValueError>,
+    ) -> Result<Self, BcfValueError> {
         T::check(value.ty)?;
         if value.ty == BcfType::Missing {
             return Ok(Self { rest: &[], ty: BcfType::Int32, _t: PhantomData });
         }
         let width = value.ty.width();
-        let len = value
-            .payload
-            .chunks_exact(width)
-            .position(|e| matches!(T::decode(value.ty, e), Slot::End))
-            .unwrap_or(value.count);
+        let mut len = value.count;
+        for (i, e) in value.payload.chunks_exact(width).enumerate() {
+            match T::decode(value.ty, e) {
+                Slot::Value(v) => check(v)?,
+                Slot::Missing => {}
+                Slot::End => {
+                    len = i;
+                    break;
+                }
+            }
+        }
         let rest = value.payload.get(..len.saturating_mul(width)).unwrap_or(value.payload);
         Ok(Self { rest, ty: value.ty, _t: PhantomData })
     }
@@ -423,7 +459,7 @@ impl<T: BcfNumber> Iterator for BcfVec<'_, T> {
 impl<T: BcfNumber> ExactSizeIterator for BcfVec<'_, T> {}
 
 /// The allele of a GT element `(allele + 1) << 1 | phased`: `None` for `.`.
-fn gt_allele(value: i32) -> Result<Option<u16>, BcfValueError> {
+pub(crate) fn gt_allele(value: i32) -> Result<Option<u16>, BcfValueError> {
     if value < 0 {
         return Err(BcfValueError::InvalidGenotype { value });
     }
@@ -444,6 +480,17 @@ pub(crate) struct BcfGt<'a> {
     alleles: BcfVec<'a, i32>,
     first: bool,
     first_phase_is_read: bool,
+}
+
+impl BcfGt<'_> {
+    /// Whether the genotype is `.`: no alleles, or one missing allele.
+    pub(crate) fn is_missing(&self) -> bool {
+        match self.alleles.len() {
+            0 => true,
+            1 => !matches!(self.alleles.get(0), Some(Some(v)) if v >> 1 != 0),
+            _ => false,
+        }
+    }
 }
 
 impl Iterator for BcfGt<'_> {
