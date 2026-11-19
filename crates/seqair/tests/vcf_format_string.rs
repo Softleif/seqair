@@ -28,7 +28,11 @@ fn make_setup(samples: &[&str]) -> Setup {
     let mut builder = builder.formats();
     let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let lbl_fmt = builder
-        .register_format(&FormatFieldDef::<Str>::new("LBL", Number::Count(1), "Per-sample label"))
+        .register_format(&FormatFieldDef::<Str>::with_number(
+            "LBL",
+            Number::Count(1),
+            "Per-sample label",
+        ))
         .unwrap();
     let mut builder = builder.samples();
     for name in samples {

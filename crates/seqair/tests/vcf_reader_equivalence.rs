@@ -115,23 +115,29 @@ fn setup(tc: &TestCase) -> Setup {
         keys.f1 = Some(b.register_info(&InfoFieldDef::<Scalar<f32>>::new("F1", "f")).unwrap());
     }
     if on() {
-        keys.ia =
-            Some(b.register_info(&InfoFieldDef::<Arr<i32>>::new("IA", unknown, "ia")).unwrap());
+        keys.ia = Some(
+            b.register_info(&InfoFieldDef::<Arr<i32>>::with_number("IA", unknown, "ia")).unwrap(),
+        );
     }
     if on() {
-        keys.fa =
-            Some(b.register_info(&InfoFieldDef::<Arr<f32>>::new("FA", unknown, "fa")).unwrap());
+        keys.fa = Some(
+            b.register_info(&InfoFieldDef::<Arr<f32>>::with_number("FA", unknown, "fa")).unwrap(),
+        );
     }
     if on() {
-        keys.io =
-            Some(b.register_info(&InfoFieldDef::<OptArr<i32>>::new("IO", unknown, "io")).unwrap());
+        keys.io = Some(
+            b.register_info(&InfoFieldDef::<OptArr<i32>>::with_number("IO", unknown, "io"))
+                .unwrap(),
+        );
     }
     if on() {
         keys.fl = Some(b.register_info(&InfoFieldDef::<Flag>::new("FL", "fl")).unwrap());
     }
     if on() {
-        keys.s1 =
-            Some(b.register_info(&InfoFieldDef::<Str>::new("S1", Number::Count(1), "s")).unwrap());
+        keys.s1 = Some(
+            b.register_info(&InfoFieldDef::<Str>::with_number("S1", Number::Count(1), "s"))
+                .unwrap(),
+        );
     }
     let mut b = b.formats();
     if on() {
@@ -141,17 +147,21 @@ fn setup(tc: &TestCase) -> Setup {
         keys.dp = Some(b.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "dp")).unwrap());
     }
     if on() {
-        keys.af =
-            Some(b.register_format(&FormatFieldDef::<Arr<f32>>::new("AF", unknown, "af")).unwrap());
+        keys.af = Some(
+            b.register_format(&FormatFieldDef::<Arr<f32>>::with_number("AF", unknown, "af"))
+                .unwrap(),
+        );
     }
     if on() {
         keys.fo = Some(
-            b.register_format(&FormatFieldDef::<OptArr<f32>>::new("FO", unknown, "fo")).unwrap(),
+            b.register_format(&FormatFieldDef::<OptArr<f32>>::with_number("FO", unknown, "fo"))
+                .unwrap(),
         );
     }
     if on() {
         keys.st = Some(
-            b.register_format(&FormatFieldDef::<Str>::new("ST", Number::Count(1), "st")).unwrap(),
+            b.register_format(&FormatFieldDef::<Str>::with_number("ST", Number::Count(1), "st"))
+                .unwrap(),
         );
     }
     let mut b = b.samples();

@@ -646,9 +646,7 @@ mod tests {
         );
         assert_eq!(typed(&["A", "ACG"]), Alleles::insertion(Base::A, &[Base::C, Base::G]).unwrap());
         assert_eq!(typed(&["ACG", "A"]), Alleles::deletion(Base::A, &[Base::C, Base::G]).unwrap());
-        let complex = |r: &str, alts: &[&str]| {
-            Alleles::complex(r, alts.iter().copied())
-        };
+        let complex = |r: &str, alts: &[&str]| Alleles::complex(r, alts.iter().copied());
         assert_eq!(typed(&["AC", "GT"]), complex("AC", &["GT"]));
         assert_eq!(typed(&["A", "<DEL>"]), complex("A", &["<DEL>"]));
         assert_eq!(typed(&["A", "A"]), complex("A", &["A"]));

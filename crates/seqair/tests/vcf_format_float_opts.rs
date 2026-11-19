@@ -20,7 +20,7 @@ fn write(format: OutputFormat, values: &[Option<f32>]) -> (Vec<u8>, Result<(), V
     let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.infos().formats();
     let ml: FormatFloatOpts = builder
-        .register_format(&FormatFieldDef::<OptArr<f32>>::new(
+        .register_format(&FormatFieldDef::<OptArr<f32>>::with_number(
             "ML",
             Number::AlternateBases,
             "ML per alt",

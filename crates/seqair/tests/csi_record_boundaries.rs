@@ -55,8 +55,9 @@ fn write_bcf(pad: usize) -> Written {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN.into()))).unwrap();
     let mut infos = builder.infos();
-    let sc: InfoString =
-        infos.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "padding")).unwrap();
+    let sc: InfoString = infos
+        .register_info(&InfoFieldDef::<Str>::with_number("SC", Number::Count(1), "padding"))
+        .unwrap();
     let header = Arc::new(infos.build().unwrap());
 
     let padding = "A".repeat(pad);

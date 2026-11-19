@@ -13,10 +13,12 @@ fn write(format: OutputFormat, lists: &[&[&str]]) -> (Vec<u8>, Vec<Option<VcfErr
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.infos();
-    let sources =
-        builder.register_info(&InfoFieldDef::<Str>::new("SOURCES", Number::Unknown, "s")).unwrap();
-    let one =
-        builder.register_info(&InfoFieldDef::<Str>::new("ONE", Number::Count(1), "o")).unwrap();
+    let sources = builder
+        .register_info(&InfoFieldDef::<Str>::with_number("SOURCES", Number::Unknown, "s"))
+        .unwrap();
+    let one = builder
+        .register_info(&InfoFieldDef::<Str>::with_number("ONE", Number::Count(1), "o"))
+        .unwrap();
     let header = builder.build().unwrap();
     let mut out = Vec::new();
     let mut errors = Vec::new();

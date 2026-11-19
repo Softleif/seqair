@@ -115,7 +115,7 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
     let mut b = b.filters().infos();
     let end: InfoInt = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("END", "end")).unwrap();
     let pad: InfoString =
-        b.register_info(&InfoFieldDef::<Str>::new("PAD", Number::Count(1), "pad")).unwrap();
+        b.register_info(&InfoFieldDef::<Str>::with_number("PAD", Number::Count(1), "pad")).unwrap();
     let header = b.build().unwrap();
 
     let mut out = Vec::new();
@@ -124,8 +124,7 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
     for (i, r) in recs.iter().enumerate() {
         let reference: String = "ACGTAC"[..r.ref_len].to_owned();
         let alt = if r.end.is_some() { "<DEL>" } else { "T" };
-        let alleles =
-            Alleles::complex(reference, [alt]);
+        let alleles = Alleles::complex(reference, [alt]);
         let enc =
             w.begin_record(&contigs[r.contig], Pos1::new(r.pos).unwrap(), &alleles, None).unwrap();
         let mut enc = enc.filter_pass();

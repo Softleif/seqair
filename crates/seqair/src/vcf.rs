@@ -217,11 +217,11 @@ pub use reader::{
 };
 pub use record::Genotype;
 pub use record_encoder::{
-    Arr, ContigId, FieldDescription, FieldId, FieldKind, FilterFieldDef, FilterId, Flag,
-    FormatEncoder, FormatFieldDef, FormatFloat, FormatFloatOpts, FormatFloats, FormatGt, FormatInt,
-    FormatIntOpts, FormatInts, FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag,
-    InfoFloat, InfoFloatOpts, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString,
-    Numeric, OptArr, Scalar, Str,
+    Arr, ChosenNumber, ContigId, FieldDescription, FieldId, FieldKind, FilterFieldDef, FilterId,
+    Flag, FormatEncoder, FormatFieldDef, FormatFixedNumber, FormatFloat, FormatFloatOpts,
+    FormatFloats, FormatGt, FormatInt, FormatIntOpts, FormatInts, FormatKey, FormatString, Gt,
+    InfoEncoder, InfoFieldDef, InfoFixedNumber, InfoFlag, InfoFloat, InfoFloatOpts, InfoFloats,
+    InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, Numeric, OptArr, Scalar, Str,
 };
 /// Positions and regions as readers take and return them.
 pub use seqair_types::{Pos0, Pos1, RegionString};

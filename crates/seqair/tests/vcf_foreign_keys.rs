@@ -46,19 +46,25 @@ fn keys() -> Keys {
     let r = Number::ReferenceAlternateBases;
     let dp = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "x")).unwrap();
     let bq = b.register_info(&InfoFieldDef::<Scalar<f32>>::new("BQ", "x")).unwrap();
-    let ad = b.register_info(&InfoFieldDef::<Arr<i32>>::new("AD", r, "x")).unwrap();
-    let af = b.register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "x"));
+    let ad = b.register_info(&InfoFieldDef::<Arr<i32>>::with_number("AD", r, "x")).unwrap();
+    let af =
+        b.register_info(&InfoFieldDef::<Arr<f32>>::with_number("AF", Number::AlternateBases, "x"));
     let db = b.register_info(&InfoFieldDef::<Flag>::new("DB", "x")).unwrap();
-    let sc = b.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "x")).unwrap();
-    let ao = b.register_info(&InfoFieldDef::<OptArr<i32>>::new("AO", r, "x")).unwrap();
+    let sc =
+        b.register_info(&InfoFieldDef::<Str>::with_number("SC", Number::Count(1), "x")).unwrap();
+    let ao = b.register_info(&InfoFieldDef::<OptArr<i32>>::with_number("AO", r, "x")).unwrap();
     let mut b = b.formats();
     let gt = b.register_format(&FormatFieldDef::<Gt>::new("GT", "x")).unwrap();
     let gq = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("GQ", "x")).unwrap();
     let gf = b.register_format(&FormatFieldDef::<Scalar<f32>>::new("GF", "x")).unwrap();
-    let pl = b.register_format(&FormatFieldDef::<Arr<i32>>::new("PL", Number::Genotypes, "x"));
-    let gl = b.register_format(&FormatFieldDef::<Arr<f32>>::new("GL", Number::Genotypes, "x"));
-    let fo = b.register_format(&FormatFieldDef::<OptArr<f32>>::new("FO", r, "x")).unwrap();
-    let fs = b.register_format(&FormatFieldDef::<Str>::new("FS", Number::Count(1), "x")).unwrap();
+    let pl =
+        b.register_format(&FormatFieldDef::<Arr<i32>>::with_number("PL", Number::Genotypes, "x"));
+    let gl =
+        b.register_format(&FormatFieldDef::<Arr<f32>>::with_number("GL", Number::Genotypes, "x"));
+    let fo = b.register_format(&FormatFieldDef::<OptArr<f32>>::with_number("FO", r, "x")).unwrap();
+    let fs = b
+        .register_format(&FormatFieldDef::<Str>::with_number("FS", Number::Count(1), "x"))
+        .unwrap();
     let mut b = b.samples();
     b.add_sample("S1").unwrap();
     Keys {

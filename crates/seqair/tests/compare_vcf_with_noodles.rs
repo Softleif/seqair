@@ -44,14 +44,14 @@ fn rich_setup() -> RichSetup {
     let dp_info =
         builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total Depth")).unwrap();
     let _af_info: InfoFloats = builder
-        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
             "AF",
             Number::AlternateBases,
             "Allele Frequency",
         ))
         .unwrap();
     let _ad_info: InfoInts = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::ReferenceAlternateBases,
             "Allele Depth",

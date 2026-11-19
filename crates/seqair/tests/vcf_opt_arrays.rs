@@ -45,13 +45,16 @@ fn write(case: &Case, format: OutputFormat) -> Vec<u8> {
     let mut b = VcfHeader::builder();
     let chr1 = b.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut b = b.infos();
-    let fo: InfoFloatOpts =
-        b.register_info(&InfoFieldDef::<OptArr<f32>>::new("FO", Number::Unknown, "f")).unwrap();
+    let fo: InfoFloatOpts = b
+        .register_info(&InfoFieldDef::<OptArr<f32>>::with_number("FO", Number::Unknown, "f"))
+        .unwrap();
     let mut b = b.formats();
-    let io: FormatIntOpts =
-        b.register_format(&FormatFieldDef::<OptArr<i32>>::new("IO", Number::Unknown, "i")).unwrap();
-    let ff: FormatFloatOpts =
-        b.register_format(&FormatFieldDef::<OptArr<f32>>::new("FF", Number::Unknown, "f")).unwrap();
+    let io: FormatIntOpts = b
+        .register_format(&FormatFieldDef::<OptArr<i32>>::with_number("IO", Number::Unknown, "i"))
+        .unwrap();
+    let ff: FormatFloatOpts = b
+        .register_format(&FormatFieldDef::<OptArr<f32>>::with_number("FF", Number::Unknown, "f"))
+        .unwrap();
     let mut b = b.samples();
     for i in 0..case.ints.len() {
         b.add_sample(format!("S{i}")).unwrap();
@@ -127,8 +130,9 @@ fn a_sample_count_other_than_the_headers_is_refused() {
     let mut b = VcfHeader::builder();
     let chr1 = b.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut b = b.infos().formats();
-    let io: FormatIntOpts =
-        b.register_format(&FormatFieldDef::<OptArr<i32>>::new("IO", Number::Unknown, "i")).unwrap();
+    let io: FormatIntOpts = b
+        .register_format(&FormatFieldDef::<OptArr<i32>>::with_number("IO", Number::Unknown, "i"))
+        .unwrap();
     let mut b = b.samples();
     b.add_sample("S0").unwrap();
     let header = b.build().unwrap();

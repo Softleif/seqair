@@ -59,14 +59,14 @@ fn make_setup() -> RoundtripSetup {
     let dp_info =
         builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total Depth")).unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::ReferenceAlternateBases,
             "Allele Depth",
         ))
         .unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
             "AF",
             Number::AlternateBases,
             "Allele Frequency",

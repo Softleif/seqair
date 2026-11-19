@@ -462,7 +462,8 @@ fn a_field_redefined_with_another_type_or_number_fails_the_map() {
     let mut b = file.header().to_builder();
     assert!(b.remove_format("PS"));
     let mut b = b.formats();
-    b.register_format(&FormatFieldDef::<Str>::new("PS", Number::Unknown, "any count")).unwrap();
+    b.register_format(&FormatFieldDef::<Str>::with_number("PS", Number::Unknown, "any count"))
+        .unwrap();
     let err = FieldMap::new(&file, &unrelated(b.build().unwrap())).unwrap_err();
     assert!(
         matches!(&err, FieldMapError::Incompatible { kind: KeyKind::Format, name, input_number, output_number, .. }
@@ -545,7 +546,8 @@ fn a_field_removed_and_registered_again_is_a_new_field() {
     assert!(b.remove_format("PS"));
     assert!(b.remove_info("S1"));
     let mut b = b.infos();
-    b.register_info(&InfoFieldDef::<Str>::new("S1", Number::Count(1), "same as before")).unwrap();
+    b.register_info(&InfoFieldDef::<Str>::with_number("S1", Number::Count(1), "same as before"))
+        .unwrap();
     let mut b = b.formats();
     let ps = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set")).unwrap();
     let output = b.build().unwrap();
@@ -763,9 +765,9 @@ fn undeclared_keys_fail_are_dropped_or_declared() {
     let mut b = file.header().to_builder().filters();
     b.register_filter(&seqair::vcf::FilterFieldDef::new("foo", "f")).unwrap();
     let mut b = b.infos();
-    b.register_info(&InfoFieldDef::<Str>::new("TRID", Number::Count(1), "t")).unwrap();
+    b.register_info(&InfoFieldDef::<Str>::with_number("TRID", Number::Count(1), "t")).unwrap();
     let mut b = b.formats();
-    b.register_format(&FormatFieldDef::<Str>::new("XX", Number::Count(1), "x")).unwrap();
+    b.register_format(&FormatFieldDef::<Str>::with_number("XX", Number::Count(1), "x")).unwrap();
     let output = b.build().unwrap();
     let map = FieldMap::new(&file, &output).unwrap();
     for format in FORMATS {
@@ -807,8 +809,9 @@ fn rewritten_genotypes_and_phase_sets_read_back_and_the_rest_is_copied(tc: TestC
     b.add_other_line("phaser=test");
     let mut b = b.formats();
     let ps = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set")).unwrap();
-    let pf: seqair::vcf::FormatString =
-        b.register_format(&FormatFieldDef::<Str>::new("PF", Number::Count(1), "Flag")).unwrap();
+    let pf: seqair::vcf::FormatString = b
+        .register_format(&FormatFieldDef::<Str>::with_number("PF", Number::Count(1), "Flag"))
+        .unwrap();
     let output = b.build().unwrap();
     let in_gt: FormatGt = file.header().format_key("GT").unwrap();
     let out_gt: FormatGt = output.format_key("GT").unwrap();

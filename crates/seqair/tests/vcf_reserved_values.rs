@@ -66,10 +66,14 @@ fn setup() -> Setup {
     let info_int =
         builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Scalar integer")).unwrap();
     let info_ints = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "Integer list"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
+            "AD",
+            Number::Unknown,
+            "Integer list",
+        ))
         .unwrap();
     let info_int_opts = builder
-        .register_info(&InfoFieldDef::<OptArr<i32>>::new(
+        .register_info(&InfoFieldDef::<OptArr<i32>>::with_number(
             "OD",
             Number::Unknown,
             "Integer list with missing elements",
@@ -78,7 +82,7 @@ fn setup() -> Setup {
     let info_float =
         builder.register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", "Scalar float")).unwrap();
     let info_floats = builder
-        .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::Unknown, "Float list"))
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number("AF", Number::Unknown, "Float list"))
         .unwrap();
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "GT")).unwrap();
@@ -86,7 +90,7 @@ fn setup() -> Setup {
         .register_format(&FormatFieldDef::<Scalar<i32>>::new("FD", "Per-sample integer"))
         .unwrap();
     let fmt_ints = builder
-        .register_format(&FormatFieldDef::<Arr<i32>>::new(
+        .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
             "FA",
             Number::Unknown,
             "Per-sample integer list",
@@ -96,7 +100,7 @@ fn setup() -> Setup {
         .register_format(&FormatFieldDef::<Scalar<f32>>::new("FQ", "Per-sample float"))
         .unwrap();
     let fmt_floats = builder
-        .register_format(&FormatFieldDef::<Arr<f32>>::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::with_number(
             "FL",
             Number::Unknown,
             "Per-sample float list",

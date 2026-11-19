@@ -42,7 +42,11 @@ fn setup(n_samples: usize) -> Setup {
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let pl = builder
-        .register_format(&FormatFieldDef::<Arr<i32>>::new("PL", Number::Genotypes, "Likelihoods"))
+        .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
+            "PL",
+            Number::Genotypes,
+            "Likelihoods",
+        ))
         .unwrap();
     let mut builder = builder.samples();
     for i in 0..n_samples {

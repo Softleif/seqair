@@ -208,7 +208,7 @@ fn vcf_setup() -> VcfSetup {
     let contig = b.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut b = b.infos();
     let ad = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::ReferenceAlternateBases,
             "Depth per allele",

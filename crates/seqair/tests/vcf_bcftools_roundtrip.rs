@@ -45,21 +45,21 @@ fn make_setup() -> Setup {
     let mut builder = builder.infos();
     let dp_info = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
             "AF",
             Number::AlternateBases,
             "Allele Frequency",
         ))
         .unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::ReferenceAlternateBases,
             "Allele Depth",
         ))
         .unwrap();
     let xs_info = builder
-        .register_info(&InfoFieldDef::<Arr<i32>>::new("XS", Number::Unknown, "Any count"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number("XS", Number::Unknown, "Any count"))
         .unwrap();
     let mut builder = builder.formats();
     let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();

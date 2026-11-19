@@ -69,8 +69,11 @@ fn info_header() -> (Arc<VcfHeader>, ContigId, InfoKeys) {
     let mut b = b.infos();
     let dp = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "d")).unwrap();
     let bq = b.register_info(&InfoFieldDef::<Scalar<f32>>::new("BQ", "q")).unwrap();
-    let ad = b.register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "a")).unwrap();
-    let sc = b.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "s")).unwrap();
+    let ad = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number("AD", Number::Unknown, "a"))
+        .unwrap();
+    let sc =
+        b.register_info(&InfoFieldDef::<Str>::with_number("SC", Number::Count(1), "s")).unwrap();
     let flag = b.register_info(&InfoFieldDef::<Flag>::new("FL", "f")).unwrap();
     let header = Arc::new(b.build().unwrap());
     (header, contig, InfoKeys { dp, bq, ad, sc, flag })
@@ -177,8 +180,9 @@ fn fmt_header() -> (Arc<VcfHeader>, ContigId, FmtKeys) {
     let mut b = b.formats();
     let dp = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "d")).unwrap();
     let q = b.register_format(&FormatFieldDef::<Scalar<f32>>::new("GQ", "q")).unwrap();
-    let pl =
-        b.register_format(&FormatFieldDef::<Arr<f32>>::new("PL", Number::Unknown, "p")).unwrap();
+    let pl = b
+        .register_format(&FormatFieldDef::<Arr<f32>>::with_number("PL", Number::Unknown, "p"))
+        .unwrap();
     let mut b = b.samples();
     b.add_sample("s0").unwrap();
     b.add_sample("s1").unwrap();

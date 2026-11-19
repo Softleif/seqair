@@ -31,7 +31,7 @@ fn make_setup() -> Setup {
     let mut builder = builder.formats();
     let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let ml_fmt = builder
-        .register_format(&FormatFieldDef::<Arr<f32>>::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::with_number(
             "ML",
             Number::AlternateBases,
             "ML prediction per alt",
@@ -118,7 +118,7 @@ fn make_multi_setup(samples: &[&str]) -> MultiSetup {
     let mut builder = builder.formats();
     let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let vl_fmt = builder
-        .register_format(&FormatFieldDef::<Arr<f32>>::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::with_number(
             "VL",
             Number::Unknown,
             "Variable-length float list per sample",

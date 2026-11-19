@@ -94,17 +94,19 @@ fn setup() -> Setup {
         .enumerate()
         .map(|(i, &card)| {
             let name = format!("I{i}");
-            let def = InfoFieldDef::<Arr<i32>>::new(leak(&name), card.number(), "x");
+            let def = InfoFieldDef::<Arr<i32>>::with_number(leak(&name), card.number(), "x");
             (name, card, b.register_info(&def).unwrap())
         })
         .collect();
     let info_opt = (
         Card::R,
-        b.register_info(&InfoFieldDef::<OptArr<i32>>::new("IO", Card::R.number(), "x")).unwrap(),
+        b.register_info(&InfoFieldDef::<OptArr<i32>>::with_number("IO", Card::R.number(), "x"))
+            .unwrap(),
     );
     let info_floats = (
         Card::A,
-        b.register_info(&InfoFieldDef::<Arr<f32>>::new("IF", Card::A.number(), "x")).unwrap(),
+        b.register_info(&InfoFieldDef::<Arr<f32>>::with_number("IF", Card::A.number(), "x"))
+            .unwrap(),
     );
     let mut b = b.formats();
     let gt = b.register_format(&FormatFieldDef::<Gt>::new("GT", "genotype")).unwrap();
@@ -113,17 +115,18 @@ fn setup() -> Setup {
         .enumerate()
         .map(|(i, &card)| {
             let name = format!("F{i}");
-            let def = FormatFieldDef::<Arr<i32>>::new(leak(&name), card.number(), "x");
+            let def = FormatFieldDef::<Arr<i32>>::with_number(leak(&name), card.number(), "x");
             (name, card, b.register_format(&def).unwrap())
         })
         .collect();
     let format_floats = (
         Card::G,
-        b.register_format(&FormatFieldDef::<Arr<f32>>::new("FF", Card::G.number(), "x")).unwrap(),
+        b.register_format(&FormatFieldDef::<Arr<f32>>::with_number("FF", Card::G.number(), "x"))
+            .unwrap(),
     );
     let format_opt = (
         Card::R,
-        b.register_format(&FormatFieldDef::<OptArr<f32>>::new("FO", Card::R.number(), "x"))
+        b.register_format(&FormatFieldDef::<OptArr<f32>>::with_number("FO", Card::R.number(), "x"))
             .unwrap(),
     );
     let mut b = b.samples();

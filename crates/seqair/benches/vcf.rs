@@ -91,14 +91,14 @@ fn seqair_setup() -> SeqairSetup {
         .register_info(&InfoFieldDef::<Scalar<i32>>::new("AN", "Total allele count in genotypes"))
         .unwrap();
     let ac_info = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "AC",
             Number::AlternateBases,
             "Allele count in genotypes, for each ALT",
         ))
         .unwrap();
     let af_info = b
-        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
             "AF",
             Number::AlternateBases,
             "Allele frequency from GT counts, for each ALT",

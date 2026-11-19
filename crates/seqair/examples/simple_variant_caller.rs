@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     let dp_info: InfoInt =
         builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total depth"))?;
     let af_info: seqair::vcf::InfoFloats = builder.register_info(
-        &InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "Allele frequency"),
+        &InfoFieldDef::<Arr<f32>>::with_number("AF", Number::AlternateBases, "Allele frequency"),
     )?;
 
     // FORMAT fields: GT (genotype), DP (sample depth), AD (allelic depths)

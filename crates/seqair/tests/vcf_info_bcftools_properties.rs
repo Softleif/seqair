@@ -60,29 +60,44 @@ fn setup() -> Setup {
     let int1 = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("II", "int")).unwrap();
     let float1 = b.register_info(&InfoFieldDef::<Scalar<f32>>::new("FF", "float")).unwrap();
     let flag = b.register_info(&InfoFieldDef::<Flag>::new("FG", "flag")).unwrap();
-    let char1 = b.register_info(&InfoFieldDef::<Str>::new("CH", Number::Count(1), "char")).unwrap();
-    let string1 =
-        b.register_info(&InfoFieldDef::<Str>::new("ST", Number::Count(1), "string")).unwrap();
-    let fixed3 =
-        b.register_info(&InfoFieldDef::<Arr<i32>>::new("P3", Number::Count(3), "three")).unwrap();
+    let char1 =
+        b.register_info(&InfoFieldDef::<Str>::with_number("CH", Number::Count(1), "char")).unwrap();
+    let string1 = b
+        .register_info(&InfoFieldDef::<Str>::with_number("ST", Number::Count(1), "string"))
+        .unwrap();
+    let fixed3 = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number("P3", Number::Count(3), "three"))
+        .unwrap();
     let per_alt = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new("AI", Number::AlternateBases, "one per ALT"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
+            "AI",
+            Number::AlternateBases,
+            "one per ALT",
+        ))
         .unwrap();
     let per_allele = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
             "RI",
             Number::ReferenceAlternateBases,
             "one per allele",
         ))
         .unwrap();
     let per_genotype = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new("GI", Number::Genotypes, "one per genotype"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
+            "GI",
+            Number::Genotypes,
+            "one per genotype",
+        ))
         .unwrap();
     let unknown = b
-        .register_info(&InfoFieldDef::<Arr<i32>>::new("UI", Number::Unknown, "any count"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::with_number("UI", Number::Unknown, "any count"))
         .unwrap();
     let per_alt_float = b
-        .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "one per ALT"))
+        .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
+            "AF",
+            Number::AlternateBases,
+            "one per ALT",
+        ))
         .unwrap();
     let header = Arc::new(b.samples().build().unwrap());
     Setup {
@@ -545,7 +560,7 @@ fn opt_setup() -> OptSetup {
     let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN))).unwrap();
     let mut b = builder.infos();
     let opts = b
-        .register_info(&InfoFieldDef::<OptArr<i32>>::new(
+        .register_info(&InfoFieldDef::<OptArr<i32>>::with_number(
             "OI",
             Number::Unknown,
             "integers, some missing",

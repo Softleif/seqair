@@ -49,21 +49,25 @@ fn setup(n_samples: usize) -> Setup {
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "GT")).unwrap();
     let ints = builder
-        .register_format(&FormatFieldDef::<Arr<i32>>::new(
+        .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::Unknown,
             "Per-sample integer list",
         ))
         .unwrap();
     let floats = builder
-        .register_format(&FormatFieldDef::<Arr<f32>>::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::with_number(
             "VL",
             Number::Unknown,
             "Per-sample float list",
         ))
         .unwrap();
     let text = builder
-        .register_format(&FormatFieldDef::<Str>::new("BC", Number::Count(1), "Per-sample string"))
+        .register_format(&FormatFieldDef::<Str>::with_number(
+            "BC",
+            Number::Count(1),
+            "Per-sample string",
+        ))
         .unwrap();
     let mut builder = builder.samples();
     for i in 0..n_samples {

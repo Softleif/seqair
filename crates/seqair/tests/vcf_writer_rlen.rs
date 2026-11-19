@@ -65,12 +65,20 @@ fn setup() -> Setup {
     let mut builder = builder.infos();
     let end = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("END", "End")).unwrap();
     let svlen = builder
-        .register_info(&InfoFieldDef::<OptArr<i32>>::new("SVLEN", Number::AlternateBases, "Length"))
+        .register_info(&InfoFieldDef::<OptArr<i32>>::with_number(
+            "SVLEN",
+            Number::AlternateBases,
+            "Length",
+        ))
         .unwrap();
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let len = builder
-        .register_format(&FormatFieldDef::<Arr<i32>>::new("LEN", Number::Count(1), "Block length"))
+        .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
+            "LEN",
+            Number::Count(1),
+            "Block length",
+        ))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("S1").unwrap();

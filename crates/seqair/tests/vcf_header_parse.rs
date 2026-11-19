@@ -466,7 +466,11 @@ fn a_phaser_rewrites_ps_in_a_copied_header() {
         .register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set identifier"))
         .unwrap();
     let pf = builder
-        .register_format(&FormatFieldDef::<Str>::new("PF", Number::Count(1), "Phasing flag"))
+        .register_format(&FormatFieldDef::<Str>::with_number(
+            "PF",
+            Number::Count(1),
+            "Phasing flag",
+        ))
         .unwrap();
     let header = builder.build().unwrap();
     assert!(header.other_lines().iter().any(|l| l == "HiPhase_version=1.4.5"));

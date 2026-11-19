@@ -6,7 +6,7 @@
 use seqair::vcf::{Arr, FormatFieldDef, Number, VcfHeader, VcfVersion};
 
 const fn format_def(name: &'static str, number: Number) -> FormatFieldDef<Arr<f32>> {
-    FormatFieldDef::<Arr<f32>>::new(name, number, "test field")
+    FormatFieldDef::<Arr<f32>>::with_number(name, number, "test field")
 }
 
 /// The declared version has to be one that defines `Number=M`, which is VCF

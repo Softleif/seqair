@@ -880,33 +880,45 @@ impl FormatKey<Str> {
 
 // ── Field definitions ──────────────────────────────────────────────────
 
-// r[impl record_encoder.field_def+4]
+// r[impl record_encoder.field_def+5]
 // r[impl record_encoder.field_def_types]
 
 /// An INFO field definition; its `Type` is the marker's ([`FieldKind::VALUE_TYPE`]),
 /// and so is its `Number` where the marker fixes one: [`Scalar`] declares
-/// `Number=1`, [`Flag`] `Number=0`. [`Arr`], [`OptArr`] and [`Str`]
-/// definitions take a `Number`:
+/// `Number=1`, [`Flag`] `Number=0`, and their definitions are built with
+/// [`new`](Self::new). [`Arr`], [`OptArr`] and [`Str`] definitions take a
+/// `Number`, through [`with_number`](Self::with_number). The marker comes
+/// from the binding's type:
 ///
 /// ```
 /// use seqair::vcf::Number;
 /// use seqair::vcf::record_encoder::{Arr, Flag, InfoFieldDef, Scalar};
 ///
-/// const DP: InfoFieldDef<Scalar<i32>> = InfoFieldDef::<Scalar<i32>>::new("DP", "Depth");
+/// const DP: InfoFieldDef<Scalar<i32>> = InfoFieldDef::new("DP", "Depth");
 /// const AD: InfoFieldDef<Arr<i32>> =
-///     InfoFieldDef::<Arr<i32>>::new("AD", Number::ReferenceAlternateBases, "Allele depth");
-/// const DB: InfoFieldDef<Flag> = InfoFieldDef::<Flag>::new("DB", "dbSNP");
+///     InfoFieldDef::with_number("AD", Number::ReferenceAlternateBases, "Allele depth");
+/// const DB: InfoFieldDef<Flag> = InfoFieldDef::new("DB", "dbSNP");
+/// // Without a typed binding, name the marker:
+/// let _ = InfoFieldDef::<Scalar<f32>>::new("BQ", "Base quality");
 /// ```
 ///
 /// A scalar cannot be declared with another `Number`; one value per ALT is an
 /// [`Arr`] with `Number=A`:
 ///
-/// ```compile_fail,E0061
+/// ```compile_fail,E0599
 /// use seqair::vcf::Number;
 /// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
 ///
-/// // ERROR: a Scalar's Number is 1; its constructor takes no Number
-/// let _ = InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth");
+/// // ERROR: a Scalar's Number is 1; it has no `with_number`
+/// let _ = InfoFieldDef::<Scalar<i32>>::with_number("DP", Number::Count(1), "Depth");
+/// ```
+///
+/// Nor is there an INFO genotype:
+///
+/// ```compile_fail,E0599
+/// use seqair::vcf::record_encoder::{Gt, InfoFieldDef};
+///
+/// let _ = InfoFieldDef::<Gt>::new("GT", "Genotype");
 /// ```
 pub struct InfoFieldDef<V> {
     pub(crate) name: &'static str,
@@ -926,44 +938,92 @@ pub struct FormatFieldDef<V> {
     _marker: PhantomData<V>,
 }
 
-// r[impl record_encoder.field_def_const]
-macro_rules! field_def_constructors {
-    ($def:ident: $($marker:ty => $number:expr),* $(,)?) => {
-        $(
-            impl $def<$marker> {
-                pub const fn new(name: &'static str, description: &'static str) -> Self {
-                    Self { name, number: $number, description, _marker: PhantomData }
-                }
-            }
-        )*
-        impl<T: Numeric> $def<Scalar<T>> {
-            pub const fn new(name: &'static str, description: &'static str) -> Self {
-                Self { name, number: Number::Count(1), description, _marker: PhantomData }
-            }
-        }
-        impl<T: Numeric> $def<Arr<T>> {
-            pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
-                Self { name, number, description, _marker: PhantomData }
-            }
-        }
-        impl<T: Numeric> $def<OptArr<T>> {
-            pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
-                Self { name, number, description, _marker: PhantomData }
-            }
-        }
-        // One string either way; `Number=.` is how real files declare a list,
-        // which `InfoKey<Str>::encode_list` writes.
-        impl $def<Str> {
-            pub const fn new(name: &'static str, number: Number, description: &'static str) -> Self {
-                Self { name, number, description, _marker: PhantomData }
-            }
-        }
-    };
+mod sealed {
+    pub trait Sealed {}
+    impl<T: super::Numeric> Sealed for super::Scalar<T> {}
+    impl<T: super::Numeric> Sealed for super::Arr<T> {}
+    impl<T: super::Numeric> Sealed for super::OptArr<T> {}
+    impl Sealed for super::Str {}
+    impl Sealed for super::Flag {}
+    impl Sealed for super::Gt {}
 }
 
+/// An INFO marker whose `Number` the marker fixes: [`Scalar`] (`1`) and
+/// [`Flag`] (`0`). Their definitions are built with [`InfoFieldDef::new`].
+pub trait InfoFixedNumber: FieldKind + sealed::Sealed {
+    /// The `Number` a definition with this marker declares.
+    const NUMBER: Number;
+}
+
+/// A FORMAT marker whose `Number` the marker fixes: [`Scalar`] and [`Gt`]
+/// (`1`). Their definitions are built with [`FormatFieldDef::new`].
+pub trait FormatFixedNumber: FieldKind + sealed::Sealed {
+    /// The `Number` a definition with this marker declares.
+    const NUMBER: Number;
+}
+
+/// A marker whose definition takes a `Number`: [`Arr`], [`OptArr`] and
+/// [`Str`]. Their definitions are built with `with_number`.
+pub trait ChosenNumber: FieldKind + sealed::Sealed {}
+
+impl<T: Numeric> InfoFixedNumber for Scalar<T> {
+    const NUMBER: Number = Number::Count(1);
+}
+impl InfoFixedNumber for Flag {
+    const NUMBER: Number = Number::Count(0);
+}
+impl<T: Numeric> FormatFixedNumber for Scalar<T> {
+    const NUMBER: Number = Number::Count(1);
+}
 // No INFO `Gt`: the marker names only the FORMAT `GT` field.
-field_def_constructors!(InfoFieldDef: Flag => Number::Count(0));
-field_def_constructors!(FormatFieldDef: Gt => Number::Count(1));
+impl FormatFixedNumber for Gt {
+    const NUMBER: Number = Number::Count(1);
+}
+impl<T: Numeric> ChosenNumber for Arr<T> {}
+impl<T: Numeric> ChosenNumber for OptArr<T> {}
+// One string either way; `Number=.` is how real files declare a list,
+// which `InfoKey<Str>::encode_list` writes.
+impl ChosenNumber for Str {}
+
+// r[impl record_encoder.field_def_const]
+// r[impl record_encoder.field_def+5]
+impl<V: InfoFixedNumber> InfoFieldDef<V> {
+    /// A definition whose `Number` is the marker's: `Scalar` declares `1`,
+    /// `Flag` `0`. The marker comes from the binding's type:
+    /// `const DP: InfoFieldDef<Scalar<i32>> = InfoFieldDef::new("DP", "Depth");`.
+    pub const fn new(name: &'static str, description: &'static str) -> Self {
+        Self { name, number: V::NUMBER, description, _marker: PhantomData }
+    }
+}
+
+impl<V: ChosenNumber> InfoFieldDef<V> {
+    /// A definition of an array or string field, with its `Number`.
+    pub const fn with_number(
+        name: &'static str,
+        number: Number,
+        description: &'static str,
+    ) -> Self {
+        Self { name, number, description, _marker: PhantomData }
+    }
+}
+
+impl<V: FormatFixedNumber> FormatFieldDef<V> {
+    /// A definition whose `Number` is the marker's: `1` for `Scalar` and `Gt`.
+    pub const fn new(name: &'static str, description: &'static str) -> Self {
+        Self { name, number: V::NUMBER, description, _marker: PhantomData }
+    }
+}
+
+impl<V: ChosenNumber> FormatFieldDef<V> {
+    /// A definition of an array or string field, with its `Number`.
+    pub const fn with_number(
+        name: &'static str,
+        number: Number,
+        description: &'static str,
+    ) -> Self {
+        Self { name, number, description, _marker: PhantomData }
+    }
+}
 
 pub struct FilterFieldDef {
     pub name: &'static str,
@@ -1051,7 +1111,7 @@ mod tests {
         assert_eq!(desc.description(), "Combined depth");
     }
 
-    // r[verify record_encoder.field_def+4]
+    // r[verify record_encoder.field_def+5]
     // r[verify vcf_values.field_kind]
     /// The declared `Type` is the marker's, read through every path a
     /// definition reaches the header by: the def, the trait, the header line.
@@ -1060,29 +1120,33 @@ mod tests {
         assert_eq!(InfoFieldDef::<Scalar<i32>>::new("A", "").value_type(), ValueType::Integer);
         assert_eq!(InfoFieldDef::<Scalar<f32>>::new("A", "").value_type(), ValueType::Float);
         assert_eq!(
-            InfoFieldDef::<Arr<i32>>::new("A", Number::Unknown, "").value_type(),
+            InfoFieldDef::<Arr<i32>>::with_number("A", Number::Unknown, "").value_type(),
             ValueType::Integer
         );
         assert_eq!(
-            InfoFieldDef::<OptArr<f32>>::new("A", Number::Unknown, "").value_type(),
+            InfoFieldDef::<OptArr<f32>>::with_number("A", Number::Unknown, "").value_type(),
             ValueType::Float
         );
         assert_eq!(InfoFieldDef::<Flag>::new("A", "").value_type(), ValueType::Flag);
         assert_eq!(
-            InfoFieldDef::<Str>::new("A", Number::Count(1), "").value_type(),
+            InfoFieldDef::<Str>::with_number("A", Number::Count(1), "").value_type(),
             ValueType::String
         );
         assert_eq!(FormatFieldDef::<Gt>::new("GT", "").value_type(), ValueType::String);
 
         let mut builder = crate::vcf::header::VcfHeader::builder().infos();
         builder
-            .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "x"))
+            .register_info(&InfoFieldDef::<Arr<f32>>::with_number(
+                "AF",
+                Number::AlternateBases,
+                "x",
+            ))
             .unwrap();
         let header = builder.build().unwrap();
         assert!(header.to_vcf_text().contains("##INFO=<ID=AF,Number=A,Type=Float,"));
     }
 
-    // r[verify record_encoder.field_def+4]
+    // r[verify record_encoder.field_def+5]
     /// A marker that fixes the `Number` declares it, and the declaration is
     /// one a key of the same marker resolves from a parsed header.
     #[test]
@@ -1093,21 +1157,24 @@ mod tests {
         }
         check::<Scalar<i32>>(&InfoFieldDef::<Scalar<i32>>::new("A", ""), Number::Count(1));
         check::<Scalar<f32>>(&FormatFieldDef::<Scalar<f32>>::new("A", ""), Number::Count(1));
-        check::<Str>(&InfoFieldDef::<Str>::new("A", Number::Unknown, ""), Number::Unknown);
-        check::<Str>(&FormatFieldDef::<Str>::new("A", Number::Count(1), ""), Number::Count(1));
+        check::<Str>(&InfoFieldDef::<Str>::with_number("A", Number::Unknown, ""), Number::Unknown);
+        check::<Str>(
+            &FormatFieldDef::<Str>::with_number("A", Number::Count(1), ""),
+            Number::Count(1),
+        );
         check::<Flag>(&InfoFieldDef::<Flag>::new("A", ""), Number::Count(0));
         check::<Gt>(&FormatFieldDef::<Gt>::new("GT", ""), Number::Count(1));
         check::<Arr<i32>>(
-            &InfoFieldDef::<Arr<i32>>::new("A", Number::Genotypes, ""),
+            &InfoFieldDef::<Arr<i32>>::with_number("A", Number::Genotypes, ""),
             Number::Genotypes,
         );
         check::<OptArr<f32>>(
-            &FormatFieldDef::<OptArr<f32>>::new("A", Number::Count(4), ""),
+            &FormatFieldDef::<OptArr<f32>>::with_number("A", Number::Count(4), ""),
             Number::Count(4),
         );
     }
 
-    // r[verify record_encoder.field_def+4]
+    // r[verify record_encoder.field_def+5]
     #[test]
     fn a_genotype_definition_names_only_format_gt() {
         // An INFO `Gt` definition has no constructor at all.
@@ -1183,7 +1250,7 @@ mod tests {
                 .unwrap();
             let db_flag = builder.register_info(&InfoFieldDef::<Flag>::new("DB", "dbSNP")).unwrap();
             let ad_info = builder
-                .register_info(&InfoFieldDef::<Arr<i32>>::new(
+                .register_info(&InfoFieldDef::<Arr<i32>>::with_number(
                     "AD",
                     Number::ReferenceAlternateBases,
                     "Allele depth",
@@ -1219,7 +1286,7 @@ mod tests {
         assert_eq!(map.get("GT").unwrap(), setup.gt_fmt.id().dict_idx() as usize, "FORMAT GT");
     }
 
-    // r[verify record_encoder.field_def+4]
+    // r[verify record_encoder.field_def+5]
     // r[verify record_encoder.field_def_types]
     #[test]
     fn field_def_generic_keys_encode() {
@@ -1519,7 +1586,7 @@ mod tests {
         let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut builder = builder.formats();
         let pl_fmt: FormatInts = builder
-            .register_format(&FormatFieldDef::<Arr<i32>>::new(
+            .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
                 "PL",
                 Number::Genotypes,
                 "Phred likelihoods",
@@ -1555,7 +1622,11 @@ mod tests {
         let contig = hb.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
         let mut hb = hb.formats();
         let af: FormatFloats = hb
-            .register_format(&FormatFieldDef::<Arr<f32>>::new("AF", Number::Unknown, "Allele freq"))
+            .register_format(&FormatFieldDef::<Arr<f32>>::with_number(
+                "AF",
+                Number::Unknown,
+                "Allele freq",
+            ))
             .unwrap();
         let mut hb = hb.samples();
         hb.add_sample("A").unwrap();

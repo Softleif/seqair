@@ -502,7 +502,7 @@ impl VcfHeader {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // An input file's header, which declares PS as a String.
     /// let mut input = VcfHeader::builder().formats();
-    /// input.register_format(&FormatFieldDef::<Str>::new("PS", Number::Count(1), "Old phase set"))?;
+    /// input.register_format(&FormatFieldDef::<Str>::with_number("PS", Number::Count(1), "Old phase set"))?;
     /// let mut input = input.samples();
     /// input.add_sample("S1")?;
     /// let input = input.build()?;

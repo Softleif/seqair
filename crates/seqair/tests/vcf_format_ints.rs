@@ -30,7 +30,7 @@ fn make_setup(samples: &[&str]) -> Setup {
     let mut builder = builder.formats();
     let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let ad_fmt = builder
-        .register_format(&FormatFieldDef::<Arr<i32>>::new(
+        .register_format(&FormatFieldDef::<Arr<i32>>::with_number(
             "AD",
             Number::Unknown,
             "Per-sample integer list",

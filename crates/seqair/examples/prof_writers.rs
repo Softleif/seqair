@@ -212,7 +212,7 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
             b.register_info(&InfoFieldDef::<$kind>::new($name, "d")).unwrap()
         };
         ($kind:ty, $name:expr, $num:expr) => {
-            b.register_info(&InfoFieldDef::<$kind>::new($name, $num, "d")).unwrap()
+            b.register_info(&InfoFieldDef::<$kind>::with_number($name, $num, "d")).unwrap()
         };
     }
     let ad = info!(Arr<i32>, "AD", r);
@@ -244,7 +244,7 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
             b.register_format(&FormatFieldDef::<$kind>::new($name, "d")).unwrap()
         };
         ($kind:ty, $name:expr, $num:expr) => {
-            b.register_format(&FormatFieldDef::<$kind>::new($name, $num, "d")).unwrap()
+            b.register_format(&FormatFieldDef::<$kind>::with_number($name, $num, "d")).unwrap()
         };
     }
     let gt = format!(seqair::vcf::Gt, "GT");
