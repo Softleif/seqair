@@ -2,11 +2,10 @@
 //! a [`Fields`](super::Fields) type decodes it through
 //! (`r[vcf_fields.user_types]`).
 
-use super::entries::FormatIndex;
 use super::error::{RecordAt, RecordError, RecordPart, RecordSection, VcfReadError};
 use super::fields::{SampleSelection, Sections};
 use super::file::FileShared;
-use super::index::SectionIndex;
+use super::index::{FormatIndex, SectionIndex};
 use super::info::InfoRef;
 use super::locus::{Locus, VcfPos, span_of};
 use super::rlen::{RlenColumns, text_rlen};

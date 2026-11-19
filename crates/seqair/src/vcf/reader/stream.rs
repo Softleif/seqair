@@ -1,13 +1,12 @@
 //! [`Reader`]: records read front to back into a [`Fields`] type
 //! (`r[vcf_reader.reader]`, `r[vcf_reader.read_into+2]`).
 
-use super::entries::FormatIndex;
 use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
 use super::fields::{
     Fields, PlanContext, PlanError, ReadOption, ReadOptions, SampleSel, SampleSelection, Sections,
 };
 use super::file::{DataStart, FileShared, Input, VcfFile};
-use super::index::SectionIndex;
+use super::index::{FormatIndex, SectionIndex};
 use super::keys::Keys;
 use super::locus::VcfPos;
 use super::query::{self, Partition, Query, RegionInput, Verdict};

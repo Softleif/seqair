@@ -5,8 +5,7 @@
 use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
 use super::file::FileShared;
-use super::index::{DictId, Entry, Progress, SectionIndex};
-use super::samples::FormatSource;
+use super::index::{DictId, Entry, FormatIndex, Progress, SectionIndex};
 use crate::io::text_scan::{for_each_info_entry, for_each_of_two};
 use std::ops::{ControlFlow, Range};
 
@@ -234,70 +233,14 @@ fn warn_duplicate_id(file: &FileShared, id: DictId) {
     file.warn_duplicate(file.fields.name(&file.header, id).unwrap_or_default());
 }
 
-/// The FORMAT fields of a record: which are present, and for VCF text
-/// where each sample's value of each lies.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FormatIndex {
-    /// For BCF, each field's column span; for VCF text, each field's
-    /// position among the FORMAT keys (`k..k + 1`).
-    pub(crate) keys: SectionIndex,
-    /// VCF text only: sample `s`'s value of the `k`th key at
-    /// `s * n_keys + k`, empty where the sample dropped it.
-    pub(crate) values: Vec<Range<u32>>,
-    pub(crate) n_keys: usize,
-}
-
 impl FormatIndex {
-    /// Forget the last record's FORMAT fields, keeping the buffers.
-    pub(crate) fn reset(&mut self) {
-        self.keys.reset();
-        self.values.clear();
-        self.n_keys = 0;
-    }
-
-    /// Where sample `sample`'s value of the `k`th key lies in the sample
-    /// columns (VCF text).
-    pub(crate) fn cell(&self, sample: usize, k: usize) -> Option<Range<usize>> {
-        let r = self.values.get(sample.checked_mul(self.n_keys)?.checked_add(k)?)?;
-        Some(r.start as usize..r.end as usize)
-    }
-
-    /// Index the whole FORMAT data `source` (once; later calls return the
-    /// first one's outcome).
-    pub(crate) fn finish(
-        &mut self,
-        source: FormatSource<'_>,
-        file: &FileShared,
-    ) -> Result<(), RecordError> {
-        match &self.keys.progress {
-            Progress::Done => Ok(()),
-            Progress::Failed(e) => Err(e.clone()),
-            Progress::Scanning { .. } => self.scan(source, file),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn scan(&mut self, source: FormatSource<'_>, file: &FileShared) -> Result<(), RecordError> {
-        let found = match source {
-            FormatSource::Bcf { indiv, n_fmt, n_samples } => {
-                let entries = BcfEntries::new(indiv, n_fmt, Some(n_samples), 0, 0);
-                self.keys.scan_bcf(entries, None, KeyKind::Format, file)
-            }
-            FormatSource::Text { keys, samples, n_samples } => {
-                self.scan_text(keys, samples, n_samples, file).map(|()| None)
-            }
-        };
-        self.keys.settle(found).map(drop)
-    }
-
     // r[impl vcf_fields.samples]
     // r[impl vcf_reader.field_table]
     /// Index VCF text FORMAT data: `keys` (the FORMAT column) and `samples`
     /// (`n_samples` TAB-separated columns), in one pass over the samples. A
     /// sample may drop trailing fields; one with more fields than FORMAT has
     /// keys, or a column count other than `n_samples`, is malformed.
-    fn scan_text(
+    pub(crate) fn scan_text(
         &mut self,
         keys: &[u8],
         samples: &[u8],
@@ -313,18 +256,18 @@ impl FormatIndex {
             let Some(id) = file.fields.text_id(KeyKind::Format, key) else {
                 continue;
             };
-            let (start, end) = span32(k..n_keys)?;
-            if !self.keys.push(Entry { id, start, end }) {
+            let Ok(ordinal) = u32::try_from(k) else { return Err(too_large(k)) };
+            if !self.keys.push(Entry::ordinal_of(id, ordinal)) {
                 file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
             }
         }
         self.n_keys = n_keys;
         let total = n_samples.saturating_mul(n_keys);
-        self.values.resize(total, 0..0);
+        self.cells.resize(total, 0..0);
         let (mut sample, mut field, mut start) = (0usize, 0usize, 0usize);
         let flow = for_each_of_two(samples, b'\t', b':', |pos, next_sample| {
             let Some(slot) =
-                self.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
+                self.cells.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
             else {
                 return ControlFlow::Break(too_many(sample, field, n_samples, n_keys));
             };
@@ -355,7 +298,7 @@ impl FormatIndex {
             });
         }
         let (s, e) = span32(start..samples.len())?;
-        if let Some(slot) = self.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
+        if let Some(slot) = self.cells.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
         {
             *slot = s..e;
         }
@@ -367,8 +310,13 @@ impl FormatIndex {
 fn span32(r: Range<usize>) -> Result<(u32, u32), RecordError> {
     match (u32::try_from(r.start), u32::try_from(r.end)) {
         (Ok(s), Ok(e)) => Ok((s, e)),
-        _ => Err(RecordError::TooLarge { size: r.end as u64, max: u64::from(u32::MAX) }),
+        _ => Err(too_large(r.end)),
     }
+}
+
+/// A text section past the `u32` offsets an index holds.
+fn too_large(size: usize) -> RecordError {
+    RecordError::TooLarge { size: size as u64, max: u64::from(u32::MAX) }
 }
 
 /// Sample `sample` holds a field past the last key, or there are more

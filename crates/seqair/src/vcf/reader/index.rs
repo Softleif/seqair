@@ -4,7 +4,9 @@ use super::entries::BcfEntries;
 use super::error::{KeyKind, RecordError};
 use super::file::FileShared;
 use super::info::InfoSource;
+use super::samples::FormatSource;
 pub(crate) use crate::vcf::header::DictId;
+use std::ops::Range;
 
 /// One field present in a section: its id and the byte span of its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,8 +17,21 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    pub(crate) fn span(self) -> std::ops::Range<usize> {
+    /// A VCF text FORMAT key's entry: its position among the FORMAT keys,
+    /// where other entries hold a byte span.
+    pub(crate) fn ordinal_of(id: DictId, ordinal: u32) -> Self {
+        Self { id, start: ordinal, end: ordinal.saturating_add(1) }
+    }
+
+    /// The byte span of the value, in the section's bytes.
+    pub(crate) fn span(self) -> Range<usize> {
         self.start as usize..self.end as usize
+    }
+
+    /// A VCF text FORMAT key's position among the FORMAT keys
+    /// ([`Self::ordinal_of`]).
+    pub(crate) fn ordinal(self) -> usize {
+        self.start as usize
     }
 }
 
@@ -194,6 +209,72 @@ impl SectionIndex {
                 Err(e)
             }
         }
+    }
+}
+
+/// The FORMAT fields of a record: which are present, and for VCF text
+/// where each sample's value of each lies. Scanned whole on first access:
+/// only INFO is scanned incrementally (`r[vcf_values.index+2]`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FormatIndex {
+    /// The fields present and the scan's progress. A BCF entry spans its
+    /// column (every sample's values); a VCF text entry holds the key's
+    /// position among the FORMAT keys ([`Entry::ordinal`]).
+    pub(crate) keys: SectionIndex,
+    /// VCF text only: sample `s`'s value of the `k`th key at
+    /// `s * n_keys + k`, empty where the sample dropped it.
+    pub(crate) cells: Vec<Range<u32>>,
+    /// VCF text only: how many keys the FORMAT column names.
+    pub(crate) n_keys: usize,
+}
+
+impl FormatIndex {
+    /// Forget the last record's FORMAT fields, keeping the buffers.
+    pub(crate) fn reset(&mut self) {
+        self.keys.reset();
+        self.cells.clear();
+        self.n_keys = 0;
+    }
+
+    /// Fail every access with `e`: the FORMAT data could not be copied.
+    pub(crate) fn fail(&mut self, e: RecordError) {
+        self.keys.progress = Progress::Failed(e);
+    }
+
+    /// Where sample `sample`'s value of the `k`th key lies in the sample
+    /// columns (VCF text).
+    pub(crate) fn cell(&self, sample: usize, k: usize) -> Option<Range<usize>> {
+        let r = self.cells.get(sample.checked_mul(self.n_keys)?.checked_add(k)?)?;
+        Some(r.start as usize..r.end as usize)
+    }
+
+    /// Index the whole FORMAT data `source` (once; later calls return the
+    /// first one's outcome).
+    pub(crate) fn finish(
+        &mut self,
+        source: FormatSource<'_>,
+        file: &FileShared,
+    ) -> Result<(), RecordError> {
+        match &self.keys.progress {
+            Progress::Done => Ok(()),
+            Progress::Failed(e) => Err(e.clone()),
+            Progress::Scanning { .. } => self.scan(source, file),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scan(&mut self, source: FormatSource<'_>, file: &FileShared) -> Result<(), RecordError> {
+        let found = match source {
+            FormatSource::Bcf { indiv, n_fmt, n_samples } => {
+                let entries = BcfEntries::new(indiv, n_fmt, Some(n_samples), 0, 0);
+                self.keys.scan_bcf(entries, None, KeyKind::Format, file)
+            }
+            FormatSource::Text { keys, samples, n_samples } => {
+                self.scan_text(keys, samples, n_samples, file).map(|()| None)
+            }
+        };
+        self.keys.settle(found).map(drop)
     }
 }
 

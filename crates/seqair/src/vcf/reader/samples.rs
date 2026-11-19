@@ -4,11 +4,10 @@
 
 use super::access::{DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
-use super::entries::FormatIndex;
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
-use super::index::{DictId, Entry};
+use super::index::{DictId, Entry, FormatIndex};
 use super::info::{check_brand, debug_fields, decode, dyn_decode};
 use super::raw::RawRecord;
 use crate::vcf::header::{FormatDef, SampleIdx};
@@ -42,9 +41,6 @@ struct FormatData {
     file: Arc<FileShared>,
     at: RecordAt,
     index: RefCell<FormatIndex>,
-    /// The error copying one sample's values out of a multi-sample BCF
-    /// record met, returned by every access (`r[vcf_fields.lazy+4]`).
-    failed: Option<RecordError>,
 }
 
 impl FormatData {
@@ -57,7 +53,6 @@ impl FormatData {
             file: Arc::clone(raw.file),
             at: raw.at(),
             index: RefCell::default(),
-            failed: None,
         }
     }
 
@@ -68,7 +63,6 @@ impl FormatData {
         self.n_samples = n_samples;
         self.at = raw.at();
         self.index.get_mut().reset();
-        self.failed = None;
         raw.keep_file(&mut self.file);
     }
 
@@ -98,7 +92,8 @@ impl FormatData {
                         copy_one_sample(&mut self.bytes, indiv, n_fmt, n_samples, sample.index())
                     {
                         self.bytes.clear();
-                        self.failed = Some(e);
+                        // Every access returns it, as for a malformed section.
+                        self.index.get_mut().fail(e);
                     }
                 }
             },
@@ -124,13 +119,7 @@ impl FormatData {
         } else {
             FormatSource::Bcf { indiv: &self.bytes, n_fmt: self.n_fmt, n_samples }
         };
-        FormatView {
-            source,
-            index: &self.index,
-            failed: self.failed.as_ref(),
-            file: &self.file,
-            at: self.at,
-        }
+        FormatView::new(source, &self.index, &self.file, self.at)
     }
 }
 
@@ -167,8 +156,6 @@ fn copy_one_sample(
 pub(crate) struct FormatView<'a> {
     source: FormatSource<'a>,
     index: &'a RefCell<FormatIndex>,
-    /// Copying the data failed: every access returns this.
-    failed: Option<&'a RecordError>,
     file: &'a FileShared,
     at: RecordAt,
 }
@@ -181,7 +168,7 @@ impl<'a> FormatView<'a> {
         file: &'a FileShared,
         at: RecordAt,
     ) -> Self {
-        Self { source, index, failed: None, file, at }
+        Self { source, index, file, at }
     }
 
     /// How many samples the data holds.
@@ -194,9 +181,6 @@ impl<'a> FormatView<'a> {
     /// Index the whole FORMAT data, on first access.
     fn finish(&self) -> Result<(), VcfReadError> {
         let Self { source, file, at, .. } = *self;
-        if let Some(e) = self.failed {
-            return Err(at.error(file, e.clone()));
-        }
         let finished = self.index.borrow_mut().finish(source, file);
         finished.map_err(|e| at.error(file, e))
     }
@@ -225,7 +209,7 @@ impl<'a> FormatView<'a> {
     fn field_at(&self, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
         match self.source {
             FormatSource::Text { samples, n_samples, .. } => {
-                Ok(FieldAt::Text { index: self.index, samples, k: entry.start as usize, n_samples })
+                Ok(FieldAt::Text { index: self.index, samples, k: entry.ordinal(), n_samples })
             }
             FormatSource::Bcf { indiv, n_samples, .. } => {
                 let bytes = indiv.get(entry.span()).unwrap_or_default();
