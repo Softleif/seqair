@@ -37,10 +37,13 @@ impl<D> Clone for Decl<D> {
 }
 impl<D> Copy for Decl<D> {}
 
-/// A definition in one section, and the `Type` it gives.
+/// The field table's entry for one id in one section.
 #[derive(Debug)]
 struct Declared<D: 'static> {
+    /// The declared `Type`: what a BCF scan checks a key against (a declared
+    /// field of its section) and generic iteration decodes by.
     typ: ValueType,
+    /// Where the whole definition is, for `info_def`/`format_def`.
     decl: Decl<D>,
 }
 

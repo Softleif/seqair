@@ -12,6 +12,42 @@
 //! The value decoders underneath know no header: BCF typed values
 //! (`bcf_value`), VCF text values (`text_value`), and the views both share
 //! ([`OptValues`], [`Values`], [`GenotypeRef`]).
+//!
+//! # How a field lookup flows
+//!
+//! [`Info`] and the sample components own their section's bytes and its
+//! index, a `SectionIndex` (INFO) or `FormatIndex` (FORMAT) in a `RefCell`
+//! that `fill` resets in place; a [`RawRecord`]'s views use two the reader
+//! keeps. A view ([`InfoRef`], [`SampleRef`], [`SamplesRef`]) borrows the
+//! bytes and the index and fixes the layout once (`InfoSource` /
+//! `FormatSource`: BCF or VCF text). [`InfoRef::get`] then
+//!
+//! 1. checks the key's header brand (`info::check_brand`);
+//! 2. asks the index for the key's `DictId` (`SectionIndex::find`,
+//!    `index.rs`): a hit is one table read; a miss scans on from where the
+//!    last access stopped (`entries.rs`) and records how far it got
+//!    (`Progress`: still scanning, done, or failed with the error every
+//!    later access returns). FORMAT is scanned whole on first access
+//!    (`FormatIndex::finish`), then looked up the same way;
+//! 3. takes the value's bytes (`InfoSource::value`, a sample's cell for
+//!    FORMAT) and decodes them with the key's marker (`ReadKind::decode`,
+//!    `access.rs`).
+//!
+//! No borrow of the index outlives the method that takes it (iteration and
+//! a VCF text [`Column`] borrow again per item), so the `RefCell` never
+//! sees two at once (`r[vcf_fields.lazy+4]`).
+//!
+//! # Where a key's type lives
+//!
+//! | when | what is decided | where |
+//! |---|---|---|
+//! | compile time | the result's shape, `V::Out<'a>` | the marker `V` of `InfoKey<V>` / `FormatKey<V>` |
+//! | once per key (`file.info_key::<V>(name)`) | that `V` reads the declared `Type` and `Number`; the field's `DictId`, `Type`, whether it is GT, and its header | `check_kind`, kept in the key's `FieldId` |
+//! | per record | only that the bytes are well formed | `V::decode`, failing with a [`FieldError`] |
+//!
+//! An access never consults the header: [`Any`] decodes by the `Type` its
+//! key carries. Generic iteration has no key, and reads each field's
+//! definition from the file's field table (`keys.rs`) by id.
 
 mod access;
 pub(crate) mod bcf_value;

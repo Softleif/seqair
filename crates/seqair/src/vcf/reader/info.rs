@@ -1,4 +1,7 @@
-//! [`Info`]: the INFO column, indexed on first access (`r[vcf_fields.info]`).
+//! [`Info`]: the INFO column, indexed on first access (`r[vcf_fields.info]`),
+//! and what the INFO and FORMAT views share: the brand check and decoding a
+//! stored value through a key ([`decode`]) or a field table definition
+//! ([`dyn_decode`]).
 
 use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::TypedValue;
@@ -116,8 +119,12 @@ pub(crate) fn debug_fields<'a, D: 'a>(
 #[derive(Clone, Copy)]
 pub struct InfoRef<'a> {
     info: InfoSource<'a>,
+    /// The record's INFO index: the component's own, or the reader's for a
+    /// [`RawRecord`] view. Borrowed for one method at a time.
     index: &'a RefCell<SectionIndex>,
+    /// The field table that maps keys to ids, and the warn-once state.
     file: &'a FileShared,
+    /// Where the record is, for errors.
     at: RecordAt,
 }
 
@@ -215,10 +222,14 @@ impl<'a> InfoRef<'a> {
 /// record rejected on its position or FILTER never pays for it.
 #[derive(Clone)]
 pub struct Info {
+    /// The INFO column as stored (BCF entries or VCF text).
     bytes: Vec<u8>,
+    /// BCF's `n_info`; 0 for VCF text.
     n: usize,
     file: Arc<FileShared>,
+    /// Where the record is, for errors.
     at: RecordAt,
+    /// The index of `bytes`, reset in [`Fields::fill`] and built on access.
     index: RefCell<SectionIndex>,
 }
 

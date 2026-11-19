@@ -17,7 +17,8 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// Where a record's FORMAT data comes from, as the reader found it.
+/// A record's FORMAT data as its file lays it out: what a [`FormatView`]
+/// scans and reads values from (INFO's counterpart is `InfoSource`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FormatSource<'a> {
     /// The individual section: per field, its key, its type descriptor,
@@ -37,9 +38,13 @@ struct FormatData {
     n_fmt: usize,
     /// VCF text: the FORMAT column's length.
     keys_len: usize,
+    /// How many samples `bytes` holds: all of them, or the one copied.
     n_samples: usize,
     file: Arc<FileShared>,
+    /// Where the record is, for errors.
     at: RecordAt,
+    /// The index of `bytes`, reset by every fill and built on access; a
+    /// sample that could not be copied fails it ([`FormatIndex::fail`]).
     index: RefCell<FormatIndex>,
 }
 
@@ -151,12 +156,17 @@ fn copy_one_sample(
     Ok(())
 }
 
-/// FORMAT data as a view reads it, indexed on first access.
+/// FORMAT data as a view reads it, indexed on first access: what
+/// [`SampleRef`] and [`SamplesRef`] share.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FormatView<'a> {
     source: FormatSource<'a>,
+    /// The record's FORMAT index: the component's own, or the reader's for
+    /// a [`RawRecord`] view. Borrowed for one method (or one sample's cell)
+    /// at a time.
     index: &'a RefCell<FormatIndex>,
     file: &'a FileShared,
+    /// Where the record is, for errors.
     at: RecordAt,
 }
 
@@ -236,14 +246,10 @@ impl<'a> FormatView<'a> {
 /// One FORMAT field's values, sample by sample.
 #[derive(Debug, Clone, Copy)]
 enum FieldAt<'a> {
+    /// The field's column, every sample's elements back to back.
     Bcf(FormatColumn<'a>),
     /// The `k`th FORMAT key's cells, read from the index one sample at a time.
-    Text {
-        index: &'a RefCell<FormatIndex>,
-        samples: &'a [u8],
-        k: usize,
-        n_samples: usize,
-    },
+    Text { index: &'a RefCell<FormatIndex>, samples: &'a [u8], k: usize, n_samples: usize },
 }
 
 impl<'a> FieldAt<'a> {
@@ -278,6 +284,8 @@ fn check_sample(sample: Option<SampleIdx>, file: &FileShared) -> Result<(), VcfR
 #[derive(Clone, Copy)]
 pub struct SampleRef<'a> {
     view: FormatView<'a>,
+    /// The sample's place in the data the view holds: its index in the
+    /// header, or 0 when only its column was copied.
     column: usize,
     /// The handle it was asked for by, checked against the record's header.
     sample: Option<SampleIdx>,
@@ -364,8 +372,11 @@ impl<'a> SampleRef<'a> {
 /// One FORMAT field of a record with its id in the file's field table, read
 /// sample by sample as its definition says: what a passthrough copy writes.
 pub(crate) struct DynColumn<'a> {
+    /// The field's id in the input file's field table, which the passthrough
+    /// maps to the output header's.
     pub(crate) id: DictId,
     pub(crate) name: &'a str,
+    /// Its definition, whose `Type` every sample's value is read as.
     pub(crate) def: &'a FormatDef,
     field: FieldAt<'a>,
     file: &'a FileShared,
@@ -494,8 +505,10 @@ impl<'a> SamplesRef<'a> {
 /// One FORMAT field across all samples, in sample order.
 pub struct Column<'a, V> {
     field: FieldAt<'a>,
+    /// The next sample the iterator yields, and one past its last.
     next: usize,
     end: usize,
+    /// What each value is decoded with (its marker is `V`).
     key: FieldId,
     file: &'a FileShared,
     at: RecordAt,

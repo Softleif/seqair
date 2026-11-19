@@ -1,6 +1,9 @@
-//! Scanning a section's bytes into its [`SectionIndex`]: BCF INFO and
+//! Scanning a section's bytes into its index (`index.rs`): BCF INFO and
 //! FORMAT entry by entry, VCF text INFO key by key, VCF text FORMAT keys
 //! and sample cells in one pass (`r[vcf_fields.lazy+4]`, `r[vcf_values.index+2]`).
+//! Each scan maps a key to its `DictId` through the file's field table,
+//! pushes one [`Entry`] per field, and leaves its stopping point in the
+//! index's `Progress`; the index itself decides when to call it.
 
 use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
@@ -13,10 +16,15 @@ use std::ops::{ControlFlow, Range};
 /// (`Some(n)` samples): each key and the byte span of its value.
 #[derive(Debug, Clone)]
 pub(crate) struct BcfEntries<'a> {
+    /// The whole section.
     bytes: &'a [u8],
+    /// Where the next entry starts.
     at: usize,
+    /// How many entries were read; the walk ends at `n` (or on an error).
     walked: usize,
+    /// BCF's `n_info` or `n_fmt`.
     n: usize,
+    /// FORMAT: the samples each value holds.
     samples: Option<usize>,
 }
 

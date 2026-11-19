@@ -18,6 +18,7 @@ pub(crate) const MAX_PLOIDY: usize = 256;
 #[derive(Debug, Clone, Copy)]
 pub struct Stored<'a>(pub(crate) StoredRepr<'a>);
 
+/// Which format the value is in, so each marker picks its decoder.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StoredRepr<'a> {
     Bcf(TypedValue<'a>),
@@ -50,6 +51,8 @@ fn text_vec<'a, T: TextNumber>(
 /// needs from the field's definition.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeCx<'f> {
+    /// Whether a genotype's first allele carries its own phase bit (VCF
+    /// 4.4+, `r[vcf_record.gt_first_phase+3]`), from the file's version.
     pub(crate) first_phase_is_read: bool,
     /// The field's declared `Type`, from its key ([`FieldId`](crate::vcf::record_encoder::FieldId))
     /// or the field table: what [`Any`] decodes as.

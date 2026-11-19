@@ -1,4 +1,9 @@
-//! A record section's index of present fields (`r[vcf_values.index+2]`).
+//! A record section's index of present fields (`r[vcf_values.index+2]`):
+//! [`SectionIndex`] for INFO (and the keys of FORMAT), [`FormatIndex`] for
+//! FORMAT. A component holds one in a `RefCell` and resets it in `fill`;
+//! a view calls [`SectionIndex::find`] / [`FormatIndex::finish`], which
+//! scan on (`entries.rs`) only as far as the access needs
+//! (`r[vcf_fields.lazy+4]`).
 
 use super::entries::BcfEntries;
 use super::error::{KeyKind, RecordError};
@@ -8,10 +13,15 @@ use super::samples::FormatSource;
 pub(crate) use crate::vcf::header::DictId;
 use std::ops::Range;
 
-/// One field present in a section: its id and the byte span of its value.
+/// One field present in a section: its id and where its value is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub(crate) id: DictId,
+    /// `start..end` in the section's bytes ([`Self::span`]): a BCF INFO
+    /// typed value; a BCF FORMAT column (descriptor and every sample's
+    /// elements); the VCF text after an INFO key, its `=` included
+    /// (`InfoSource::value` strips it). A VCF text FORMAT entry holds the
+    /// key's ordinal instead ([`Self::ordinal`]).
     pub(crate) start: u32,
     pub(crate) end: u32,
 }
@@ -58,10 +68,13 @@ pub(crate) enum Progress {
 /// dictionary's size.
 #[derive(Debug, Clone)]
 pub(crate) struct SectionIndex {
+    /// The fields found so far, in record order, first occurrences only.
     entries: Vec<Entry>,
+    /// By `DictId`: `epoch << 16 | slot in entries`.
     table: Vec<u32>,
-    /// Never `0`: a zeroed stamp is never current.
+    /// The current record's stamp; never `0`, so a zeroed stamp is never current.
     epoch: u16,
+    /// Where the scan stopped; the scans in `entries.rs` advance it.
     pub(crate) progress: Progress,
 }
 
