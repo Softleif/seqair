@@ -41,6 +41,7 @@ pub struct Filtered;
 pub struct WithSamples;
 
 // r[impl vcf_passthrough.edit]
+// r[impl vcf_passthrough.edit.alleles]
 /// Record state: a copied record ([`Writer::copy_record`]), whose INFO and
 /// FORMAT fields may be encoded, replaced or removed in any order.
 pub struct Edit;
@@ -148,7 +149,7 @@ pub struct Writer<W: Write, S = Unstarted> {
     /// The index `VcfGz` co-produces; `Bcf` takes only CSI.
     index_kind: IndexKind,
     /// Per-record state outside the format's encoder, reused across records.
-    record: RecordState,
+    pub(crate) record: RecordState,
     _state: PhantomData<S>,
 }
 
@@ -161,6 +162,8 @@ pub(crate) struct RecordState {
     ploidies: Vec<usize>,
     /// Buffers a passthrough copy gathers values in, reused across records.
     pub(crate) copy: super::passthrough::CopyScratch,
+    /// The written header and the field map `copy_record` built from it.
+    pub(crate) implicit: super::passthrough::ImplicitMap,
 }
 
 impl RecordState {
@@ -540,7 +543,7 @@ impl<W: Write> Writer<W> {
         Ok(Writer { inner, contig_names, header, compression, index_kind, record, _state })
     }
 
-    // r[impl record_encoder.write_header]
+    // r[impl record_encoder.write_header+2]
     /// Write the file header. Consumes the `Unstarted` writer and returns `Ready`.
     pub fn write_header(self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
         // r[impl record_encoder.index_kind]
@@ -609,7 +612,11 @@ impl<W: Write> Writer<W> {
             header: Some(header.id()),
             compression: writer.compression,
             index_kind: writer.index_kind,
-            record: RecordState { rlen: RlenState::new(header), ..RecordState::default() },
+            record: RecordState {
+                rlen: RlenState::new(header),
+                implicit: super::passthrough::ImplicitMap::new(header),
+                ..RecordState::default()
+            },
             _state: PhantomData,
         })
     }
@@ -1772,7 +1779,8 @@ impl Escape {
                 const HEX: &[u8; 16] = b"0123456789ABCDEF";
                 for &b in bytes {
                     if matches!(b, b'\t' | b'\n' | b'\r') || b == sep {
-                        let hex = |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
+                        let hex =
+                            |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
                         buf.extend_from_slice(&[b'%', hex(b >> 4), hex(b & 0xF)]);
                     } else {
                         buf.push(b);
@@ -1784,7 +1792,12 @@ impl Escape {
 }
 
 impl<S: InfoPhase> RecordEncoder<'_, S> {
-    pub(crate) fn info_str(&mut self, id: &FieldId, value: &str, escape: Escape) -> Result<(), VcfError> {
+    pub(crate) fn info_str(
+        &mut self,
+        id: &FieldId,
+        value: &str,
+        escape: Escape,
+    ) -> Result<(), VcfError> {
         self.check_key(id)?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1815,7 +1828,12 @@ impl<S: FormatPhase> RecordEncoder<'_, S> {
         }
     }
 
-    pub(crate) fn format_str(&mut self, id: &FieldId, values: &[&str], escape: Escape) -> Result<(), VcfError> {
+    pub(crate) fn format_str(
+        &mut self,
+        id: &FieldId,
+        values: &[&str],
+        escape: Escape,
+    ) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples_inner(), "one string per sample");

@@ -192,11 +192,11 @@ pub mod unified;
 pub(crate) mod writer;
 
 pub use alleles::Alleles;
-pub use passthrough::FieldMap;
 pub use error::{
     AllelesError, FieldMapError, KeyError, KeyKind, MetaLineError, RecordIdProblem, ReservedMarker,
     VcfEncodeError, VcfError, VcfHeaderError,
 };
+pub use passthrough::FieldMap;
 // The builder's `Samples` phase stays at `header::Samples`: `vcf::Samples` is
 // the reader's component.
 pub use header::{

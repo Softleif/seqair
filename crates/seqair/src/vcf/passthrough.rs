@@ -1,6 +1,12 @@
-//! Passthrough writing: copying the records a reader yields into a
-//! [`Writer`], translated through a [`FieldMap`] and open for edits as a
-//! [`RecordEdit`] (`docs/spec/5-vcf-passthrough.md`).
+//! Passthrough writing (`docs/spec/5-vcf-passthrough.md`): the records a
+//! reader yields, copied into a [`Writer`] through a [`FieldMap`] and open
+//! for edits as a [`RecordEdit`]. The reading guide's last section
+//! ([`crate::vcf::reader`], "Writing what you read") shows a conversion and
+//! a rewrite of GT and PS.
+//!
+//! A copy is re-encoded from the reader's values, not copied as bytes, so
+//! every output follows the writer's rules (and is what bcftools writes for
+//! the same records), and editing a copied field is encoding it again.
 
 use super::error::{FieldMapError, KeyKind, VcfError};
 use super::header::{Number, ValueType, VcfHeader};
@@ -11,6 +17,7 @@ use super::unified::{Edit, Escape, Ready, RecordEdit, Writer};
 use seqair_types::{SmallVec, SmolStr};
 use std::borrow::Cow;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
@@ -38,7 +45,7 @@ enum Target {
 #[derive(Debug)]
 pub struct FieldMap {
     input: VcfFile,
-    output: VcfHeader,
+    output: Arc<VcfHeader>,
     /// By input dictionary id (the header's and, for VCF text, the reserved).
     info: Vec<Target>,
     format: Vec<Target>,
@@ -63,7 +70,16 @@ impl FieldMap {
     /// contig the output lacks, and [`FieldMapError::SampleMismatch`] unless
     /// both have the same samples in the same order.
     pub fn new(input: &VcfFile, output: &VcfHeader) -> Result<Self, FieldMapError> {
+        Self::build(input, Arc::new(output.clone()))
+    }
+
+    fn build(input: &VcfFile, output: Arc<VcfHeader>) -> Result<Self, FieldMapError> {
         let in_header = input.header();
+        // r[impl vcf_passthrough.field_map.removed]
+        // A name removed from a header derived from the input's is a new
+        // field if declared again, never the input's.
+        let derived = output.parent() == Some(in_header.id());
+        let replaced = |kind, name: &str| derived && output.was_removed(kind, name);
         let (ins, outs) = (in_header.samples(), output.samples());
         if ins != outs {
             let index = ins.iter().zip(outs).take_while(|(a, b)| a == b).count();
@@ -76,9 +92,10 @@ impl FieldMap {
         let contigs = in_header
             .contigs()
             .map(|(contig, _)| {
-                output.contig(contig.name()).map(Some).map_err(|_| FieldMapError::MissingContig {
-                    name: contig.name().clone(),
-                })
+                output
+                    .contig(contig.name())
+                    .map(Some)
+                    .map_err(|_| FieldMapError::MissingContig { name: contig.name().clone() })
             })
             .collect::<Result<_, _>>()?;
         let table = &input.0.fields;
@@ -89,14 +106,22 @@ impl FieldMap {
             info.push(match table.info_def(in_header, id) {
                 Some((name, def)) if declared(KeyKind::Info) => {
                     let declared = in_header.infos().contains_key(name);
-                    target(output, KeyKind::Info, name, def.typ, def.number, declared)?
+                    if replaced(KeyKind::Info, name) {
+                        Target::Removed
+                    } else {
+                        target(&output, KeyKind::Info, name, def.typ, def.number, declared)?
+                    }
                 }
                 _ => Target::ByName,
             });
             format.push(match table.format_def(in_header, id) {
                 Some((name, def)) if declared(KeyKind::Format) => {
                     let declared = in_header.formats().contains_key(name);
-                    target(output, KeyKind::Format, name, def.typ, def.number, declared)?
+                    if replaced(KeyKind::Format, name) {
+                        Target::Removed
+                    } else {
+                        target(&output, KeyKind::Format, name, def.typ, def.number, declared)?
+                    }
                 }
                 _ => Target::ByName,
             });
@@ -104,6 +129,7 @@ impl FieldMap {
         let mut filters = vec![None; in_header.string_map().len()];
         for name in in_header.filters().keys() {
             if let (Ok(input_id), Ok(out)) = (in_header.filter(name), output.filter(name))
+                && !replaced(KeyKind::Filter, name)
                 && let Some(slot) = filters.get_mut(input_id.dict_idx() as usize)
             {
                 *slot = Some(out);
@@ -111,7 +137,7 @@ impl FieldMap {
         }
         Ok(Self {
             input: input.clone(),
-            output: output.clone(),
+            output,
             info,
             format,
             filters,
@@ -287,8 +313,51 @@ pub(crate) struct CopyScratch {
     gts: Vec<Genotype>,
 }
 
+/// The header a writer wrote, and the map its last implicit copy used.
+#[derive(Debug, Default)]
+pub(crate) struct ImplicitMap {
+    output: Option<Arc<VcfHeader>>,
+    map: Option<Arc<FieldMap>>,
+}
+
+impl ImplicitMap {
+    pub(crate) fn new(output: &VcfHeader) -> Self {
+        Self { output: Some(Arc::new(output.clone())), map: None }
+    }
+}
+
 impl<W: Write> Writer<W, Ready> {
+    // r[impl vcf_passthrough.implicit_map]
+    /// Begin a copy of `record` into this writer, whose header is the
+    /// record's (a conversion) or was derived from it with
+    /// [`VcfHeader::to_builder`]: the [`FieldMap`] is built from the two on
+    /// the first record and kept. See [`copy_record_with`](Self::copy_record_with)
+    /// for what a copy writes and how to edit it.
+    ///
+    /// # Errors
+    /// [`VcfError::ForeignRecord`] for a record of an unrelated header (build
+    /// a [`FieldMap`] for those), [`VcfError::FieldMap`] if the map cannot be
+    /// built, and what [`copy_record_with`](Self::copy_record_with) fails with.
+    pub fn copy_record(&mut self, record: &FullRecord) -> Result<RecordEdit<'_>, VcfError> {
+        let implicit = &mut self.record.implicit;
+        let map = match &implicit.map {
+            Some(map) if map.input().id() == record.header_id() => Arc::clone(map),
+            _ => {
+                let output = implicit.output.clone().ok_or(VcfError::HeaderNotWritten)?;
+                let id = record.header_id();
+                if output.id() != id && output.parent() != Some(id) {
+                    return Err(VcfError::ForeignRecord);
+                }
+                let map = Arc::new(FieldMap::build(&record.file(), output)?);
+                implicit.map = Some(Arc::clone(&map));
+                map
+            }
+        };
+        self.copy_record_with(&map, record)
+    }
+
     // r[impl vcf_passthrough.copy]
+    // r[impl vcf_passthrough.copy.equivalence]
     /// Begin a copy of `record`, read from `map`'s input, translated to this
     /// writer's header, `map`'s output: every column, INFO and FORMAT field,
     /// re-encoded as the writer encodes any record. The returned
@@ -303,7 +372,7 @@ impl<W: Write> Writer<W, Ready> {
     /// POS 0, [`VcfError::UndeclaredField`] and [`VcfError::UndeclaredContig`]
     /// for what no header declares, [`VcfError::Read`] for a malformed value,
     /// and what encoding the values can fail with.
-    pub fn copy_record(
+    pub fn copy_record_with(
         &mut self,
         map: &FieldMap,
         record: &FullRecord,
@@ -329,11 +398,7 @@ impl<W: Write> Writer<W, Ready> {
             FilterStatus::Failed(failed) => {
                 let failed = map.failed_filters(record, failed)?;
                 // r[impl vcf_passthrough.field_map.removed]
-                if failed.is_empty() {
-                    enc.filter_pass()
-                } else {
-                    enc.filter_fail(&failed)?
-                }
+                if failed.is_empty() { enc.filter_pass() } else { enc.filter_fail(&failed)? }
             }
         };
         let mut enc = enc.begin_samples().into_state::<Edit>();

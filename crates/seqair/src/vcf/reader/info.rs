@@ -195,8 +195,8 @@ impl<'a> InfoRef<'a> {
     /// [`Self::iter`], each field with its id in the file's field table.
     pub(crate) fn iter_ids(
         &self,
-    ) -> impl Iterator<Item = Result<(DictId, &'a str, &'a InfoDef, DynValue<'a>), VcfReadError>>
-    + use<'a> {
+    ) -> impl Iterator<Item = Result<(DictId, &'a str, &'a InfoDef, DynValue<'a>), VcfReadError>> + use<'a>
+    {
         let this = *self;
         let file = self.file;
         let (error, entries) = match self.index() {
@@ -233,6 +233,11 @@ impl std::fmt::Debug for Info {
 }
 
 impl Info {
+    /// The file the record was read from.
+    pub(crate) fn file(&self) -> &Arc<FileShared> {
+        &self.file
+    }
+
     fn view(&self) -> InfoRef<'_> {
         InfoRef::new(&self.bytes, self.n, &self.index, &self.file, self.at)
     }

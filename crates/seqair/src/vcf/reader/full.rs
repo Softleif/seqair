@@ -57,6 +57,11 @@ impl FullRecord {
         &self.bytes
     }
 
+    /// The file the record was read from.
+    pub(crate) fn file(&self) -> super::VcfFile {
+        super::VcfFile(std::sync::Arc::clone(self.info.file()))
+    }
+
     /// The header the record was read with.
     pub fn header_id(&self) -> HeaderId {
         self.header
