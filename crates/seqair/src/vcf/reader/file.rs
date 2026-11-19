@@ -9,6 +9,7 @@ use super::region_index::VcfIndex;
 use super::rlen::RlenKeys;
 use super::stream::ReaderBuilder;
 use crate::bam::bgzf::{BgzfStream, VirtualOffset, find_bsize};
+use crate::io::{IndexBuilder, IndexError};
 use crate::vcf::header::{MAX_HEADER_TEXT, VcfHeader, VcfVersion};
 use crate::vcf::record_encoder::{ContigId, FilterId};
 use seqair_types::SmolStr;
@@ -278,6 +279,77 @@ impl VcfFile {
             Self::new(Source::Bytes(data), start, index)
         };
         open().map_err(|source| VcfReadError::Open { path: None, source })
+    }
+
+    // r[impl vcf_reader.file.in_memory_index]
+    /// A file held in memory, with a CSI index built by reading every
+    /// record once, so it can be queried and partitioned. Plain VCF text is
+    /// BGZF-compressed in memory first, so its [`format`](Self::format) is
+    /// [`VcfFormat::VcfGz`]. [`Self::from_bytes`] builds no index.
+    ///
+    /// # Errors
+    /// As [`Self::from_bytes`]; a malformed record's error;
+    /// [`OpenError::IndexRecords`] for records out of order.
+    pub fn from_bytes_indexed(data: impl Into<Arc<[u8]>>) -> Result<Self, VcfReadError> {
+        let open_error = |source| VcfReadError::Open { path: None, source };
+        let mut data: Arc<[u8]> = data.into();
+        let mut file = Self::from_bytes(Arc::clone(&data), None)?;
+        if file.format() == VcfFormat::Vcf {
+            let compress = || -> Result<Vec<u8>, crate::io::BgzfError> {
+                let mut bgzf = crate::io::BgzfWriter::new(Vec::new());
+                bgzf.write_all(&data)?;
+                bgzf.finish()
+            };
+            data = compress().map_err(|e| open_error(e.into()))?.into();
+            file = Self::from_bytes(Arc::clone(&data), None)?;
+        }
+        let index = file.index_records()?;
+        Self::from_bytes(data, Some(&index))
+    }
+
+    /// A CSI of the file's records (BGZF), as `bcftools index` would build it.
+    fn index_records(&self) -> Result<Vec<u8>, VcfReadError> {
+        let open_error = |source| VcfReadError::Open { path: None, source };
+        let mut reader = self.reader::<super::Locus>().open()?;
+        let mut records = Vec::new();
+        while let Some(record) = reader.next_placed()? {
+            records.push(record);
+        }
+        // At the end of a stream there may be no block to name: then the
+        // end of the bytes.
+        let len = match &self.0.source {
+            Source::Bytes(bytes) => bytes.len() as u64,
+            Source::Path(_) | Source::Stream => 0,
+        };
+        let end = reader.virtual_offset().unwrap_or(VirtualOffset::new(len, 0));
+        let n_refs = records.iter().map(|r| r.0 as usize).max().map_or(0, |t| t.saturating_add(1));
+        let max_end = records.iter().map(|r| r.2).max();
+        let first = records.first().map_or(end, |r| r.3);
+        let build = || -> Result<Vec<u8>, IndexError> {
+            let mut index = IndexBuilder::csi(n_refs, 14, max_end, first);
+            // Each record ends where the next starts.
+            let ends = records.iter().skip(1).map(|r| r.3).chain([end]);
+            for (&(tid, beg, record_end, _), next) in records.iter().zip(ends) {
+                index.push(tid, beg, record_end, next)?;
+            }
+            index.finish(end)?;
+            let mut out = Vec::new();
+            if self.0.format == VcfFormat::Bcf {
+                index.write_csi(&mut out, n_refs, &[])?;
+            } else {
+                let names: Vec<SmolStr> = (0..n_refs)
+                    .map(|tid| {
+                        u32::try_from(tid)
+                            .ok()
+                            .and_then(|t| self.0.contigs.name(t))
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                index.write_csi_tabix(&mut out, &names)?;
+            }
+            Ok(out)
+        };
+        build().map_err(|source| open_error(OpenError::IndexRecords { source }))
     }
 
     pub(crate) fn new(

@@ -8,6 +8,7 @@ use super::fields::{
 };
 use super::file::{DataStart, FileShared, Input, VcfFile};
 use super::keys::Keys;
+use super::locus::VcfPos;
 use super::query::{self, Partition, Query, RegionInput, Verdict};
 use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord, parse_pos};
 use super::region::{Match, Region};
@@ -917,6 +918,29 @@ impl<F: Fields> Reader<F> {
             }
         };
         Ok(if read { current.as_ref() } else { None })
+    }
+
+    // r[impl vcf_reader.file.in_memory_index]
+    /// The next record's contig tid, 0-based half-open span (a record at
+    /// the telomere counts from the first base, covering at least it) and
+    /// the virtual offset it starts at; `None` at the end, or reading plain
+    /// text, which has no virtual offsets.
+    pub(crate) fn next_placed(
+        &mut self,
+    ) -> Result<Option<(u32, u64, u64, VirtualOffset)>, VcfReadError> {
+        let placed = self.core.next(|_, raw| {
+            let (start, end) = raw.span()?;
+            let pos0 = |p: VcfPos| p.pos0().map_or(0, |p| u64::from(p.as_u32()));
+            let beg = pos0(start);
+            let end = pos0(end).saturating_add(1).max(beg.saturating_add(1));
+            Ok(raw.at.offset.map(|offset| (raw.contig.tid(), beg, end, offset)))
+        })?;
+        Ok(placed.flatten())
+    }
+
+    /// The virtual offset of the next byte the reader would read.
+    pub(crate) fn virtual_offset(&mut self) -> Option<VirtualOffset> {
+        self.core.input.virtual_offset()
     }
 
     // r[impl vcf_reader.records]

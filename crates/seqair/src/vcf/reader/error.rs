@@ -9,6 +9,7 @@ use super::values::MissingElement;
 use crate::bam::bgzf::{BgzfError, VirtualOffset};
 use crate::bam::csi_index::CsiError;
 use crate::bam::index::BaiError;
+use crate::io::IndexError;
 pub use crate::vcf::error::KeyKind;
 use crate::vcf::error::VcfHeaderError;
 use seqair_types::SmolStr;
@@ -111,6 +112,12 @@ pub enum OpenError {
 
     #[error("the index is neither TBI nor CSI")]
     UnknownIndexFormat,
+
+    // r[impl vcf_reader.file.in_memory_index]
+    /// [`VcfFile::from_bytes_indexed`](super::VcfFile::from_bytes_indexed)
+    /// could not index the records: they are out of order.
+    #[error("could not index the records")]
+    IndexRecords { source: IndexError },
 }
 
 /// Where a malformed record is, as far as the reader knows.

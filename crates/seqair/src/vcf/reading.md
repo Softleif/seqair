@@ -223,6 +223,33 @@ assert!(starts.is_sorted());
 # Ok(()) }
 ```
 
+Data built in memory has no index file. `VcfFile::from_bytes_indexed` builds a
+CSI by reading every record once, so a test can query VCF text it wrote
+itself. Plain text is BGZF-compressed in memory first, so the file then says it
+is `VcfGz`: the format is what is read. `from_bytes` never pays for this.
+
+```rust
+use seqair::vcf::{Locus, Region, VcfFile, VcfFormat};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let text = concat!(
+    "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n##contig=<ID=chr2>\n",
+    "##INFO=<ID=END,Number=1,Type=Integer,Description=\"End\">\n",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    "chr1\t100\t.\tA\t<DEL>\t.\t.\tEND=500\n",
+    "chr1\t300\t.\tC\tT\t.\t.\t.\n",
+    "chr2\t10\t.\tG\tA\t.\t.\t.\n",
+);
+let file = VcfFile::from_bytes_indexed(text.as_bytes().to_vec())?;
+assert_eq!(file.format(), VcfFormat::VcfGz);
+let region: Region = "chr1:400-450".parse()?;
+let mut reader = file.reader::<Locus>().query(&region)?;
+// Only the deletion reaches into chr1:400-450.
+assert_eq!(reader.next_record()?.map(ToString::to_string).as_deref(), Some("chr1:100-500"));
+assert!(reader.next_record()?.is_none());
+# Ok(()) }
+```
+
 ## Many threads
 
 `VcfFile` is `Send + Sync + Clone`. Split a file into partitions and read each on

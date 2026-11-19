@@ -21,8 +21,8 @@ use hegel::prelude::*;
 use seqair::vcf::reader::ReadOption;
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, IndexKind, Info, InfoFieldDef, InfoInt, InfoString, Locus, Match,
-    Number, OutputFormat, Partition, PlanError, Region, Scalar, Site, Str, VcfFile, VcfHeader,
-    VcfPos, VcfReadError, Writer,
+    Number, OpenError, OutputFormat, Partition, PlanError, Region, Scalar, Site, Str, VcfFile,
+    VcfFormat, VcfHeader, VcfPos, VcfReadError, Writer,
 };
 use seqair_types::{Pos0, Pos1, SmolStr};
 use std::num::NonZeroUsize;
@@ -74,6 +74,8 @@ struct Rec {
     ref_len: usize,
     /// INFO END, 1-based inclusive, for a `<DEL>`.
     end: Option<u32>,
+    /// Write the `<DEL>`'s span as SVLEN, not END.
+    svlen: bool,
     pad: usize,
 }
 
@@ -96,6 +98,7 @@ fn records(tc: &TestCase, with_end: bool) -> Vec<Rec> {
                 pos,
                 ref_len: tc.draw(gs::integers::<usize>().min_value(1).max_value(6)),
                 end,
+                svlen: tc.draw(gs::booleans()),
                 pad: tc.draw(gs::sampled_from(vec![0, 10, 300, 3000])),
             }
         })
@@ -107,35 +110,8 @@ fn records(tc: &TestCase, with_end: bool) -> Vec<Rec> {
 /// Write `recs` (record `i` has INFO `PAD` = `r{i}` and padding, so blocks
 /// fill and every record is told apart) and index it with `indexer`.
 fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> Generated {
-    let mut b = VcfHeader::builder();
-    let contigs: Vec<ContigId> = CONTIGS
-        .iter()
-        .map(|c| b.register_contig(*c, ContigDef::new(Some(u64::from(CONTIG_LEN)))).unwrap())
-        .collect();
-    let mut b = b.filters().infos();
-    let end: InfoInt = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("END", "end")).unwrap();
-    let pad: InfoString =
-        b.register_info(&InfoFieldDef::<Str>::with_number("PAD", Number::Count(1), "pad")).unwrap();
-    let header = b.build().unwrap();
-
-    let mut out = Vec::new();
     let kind = if indexer == Indexer::SeqairTbi { IndexKind::Tbi } else { IndexKind::Csi };
-    let mut w = Writer::new(&mut out, format).index_kind(kind).write_header(&header).unwrap();
-    for (i, r) in recs.iter().enumerate() {
-        let reference: String = "ACGTAC"[..r.ref_len].to_owned();
-        let alt = if r.end.is_some() { "<DEL>" } else { "T" };
-        let alleles = Alleles::complex(reference, [alt]);
-        let enc =
-            w.begin_record(&contigs[r.contig], Pos1::new(r.pos).unwrap(), &alleles, None).unwrap();
-        let mut enc = enc.filter_pass();
-        if let Some(e) = r.end {
-            end.encode(&mut enc, e as i32).unwrap();
-        }
-        pad.encode(&mut enc, &format!("r{i}{}", "x".repeat(r.pad))).unwrap();
-        enc.emit().unwrap();
-    }
-    let (_, index) = w.finish().unwrap();
-
+    let (out, index) = write(recs, format, kind);
     let dir = tempfile::tempdir().unwrap();
     let ext = if format == OutputFormat::Bcf { "bcf" } else { "vcf.gz" };
     let path = dir.path().join(format!("x.{ext}"));
@@ -154,6 +130,51 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
         }
     }
     Generated { _dir: dir, path }
+}
+
+/// `recs` written as `format`, with the writer's index of `kind`.
+fn write(
+    recs: &[Rec],
+    format: OutputFormat,
+    kind: IndexKind,
+) -> (Vec<u8>, Option<seqair::vcf::CoordinateIndex>) {
+    let mut b = VcfHeader::builder();
+    let contigs: Vec<ContigId> = CONTIGS
+        .iter()
+        .map(|c| b.register_contig(*c, ContigDef::new(Some(u64::from(CONTIG_LEN)))).unwrap())
+        .collect();
+    let mut b = b.filters().infos();
+    let end: InfoInt = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("END", "end")).unwrap();
+    let svlen: seqair::vcf::InfoInts = b
+        .register_info(&InfoFieldDef::<seqair::vcf::Arr<i32>>::with_number(
+            "SVLEN",
+            Number::AlternateBases,
+            "svlen",
+        ))
+        .unwrap();
+    let pad: InfoString =
+        b.register_info(&InfoFieldDef::<Str>::with_number("PAD", Number::Count(1), "pad")).unwrap();
+    let header = b.build().unwrap();
+
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, format).index_kind(kind).write_header(&header).unwrap();
+    for (i, r) in recs.iter().enumerate() {
+        let reference: String = "ACGTAC"[..r.ref_len].to_owned();
+        let alt = if r.end.is_some() { "<DEL>" } else { "T" };
+        let alleles = Alleles::complex(reference, [alt]);
+        let enc =
+            w.begin_record(&contigs[r.contig], Pos1::new(r.pos).unwrap(), &alleles, None).unwrap();
+        let mut enc = enc.filter_pass();
+        match r.end {
+            Some(e) if r.svlen => svlen.encode(&mut enc, &[(e - r.pos) as i32]).unwrap(),
+            Some(e) => end.encode(&mut enc, e as i32).unwrap(),
+            None => {}
+        }
+        pad.encode(&mut enc, &format!("r{i}{}", "x".repeat(r.pad))).unwrap();
+        enc.emit().unwrap();
+    }
+    let (_, index) = w.finish().unwrap();
+    (out, index)
 }
 
 /// A record as the tests compare it: contig, 0-based start, 0-based
@@ -712,4 +733,84 @@ fn contig_dictionary_holes_keep_the_index_numbering() {
             assert_eq!(query_positions(&file, contig), want, "{format:?} {kind:?} {contig}");
         }
     }
+}
+
+// r[verify vcf_reader.file.in_memory_index]
+/// A file indexed in memory queries as the same data on disk indexed by
+/// bcftools (plain VCF compressed by `bgzip`, as `bcftools index` needs),
+/// on records whose REF, END or SVLEN span region boundaries; its
+/// partitions tile the file. Plain text reads as VCF.gz.
+#[hegel::test(test_cases = pinned::cases(20))]
+fn in_memory_indexes_query_as_bcftools_indexes(tc: TestCase) {
+    let Some(bin) = bcftools_bin() else { return };
+    let format =
+        tc.draw(gs::sampled_from(vec![OutputFormat::Vcf, OutputFormat::VcfGz, OutputFormat::Bcf]));
+    let recs = tc.draw(records(true));
+    let (bytes, _) = write(&recs, format, IndexKind::Csi);
+    let memory = VcfFile::from_bytes_indexed(bytes.clone()).unwrap();
+    assert!(memory.has_index());
+    let read_as = if format == OutputFormat::Bcf { VcfFormat::Bcf } else { VcfFormat::VcfGz };
+    assert_eq!(memory.format(), read_as);
+
+    let dir = tempfile::tempdir().unwrap();
+    let ext = if format == OutputFormat::Bcf { "bcf" } else { "vcf.gz" };
+    let path = dir.path().join(format!("x.{ext}"));
+    if format == OutputFormat::Vcf {
+        let bgzip = Path::new(bin).with_file_name("bgzip");
+        let bgzip = if bgzip.exists() { bgzip } else { PathBuf::from("bgzip") };
+        let text = dir.path().join("x.vcf");
+        std::fs::write(&text, &bytes).unwrap();
+        assert!(Command::new(bgzip).arg(&text).status().unwrap().success());
+    } else {
+        std::fs::write(&path, &bytes).unwrap();
+    }
+    let flag = if format != OutputFormat::Bcf && tc.draw(gs::booleans()) { "-t" } else { "-c" };
+    bcftools(bin, &["index", flag, path.to_str().unwrap()]);
+    let disk = VcfFile::open(&path).unwrap();
+
+    // PAD's key, per file.
+    let pad = |file: &VcfFile| -> InfoString { file.header().info_key("PAD").unwrap() };
+    let all = sequential(&memory, &pad(&memory));
+    assert_eq!(all, sequential(&disk, &pad(&disk)));
+    let regions = tc.draw(gs::vecs(drawn()).min_size(1).max_size(4));
+    let matching = tc.draw(gs::sampled_from(vec![Match::Overlapping, Match::StartsIn]));
+    let query = |file: &VcfFile, r: &Drawn| {
+        let mut q = file.reader::<(Locus, Info)>().matching(matching).query(r.region()).unwrap();
+        drain(&mut q, &pad(file))
+    };
+    for r in &regions {
+        assert_eq!(query(&memory, r), query(&disk, r), "{r:?} {matching:?}");
+    }
+    let many = |file: &VcfFile| {
+        let mut q = file
+            .reader::<(Locus, Info)>()
+            .matching(matching)
+            .query_many(regions.iter().map(Drawn::region))
+            .unwrap();
+        drain(&mut q, &pad(file))
+    };
+    assert_eq!(many(&memory), many(&disk));
+    let n = NonZeroUsize::new(tc.draw(gs::integers::<usize>().min_value(1).max_value(9))).unwrap();
+    let mut tiled = Vec::new();
+    for p in memory.partitions(n).unwrap() {
+        let mut q = memory.reader::<(Locus, Info)>().partition(&p).unwrap();
+        tiled.extend(drain(&mut q, &pad(&memory)));
+    }
+    assert_eq!(tiled, all);
+}
+
+// r[verify vcf_reader.file.in_memory_index]
+/// Records out of order are refused, as `bcftools index` refuses them;
+/// `from_bytes` builds no index.
+#[test]
+fn unsorted_bytes_are_not_indexed() {
+    let text = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t20\t.\tA\tT\t.\t.\t.\nchr1\t10\t.\tA\tT\t.\t.\t.\n";
+    assert!(!VcfFile::from_bytes(text.as_bytes().to_vec(), None).unwrap().has_index());
+    let e = VcfFile::from_bytes_indexed(text.as_bytes().to_vec()).unwrap_err();
+    assert!(
+        matches!(e, VcfReadError::Open { path: None, source: OpenError::IndexRecords { .. } }),
+        "{e:?}"
+    );
 }
