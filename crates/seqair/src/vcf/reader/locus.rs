@@ -53,12 +53,15 @@ impl VcfPos {
 
 // r[impl vcf_values.rlen+3]
 /// A record's start and inclusive end from its 0-based position (−1 for the
-/// telomere) and reference length: the end is `start + rlen − 1`.
+/// telomere) and reference length: the end is `start + rlen − 1`, the start
+/// for an `rlen` of 0. A negative `rlen` is malformed.
 pub(crate) fn span_of(pos: i64, rlen: i64) -> Result<(VcfPos, VcfPos), RecordError> {
     let start = pos.saturating_add(1);
-    let end = start.saturating_add(rlen).saturating_sub(1);
+    let end = start.saturating_add(rlen.max(1)).saturating_sub(1);
     let start = VcfPos::from_one_based(start).ok_or(RecordError::InvalidPosition { pos })?;
-    let end = VcfPos::from_one_based(end).ok_or(RecordError::InvalidSpan { pos, rlen })?;
+    let end = VcfPos::from_one_based(end)
+        .filter(|_| rlen >= 0)
+        .ok_or(RecordError::InvalidSpan { pos, rlen })?;
     Ok((start, end))
 }
 
@@ -157,6 +160,7 @@ mod tests {
     use super::*;
 
     // r[verify vcf_fields.locus+3]
+    // r[verify vcf_values.rlen+3]
     #[test]
     fn positions_and_spans() {
         let at = |p| VcfPos::At(Pos1::new(p).unwrap());
@@ -166,7 +170,16 @@ mod tests {
         assert_eq!(locus(-1, 1).unwrap(), (VcfPos::Telomere, VcfPos::Telomere));
         assert_eq!(locus(-1, 2).unwrap(), (VcfPos::Telomere, at(1)));
         assert!(matches!(locus(-2, 1), Err(RecordError::InvalidPosition { pos: -2 })));
-        assert!(matches!(locus(0, -5), Err(RecordError::InvalidSpan { .. })));
+        // An rlen of 0 spans the start base, at the telomere too; a
+        // negative one is malformed wherever the record starts.
+        assert_eq!(locus(99, 0).unwrap(), (at(100), at(100)));
+        assert_eq!(locus(-1, 0).unwrap(), (VcfPos::Telomere, VcfPos::Telomere));
+        for pos in [-1, 0, 99] {
+            for rlen in [-1, -6, i64::from(i32::MIN)] {
+                assert!(matches!(locus(pos, rlen), Err(RecordError::InvalidSpan { .. })));
+            }
+        }
+        assert!(matches!(locus(9, i64::from(i32::MAX)), Err(RecordError::InvalidSpan { .. })));
         assert!(matches!(locus(i64::from(i32::MAX), 2), Err(RecordError::InvalidPosition { .. })));
         assert!(VcfPos::Telomere < at(1));
         assert_eq!((at(7).pos1(), at(7).pos0()), (Pos1::new(7), Some(Pos0::new(6).unwrap())));
