@@ -67,6 +67,9 @@ String values MUST be returned as stored, after UTF-8 validation (`from_utf8`, t
 r[vcf_values.gt+2]
 `GenotypeRef` MUST yield each allele as `Option<u16>` (`None` for `.`) with its phase, offer `get(i)` and `ploidy()`, read the first allele's phase bit per `r[vcf_record.gt_first_phase]`, handle a ploidy that varies per sample (BCF pads with end-of-vector), and convert to the writer's owned `Genotype`.
 
+r[vcf_values.gt_phased]
+`GenotypeRef::is_phased()` MUST say whether the genotype is phased whatever the file's version, by htslib's inference for a first allele without a phase indicator: a haploid genotype is phased unless its allele is `.`, any other is phased iff every allele after the first is. Before VCF 4.4 the first allele's own phase bit is always unphased (`r[vcf_record.gt_first_phase]`), so code ported from htslib that compares the first allele's phase with the others' reads `0|1` as unphased in VCF 4.3 (rastair's `convert` did); `is_phased` is what such code means.
+
 r[vcf_values.qual]
 `qual()` MUST return `Option<f32>`: `None` for `.` or BCF's missing bit pattern, the stored `f32` otherwise, negative, huge and NaN values included. It MUST NOT return `Phred`: that type is `f64`, documented non-negative, and its `as_int` clamps to 0..=99, while QUAL values reach the thousands. BCF to BCF stays bit-exact.
 

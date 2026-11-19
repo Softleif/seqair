@@ -282,6 +282,21 @@ impl GenotypeRef<'_> {
         self.0.len()
     }
 
+    // r[impl vcf_values.gt_phased]
+    /// Whether the genotype is phased, in any VCF version: a haploid one
+    /// unless its allele is `.`, any other iff every allele after the first
+    /// is phased (htslib's inference for a first allele without a phase
+    /// indicator). Before VCF 4.4 the first allele's own phase is always
+    /// unphased, so compare this, not that, with other genotypes.
+    pub fn is_phased(&self) -> bool {
+        let mut alleles = self.0.clone();
+        let Some(first) = alleles.next() else { return false };
+        if alleles.len() == 0 {
+            return first.allele.is_some();
+        }
+        alleles.all(|a| a.phased)
+    }
+
     /// The writer's owned [`Genotype`].
     pub fn to_genotype(&self) -> Genotype {
         self.0.clone().into_genotype()

@@ -85,6 +85,11 @@ assert!(hom_alt > 0);
 # Ok(()) }
 ```
 
+Each allele carries its own phase, as the file stores it; before VCF 4.4 a
+genotype has no phase for its first allele, so `0|1` reads as an unphased
+`0` and a phased `1`. Ask `genotype.is_phased()` whether the genotype is
+phased: it answers the same in every version, as htslib infers it.
+
 On a multi-sample file, `OnlySample` refuses to open rather than silently
 reading the first sample; pick one by name with `Sample`:
 
