@@ -166,15 +166,16 @@ impl CsiRefIndex {
         &'a self,
         candidates: &'a [u32],
     ) -> impl Iterator<Item = &'a CsiBin> + 'a {
-        candidates.iter().flat_map(move |&id| {
+        // Both lists are sorted: look the shorter one up in the longer. An
+        // open-ended query on a long contig has more candidates than bins.
+        let by_bins = candidates.len() > self.sorted_ids.len();
+        let by_candidates = candidates.iter().take_while(move |_| !by_bins).flat_map(move |&id| {
             let lo = self.sorted_ids.partition_point(|&(b, _)| b < id);
-            self.sorted_ids
-                .get(lo..)
-                .unwrap_or(&[])
-                .iter()
-                .take_while(move |&&(b, _)| b == id)
-                .filter_map(|&(_, i)| self.bins.get(i))
-        })
+            self.sorted_ids.get(lo..).unwrap_or(&[]).iter().take_while(move |&&(b, _)| b == id)
+        });
+        let in_bins = self.sorted_ids.iter().take_while(move |_| by_bins);
+        let in_bins = in_bins.filter(|(b, _)| candidates.binary_search(b).is_ok());
+        by_candidates.chain(in_bins).filter_map(|&(_, i)| self.bins.get(i))
     }
 }
 

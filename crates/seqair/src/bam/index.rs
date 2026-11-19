@@ -78,10 +78,15 @@ impl RefIndex {
 
     /// The bins whose id is in `candidates`.
     fn candidate_bins<'a>(&'a self, candidates: &'a [u32]) -> impl Iterator<Item = &'a Bin> + 'a {
-        candidates.iter().flat_map(move |&id| {
+        // Both lists are sorted: look the shorter one up in the longer. An
+        // open-ended query on a long contig has more candidates than bins.
+        let by_bins = candidates.len() > self.bins.len();
+        let by_candidates = candidates.iter().take_while(move |_| !by_bins).flat_map(move |&id| {
             let lo = self.bins.partition_point(|b| b.bin_id < id);
             self.bins.get(lo..).unwrap_or(&[]).iter().take_while(move |b| b.bin_id == id)
-        })
+        });
+        let in_bins = self.bins.iter().take_while(move |_| by_bins);
+        by_candidates.chain(in_bins.filter(|b| candidates.binary_search(&b.bin_id).is_ok()))
     }
 }
 
@@ -371,7 +376,8 @@ impl BamIndex {
         let candidate_bins = reg2bins(start_u64, end_u64.wrapping_add(1));
         let linear_min = linear_index_min(ref_idx, start_u64);
         let mut result = Vec::new();
-        for bin in ref_idx.candidate_bins(&candidate_bins) {
+        // Every bin, not `candidate_bins`: the diagnostic scan checks the query's lookup.
+        for bin in ref_idx.bins.iter().filter(|b| candidate_bins.contains(&b.bin_id)) {
             for chunk in &bin.chunks {
                 if chunk.end > linear_min {
                     result.push(AnnotatedChunk { chunk: *chunk, bin_id: bin.bin_id });
