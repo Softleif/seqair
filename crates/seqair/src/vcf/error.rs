@@ -348,4 +348,65 @@ pub enum VcfError {
 
     #[error("failed to write float field")]
     FailedToWriteFormattedString { source: WriteError },
+
+    // r[impl vcf_passthrough.copy]
+    #[error("the writer's header is not the output header of the field map")]
+    ForeignFieldMap,
+
+    // r[impl vcf_passthrough.copy]
+    #[error("the record was not read with the input header of the field map")]
+    ForeignRecord,
+
+    // r[impl vcf_passthrough.copy]
+    #[error("a record on {contig} at the telomere (POS 0) cannot be written")]
+    TelomereRecord { contig: SmolStr },
+
+    // r[impl vcf_passthrough.undeclared]
+    #[error("{kind} {name} is declared by neither the input nor the output header")]
+    UndeclaredField { kind: KeyKind, name: SmolStr },
+
+    // r[impl vcf_passthrough.field_map.contigs]
+    #[error("contig {name} is not declared by the output header")]
+    UndeclaredContig { name: SmolStr },
+
+    #[error(transparent)]
+    FieldMap(#[from] FieldMapError),
+
+    /// A copied record's value could not be read.
+    #[error(transparent)]
+    Read(Box<crate::vcf::reader::VcfReadError>),
+}
+
+impl From<crate::vcf::reader::VcfReadError> for VcfError {
+    fn from(e: crate::vcf::reader::VcfReadError) -> Self {
+        Self::Read(Box::new(e))
+    }
+}
+
+// r[impl vcf_passthrough.field_map]
+/// Why an input header's fields cannot be mapped to an output header's.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FieldMapError {
+    // r[impl vcf_passthrough.field_map.compatible]
+    #[error(
+        "{kind} field {name} is Type={input_type},Number={input_number} in the input but \
+         Type={output_type},Number={output_number} in the output"
+    )]
+    Incompatible {
+        kind: KeyKind,
+        name: SmolStr,
+        input_type: ValueType,
+        input_number: Number,
+        output_type: ValueType,
+        output_number: Number,
+    },
+
+    // r[impl vcf_passthrough.field_map.contigs]
+    #[error("contig {name} of the input is not declared by the output header")]
+    MissingContig { name: SmolStr },
+
+    // r[impl vcf_passthrough.field_map.samples]
+    #[error("sample column {index} is {input:?} in the input but {output:?} in the output")]
+    SampleMismatch { index: usize, input: Option<SmolStr>, output: Option<SmolStr> },
 }

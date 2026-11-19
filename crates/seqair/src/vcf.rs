@@ -184,6 +184,7 @@ pub(crate) mod encoder;
 pub mod error;
 pub(crate) mod field_set;
 pub mod header;
+pub mod passthrough;
 pub mod reader;
 pub mod record;
 pub mod record_encoder;
@@ -191,8 +192,9 @@ pub mod unified;
 pub(crate) mod writer;
 
 pub use alleles::Alleles;
+pub use passthrough::FieldMap;
 pub use error::{
-    AllelesError, KeyError, KeyKind, MetaLineError, RecordIdProblem, ReservedMarker,
+    AllelesError, FieldMapError, KeyError, KeyKind, MetaLineError, RecordIdProblem, ReservedMarker,
     VcfEncodeError, VcfError, VcfHeaderError,
 };
 // The builder's `Samples` phase stays at `header::Samples`: `vcf::Samples` is
@@ -224,7 +226,8 @@ pub use record_encoder::{
 /// Positions and regions as readers take and return them.
 pub use seqair_types::{Pos0, Pos1, RegionString};
 pub use unified::{
-    Begun, CoordinateIndex, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer,
+    Begun, CoordinateIndex, Edit, Filtered, FormatPhase, InfoPhase, Ready, RecordEdit,
+    RecordEncoder, Unstarted, WithSamples, Writer,
 };
 
 /// Output format for [`Writer`].

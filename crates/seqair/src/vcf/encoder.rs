@@ -211,6 +211,32 @@ impl FieldTracker {
     }
 }
 
+impl FieldTracker {
+    // r[impl vcf_passthrough.edit.remove]
+    /// Remove field `dict_idx` from `buf`, keeping the others in place;
+    /// `false` if it was not written. `skip_sep`: VCF text, where every field
+    /// but the first starts with `;`, so removing the first takes the next
+    /// one's `;` with it.
+    pub(crate) fn remove(&mut self, buf: &mut Vec<u8>, dict_idx: u32, skip_sep: bool) -> bool {
+        if !self.seen.remove(dict_idx) {
+            return false;
+        }
+        let Some(idx) = self.find(dict_idx) else { return false };
+        let (start, end) = self.byte_range(idx, buf.len());
+        let next_sep = usize::from(skip_sep && idx == 0 && self.entries.len() > 1);
+        let end = end.saturating_add(next_sep).min(buf.len());
+        buf.drain(start..end);
+        self.adjust_after(idx, end.saturating_sub(start), 0);
+        self.entries.remove(idx);
+        if next_sep == 1
+            && let Some(first) = self.entries.first_mut()
+        {
+            first.1 = start;
+        }
+        true
+    }
+}
+
 // ── BcfRecordEncoder ────────────────────────────────────────────────────
 
 /// Zero-allocation BCF record encoder. Borrows the writer's buffers.

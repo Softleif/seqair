@@ -8,7 +8,9 @@ use super::field_set::FieldSet;
 use super::header::{HeaderId, VcfHeader};
 use super::reader::rlen::{RlenColumns, RlenKeys, rlen};
 use super::record::Genotype;
-use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
+use super::record_encoder::{
+    ContigId, FieldId, FilterId, FormatEncoder, FormatKey, InfoEncoder, InfoKey,
+};
 use super::writer::{percent_encode_into, write_float_g};
 use super::{IndexKind, OutputFormat};
 use crate::bam::bgzf_writer::BgzfSink;
@@ -37,6 +39,31 @@ pub struct Filtered;
 
 /// Record state: sample count declared, FORMAT fields may be encoded.
 pub struct WithSamples;
+
+// r[impl vcf_passthrough.edit]
+/// Record state: a copied record ([`Writer::copy_record`]), whose INFO and
+/// FORMAT fields may be encoded, replaced or removed in any order.
+pub struct Edit;
+
+/// A copied record open for edits: see [`Writer::copy_record`].
+pub type RecordEdit<'a> = RecordEncoder<'a, Edit>;
+
+mod phase {
+    pub trait Sealed {}
+    impl Sealed for super::Filtered {}
+    impl Sealed for super::WithSamples {}
+    impl Sealed for super::Edit {}
+}
+
+/// The record states that take INFO fields: [`Filtered`] and [`Edit`].
+pub trait InfoPhase: phase::Sealed {}
+impl InfoPhase for Filtered {}
+impl InfoPhase for Edit {}
+
+/// The record states that take FORMAT fields: [`WithSamples`] and [`Edit`].
+pub trait FormatPhase: phase::Sealed {}
+impl FormatPhase for WithSamples {}
+impl FormatPhase for Edit {}
 
 // ── Writer ─────────────────────────────────────────────────────────────
 
@@ -115,7 +142,7 @@ pub struct Writer<W: Write, S = Unstarted> {
     contig_names: Vec<SmolStr>,
     /// The written header's id, set by `write_header`: `begin_record` refuses
     /// a contig resolved from another header.
-    header: Option<HeaderId>,
+    pub(crate) header: Option<HeaderId>,
     /// BGZF settings for `VcfGz` and `Bcf`, applied by `write_header`.
     compression: Compression,
     /// The index `VcfGz` co-produces; `Bcf` takes only CSI.
@@ -127,11 +154,13 @@ pub struct Writer<W: Write, S = Unstarted> {
 
 /// What a record carries besides its bytes, for checks and for its length.
 #[derive(Default)]
-struct RecordState {
+pub(crate) struct RecordState {
     rlen: RlenState,
     /// Each sample's GT ploidy once GT is encoded, for `Number=G` counts
     /// (`r[record_encoder.count_check+3]`); empty before GT.
     ploidies: Vec<usize>,
+    /// Buffers a passthrough copy gathers values in, reused across records.
+    pub(crate) copy: super::passthrough::CopyScratch,
 }
 
 impl RecordState {
@@ -209,6 +238,25 @@ impl RlenState {
         buf.clear();
         buf.extend_from_slice(key);
         Some(buf)
+    }
+
+    // r[impl vcf_passthrough.edit.remove]
+    /// Forget INFO field `dict_idx` if the length depends on it.
+    fn forget_info(&mut self, dict_idx: u32) {
+        if self.end == Some(dict_idx) {
+            self.end_text.clear();
+        }
+        if self.svlen == Some(dict_idx) {
+            self.svlen_text.clear();
+        }
+    }
+
+    // r[impl vcf_passthrough.edit.remove]
+    /// Forget FORMAT field `dict_idx` if it is LEN.
+    fn forget_format(&mut self, dict_idx: u32) {
+        if self.len == Some(dict_idx) {
+            self.len_text.clear();
+        }
     }
 
     /// The buffer FORMAT LEN's samples go into, each after a TAB.
@@ -561,7 +609,7 @@ impl<W: Write> Writer<W> {
             header: Some(header.id()),
             compression: writer.compression,
             index_kind: writer.index_kind,
-            record: RecordState { rlen: RlenState::new(header), ploidies: Vec::new() },
+            record: RecordState { rlen: RlenState::new(header), ..RecordState::default() },
             _state: PhantomData,
         })
     }
@@ -1065,12 +1113,12 @@ pub struct RecordEncoder<'a, S> {
     /// (`r[record_encoder.foreign_keys]`).
     header: HeaderId,
     /// GT ploidies and what the record's length depends on.
-    record: &'a mut RecordState,
+    pub(crate) record: &'a mut RecordState,
     _state: PhantomData<S>,
 }
 
 impl<'a, S> RecordEncoder<'a, S> {
-    fn into_state<T>(self) -> RecordEncoder<'a, T> {
+    pub(crate) fn into_state<T>(self) -> RecordEncoder<'a, T> {
         RecordEncoder {
             inner: self.inner,
             header: self.header,
@@ -1424,7 +1472,7 @@ fn nth_colon_field(buf: &[u8], n: usize) -> (usize, usize) {
 // r[impl record_encoder.info_encoder]
 // r[impl record_encoder.bcf_encoding]
 // r[impl record_encoder.vcf_encoding]
-impl InfoEncoder for RecordEncoder<'_, Filtered> {
+impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
     // r[impl record_encoder.reserved_rejection]
     fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError> {
         self.check_key(id)?;
@@ -1567,25 +1615,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
         Ok(())
     }
     fn info_string(&mut self, id: &FieldId, value: &str) -> Result<(), VcfError> {
-        self.check_key(id)?;
-        match &mut self.inner {
-            EncoderInner::Bcf(enc) => {
-                let start = enc.shared_buf.len();
-                encode_typed_int_key(enc.shared_buf, id.dict_idx());
-                encode_typed_string(enc.shared_buf, value.as_bytes());
-                // r[impl bcf_encoder.info_counting]
-                enc.commit_info_field(id, start);
-            }
-            EncoderInner::Vcf(vcf) => {
-                let start = vcf.begin_info_field();
-                vcf.buf.extend_from_slice(id.name().as_bytes());
-                vcf.buf.push(b'=');
-                // r[impl vcf_writer.percent_encoding]
-                percent_encode_into(vcf.buf, value.as_bytes());
-                vcf.commit_info_field(id, start);
-            }
-        }
-        Ok(())
+        self.info_str(id, value, Escape::Percent)
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
@@ -1715,6 +1745,120 @@ impl<'a> RecordEncoder<'a, Filtered> {
     }
 }
 
+/// How a string value's bytes are written into a VCF text line.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Escape {
+    /// Every character VCF gives a meaning (`r[vcf_writer.percent_encoding]`):
+    /// the colon is the FORMAT subfield delimiter, so a raw `:` (or `;`, TAB,
+    /// …) would corrupt the line and disagree with the length-prefixed BCF
+    /// encoding.
+    Percent,
+    // r[impl vcf_passthrough.copy.values]
+    /// A copied value, which the reader returns as stored: only TAB, LF, CR
+    /// and the section's separator (`;` for INFO, `:` for FORMAT), which
+    /// would break the line.
+    Structure(u8),
+}
+
+impl Escape {
+    fn write(self, buf: &mut Vec<u8>, bytes: &[u8]) {
+        match self {
+            // r[impl vcf_writer.percent_encoding]
+            Self::Percent => percent_encode_into(buf, bytes),
+            Self::Structure(sep) => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                for &b in bytes {
+                    if matches!(b, b'\t' | b'\n' | b'\r') || b == sep {
+                        let hex = |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
+                        buf.extend_from_slice(&[b'%', hex(b >> 4), hex(b & 0xF)]);
+                    } else {
+                        buf.push(b);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<S: InfoPhase> RecordEncoder<'_, S> {
+    pub(crate) fn info_str(&mut self, id: &FieldId, value: &str, escape: Escape) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.shared_buf.len();
+                encode_typed_int_key(enc.shared_buf, id.dict_idx());
+                encode_typed_string(enc.shared_buf, value.as_bytes());
+                // r[impl bcf_encoder.info_counting]
+                enc.commit_info_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                let start = vcf.begin_info_field();
+                vcf.buf.extend_from_slice(id.name().as_bytes());
+                vcf.buf.push(b'=');
+                escape.write(vcf.buf, value.as_bytes());
+                vcf.commit_info_field(id, start);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
+impl<S: FormatPhase> RecordEncoder<'_, S> {
+    fn n_samples_inner(&self) -> usize {
+        match &self.inner {
+            EncoderInner::Bcf(e) => e.n_sample as usize,
+            EncoderInner::Vcf(v) => v.n_samples as usize,
+        }
+    }
+
+    pub(crate) fn format_str(&mut self, id: &FieldId, values: &[&str], escape: Escape) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        self.inner.check_format_room(id)?;
+        debug_assert_eq!(values.len(), self.n_samples_inner(), "one string per sample");
+        // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
+        // string-missing convention), so the column width must leave room for it.
+        // Note: a *non-empty* value of exactly "." is indistinguishable from missing
+        // on read-back — that ambiguity is inherent to BCF/VCF, not specific to us.
+        let width =
+            values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.indiv_buf.len();
+                // BCF FORMAT char vectors are fixed-width: every sample stores `width`
+                // bytes, shorter strings NUL-padded (htslib bcf_enc_vchar).
+                // r[impl bcf_writer.string_encoding]
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, BCF_BT_CHAR);
+                for s in values {
+                    // Match the VCF text path's `.`: an empty string is stored as the
+                    // literal `.` char, which bcftools/noodles render as missing.
+                    let bytes = if s.is_empty() { b"." } else { s.as_bytes() };
+                    enc.indiv_buf.extend_from_slice(bytes);
+                    for _ in bytes.len()..width {
+                        enc.indiv_buf.push(0);
+                    }
+                }
+                enc.commit_format_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.begin_format_field();
+                for (i, s) in values.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                    } else {
+                        escape.write(&mut vcf.sample_bufs[i], s.as_bytes());
+                    }
+                }
+                vcf.commit_format_field(id);
+            }
+        }
+        Ok(())
+    }
+}
+
 // ── WithSamples: FormatEncoder ─────────────────────────────────────────
 
 // r[impl record_encoder.format_encoder]
@@ -1724,7 +1868,7 @@ impl<'a> RecordEncoder<'a, Filtered> {
 // return `SampleCountMismatch` for the same condition; the `debug_assert`s catch
 // direct (untyped) trait calls that bypass that check.
 #[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
-impl FormatEncoder for RecordEncoder<'_, WithSamples> {
+impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
     // r[impl record_encoder.mixed_ploidy]
     fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
         self.check_key(id)?;
@@ -2233,53 +2377,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
-        self.check_key(id)?;
-        self.inner.check_format_room(id)?;
-        debug_assert_eq!(values.len(), self.n_samples(), "one string per sample");
-        // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
-        // string-missing convention), so the column width must leave room for it.
-        // Note: a *non-empty* value of exactly "." is indistinguishable from missing
-        // on read-back — that ambiguity is inherent to BCF/VCF, not specific to us.
-        let width =
-            values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
-        match &mut self.inner {
-            EncoderInner::Bcf(enc) => {
-                let start = enc.indiv_buf.len();
-                // BCF FORMAT char vectors are fixed-width: every sample stores `width`
-                // bytes, shorter strings NUL-padded (htslib bcf_enc_vchar).
-                // r[impl bcf_writer.string_encoding]
-                // r[impl bcf_writer.indiv_field_major]
-                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
-                encode_type_byte(enc.indiv_buf, width, BCF_BT_CHAR);
-                for s in values {
-                    // Match the VCF text path's `.`: an empty string is stored as the
-                    // literal `.` char, which bcftools/noodles render as missing.
-                    let bytes = if s.is_empty() { b"." } else { s.as_bytes() };
-                    enc.indiv_buf.extend_from_slice(bytes);
-                    for _ in bytes.len()..width {
-                        enc.indiv_buf.push(0);
-                    }
-                }
-                enc.commit_format_field(id, start);
-            }
-            EncoderInner::Vcf(vcf) => {
-                vcf.begin_format_field();
-                for (i, s) in values.iter().enumerate() {
-                    if s.is_empty() {
-                        // r[impl vcf_writer.missing_dot]
-                        vcf.sample_bufs[i].push(b'.');
-                    } else {
-                        // r[impl vcf_writer.percent_encoding]
-                        // The colon is the FORMAT subfield delimiter, so a raw `:`
-                        // (or `;`, TAB, …) in the value would corrupt the line and
-                        // disagree with the length-prefixed BCF encoding.
-                        percent_encode_into(&mut vcf.sample_bufs[i], s.as_bytes());
-                    }
-                }
-                vcf.commit_format_field(id);
-            }
-        }
-        Ok(())
+        self.format_str(id, values, Escape::Percent)
     }
     // r[impl record_encoder.format_state_queries]
     fn n_allele(&self) -> usize {
@@ -2307,6 +2405,93 @@ impl<'a> RecordEncoder<'a, WithSamples> {
     pub fn emit(self) -> Result<(), VcfError> {
         emit_inner(self.inner, self.record)
     }
+}
+
+// ── Edit: removal and emit ─────────────────────────────────────────────
+
+impl RecordEncoder<'_, Edit> {
+    // r[impl vcf_passthrough.edit.remove]
+    /// Remove INFO field `key` from the record, keeping the others in order;
+    /// whether it was there.
+    ///
+    /// # Errors
+    /// [`VcfError::ForeignKey`] for a key of another header.
+    pub fn remove_info<V>(&mut self, key: &InfoKey<V>) -> Result<bool, VcfError> {
+        let id = &key.0;
+        self.check_key(id)?;
+        self.record.rlen.forget_info(id.dict_idx());
+        Ok(match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let removed = enc.info_tracker.remove(enc.shared_buf, id.dict_idx(), false);
+                enc.n_info = enc.n_info.saturating_sub(u16::from(removed));
+                removed
+            }
+            EncoderInner::Vcf(vcf) => {
+                let removed = vcf.info_tracker.remove(vcf.buf, id.dict_idx(), true);
+                vcf.info_count = vcf.info_count.saturating_sub(u16::from(removed));
+                removed
+            }
+        })
+    }
+
+    // r[impl vcf_passthrough.edit.remove]
+    /// Remove FORMAT field `key` from the record, for every sample, keeping
+    /// the others in order; whether it was there.
+    ///
+    /// # Errors
+    /// [`VcfError::ForeignKey`] for a key of another header.
+    pub fn remove_format<V>(&mut self, key: &FormatKey<V>) -> Result<bool, VcfError> {
+        let id = &key.0;
+        self.check_key(id)?;
+        self.record.rlen.forget_format(id.dict_idx());
+        let removed = match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let removed = enc.fmt_tracker.remove(enc.indiv_buf, id.dict_idx(), false);
+                enc.n_fmt = enc.n_fmt.saturating_sub(u8::from(removed));
+                removed
+            }
+            EncoderInner::Vcf(vcf) => {
+                let position = vcf.fmt_keys.iter().position(|k| k.as_str() == id.name());
+                match position.filter(|_| vcf.fmt_seen.remove(id.dict_idx())) {
+                    Some(idx) => {
+                        let total = vcf.fmt_keys.len();
+                        vcf.fmt_keys.remove(idx);
+                        for buf in vcf.sample_bufs.iter_mut() {
+                            remove_colon_field(buf, idx, total);
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        if removed && id.name() == "GT" {
+            self.record.ploidies.clear();
+        }
+        Ok(removed)
+    }
+
+    // r[impl vcf_passthrough.edit.emit]
+    /// Write the record (see [`RecordEncoder::<WithSamples>::emit`]).
+    pub fn emit(self) -> Result<(), VcfError> {
+        emit_inner(self.inner, self.record)
+    }
+}
+
+/// Remove the `idx`-th of `total` colon-delimited fields of `buf` with one
+/// of its separators: the one before it, or for the first field the one after.
+fn remove_colon_field(buf: &mut Vec<u8>, idx: usize, total: usize) {
+    if total <= 1 {
+        buf.clear();
+        return;
+    }
+    let (start, end) = nth_colon_field(buf, idx);
+    let range = if idx == 0 {
+        start..end.saturating_add(1).min(buf.len())
+    } else {
+        start.saturating_sub(1)..end
+    };
+    buf.drain(range);
 }
 
 // ── Emit ───────────────────────────────────────────────────────────────

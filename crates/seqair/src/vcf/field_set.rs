@@ -38,6 +38,15 @@ impl FieldSet {
         self.words.get(word).is_some_and(|w| w & mask != 0)
     }
 
+    /// Remove `id`; `true` when it was present.
+    pub(crate) fn remove(&mut self, id: u32) -> bool {
+        let (word, mask) = locate(id);
+        let Some(w) = self.words.get_mut(word) else { return false };
+        let present = *w & mask != 0;
+        *w &= !mask;
+        present
+    }
+
     /// Remove every id, keeping the allocation.
     pub(crate) fn clear(&mut self) {
         self.words.fill(0);
