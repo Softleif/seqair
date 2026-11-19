@@ -62,7 +62,7 @@ r[vcf_reader.query.contigs+2]
 A contig the file declares but the index does not list (it has no records) MUST give an empty query, not an error. A contig name the file does not know MUST fail with `VcfReadError::UnknownContig { name }`, a variant the caller can match to skip it; a `ContigId` of another file's header MUST fail with `VcfReadError::ForeignKey`. rastair and aardvark both carry workarounds for the first case today.
 
 r[vcf_reader.query.many+2]
-`query_many(regions)` and `Reader::requery_many(regions)` MUST sort the regions, merge overlapping and adjacent ones per contig, and yield every record at most once, in file order; under `StartsIn` a record is yielded iff it starts in the union. Visiting regions one by one returns a record that spans two adjacent regions twice; `query_many` is the way to avoid that.
+`query_many(regions)` and `Reader::requery_many(regions)` MUST sort the regions, merge overlapping and adjacent ones per contig, and yield every record at most once, in file order; under `StartsIn` a record is yielded iff it starts in the union. Visiting regions one by one returns a record that spans two adjacent regions twice; `query_many` is the way to avoid that. An empty list of regions yields no record.
 
 r[vcf_reader.query.options]
 `matching(..)` set on a builder that ends in `open()` or `partition(..)` MUST fail with `PlanError::UnusedOption`: sequential reading has no region, and a partition always reads `StartsIn`.
