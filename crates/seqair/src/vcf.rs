@@ -205,7 +205,7 @@ pub use header::{
 pub use reader::{
     Allele, AllelesRef, Any, BcfType, BcfValueError, Column, Coordinate, DecodeCx, DynValue,
     FailedFilters, FieldError, Fields, FilterStatus, FiltersRef, FormatAny, FullRecord,
-    GenotypeRef, GtAllele, Info, InfoAny, InfoRef, IntoRecords, Locus, MAX_LINE_BYTES,
+    GenotypeRef, GtAllele, Info, InfoAny, InfoRef, IntoRecords, LenientKeys, Locus, MAX_LINE_BYTES,
     MAX_RECORD_BYTES, Match, MissingElement, Offending, OnlySample, OptValues, Partition,
     PlanContext, PlanError, RawRecord, ReadKind, ReadOption, Reader, ReaderBuilder, RecordError,
     RecordPart, RecordPlace, RecordSection, Records, Region, RegionContig, RegionEnd, RegionError,

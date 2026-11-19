@@ -1,6 +1,7 @@
 //! A VCF text file's field table (`r[vcf_reader.field_table]`): keys the
-//! header leaves out resolve through the file — reserved ones with their
-//! VCF 4.5 definitions, others as Strings — and read what htslib reads.
+//! header leaves out resolve through a lenient key — reserved ones with
+//! their VCF 4.5 definitions, others as Strings — and read what htslib
+//! reads; plain keys resolve the header's fields only, in VCF and BCF alike.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -41,45 +42,58 @@ fn file(lines: &[&str]) -> VcfFile {
     VcfFile::from_bytes(text(lines).into_bytes(), None).unwrap()
 }
 
-// r[verify vcf_values.file_keys]
-// r[verify vcf_values.optional_keys]
+// r[verify vcf_values.file_keys+2]
+// r[verify vcf_values.optional_keys+2]
+// r[verify vcf_values.lenient_keys]
 // r[verify vcf_reader.field_table]
 #[test]
-fn undeclared_keys_resolve_through_the_file() {
+fn undeclared_keys_resolve_through_lenient_keys() {
     let file = file(&[
         "chr1\t5\t.\tA\t<DEL>\t.\t.\tSVTYPE=DEL;SVLEN=10;END=20;DB;TRID=t1;AN=4\tGT:GQ:ZZ\t0/1:30:q\t1/1:.:.",
     ]);
     // The header resolves only what it declares: it is what a writer writes.
     let err = file.header().info_key::<Str>("SVTYPE").unwrap_err();
     assert_eq!(err, KeyError::UnknownField { name: "SVTYPE".into(), kind: KeyKind::Info });
+    // So does the file, unless asked to be lenient.
+    assert_eq!(file.info_key::<Str>("SVTYPE").unwrap_err(), err);
+    assert_eq!(file.info_key_opt::<Str>("TRID").unwrap(), None);
+    assert_eq!(file.format_key_opt::<Scalar<i32>>("GQ").unwrap(), None);
+    let lenient = file.lenient();
 
     // Reserved, undeclared: typed by VCF 4.5.
-    let svtype: InfoString = file.info_key("SVTYPE").unwrap();
-    let svlen: InfoInts = file.info_key("SVLEN").unwrap();
-    let db: InfoFlag = file.info_key("DB").unwrap();
-    let an: InfoInt = file.info_key("AN").unwrap();
-    let gq: FormatInt = file.format_key("GQ").unwrap();
+    let svtype: InfoString = lenient.info_key("SVTYPE").unwrap();
+    let svlen: InfoInts = lenient.info_key("SVLEN").unwrap();
+    let db: InfoFlag = lenient.info_key("DB").unwrap();
+    let an: InfoInt = lenient.info_key("AN").unwrap();
+    let gq: FormatInt = lenient.format_key("GQ").unwrap();
     assert_eq!(svlen.id().number(), Number::AlternateBases);
     assert!(matches!(
-        file.info_key::<Scalar<f32>>("AN"),
+        lenient.info_key::<Scalar<f32>>("AN"),
         Err(KeyError::TypeMismatch { declared: ValueType::Integer, .. })
     ));
-    assert!(matches!(file.info_key::<Scalar<i32>>("SVLEN"), Err(KeyError::NumberMismatch { .. })));
-    // Declared keys still resolve as the header declares them.
-    let dp: InfoInt = file.info_key("DP").unwrap();
+    assert!(matches!(
+        lenient.info_key::<Scalar<i32>>("SVLEN"),
+        Err(KeyError::NumberMismatch { .. })
+    ));
+    // Declared keys resolve as the header declares them.
+    let dp: InfoInt = lenient.info_key("DP").unwrap();
     assert_eq!(dp, file.header().info_key::<Scalar<i32>>("DP").unwrap());
+    assert_eq!(dp, file.info_key::<Scalar<i32>>("DP").unwrap());
 
     // Other undeclared keys: Strings, for a Str (or Any) key only.
-    let trid: InfoString = file.info_key("TRID").unwrap();
-    let zz: seqair::vcf::FormatString = file.format_key("ZZ").unwrap();
+    let trid: InfoString = lenient.info_key("TRID").unwrap();
+    let zz: seqair::vcf::FormatString = lenient.format_key("ZZ").unwrap();
     assert_eq!(trid.id().number(), Number::Unknown);
     assert_eq!(
-        file.info_key::<Scalar<i32>>("TRID").unwrap_err(),
+        lenient.info_key::<Scalar<i32>>("TRID").unwrap_err(),
         KeyError::UnknownField { name: "TRID".into(), kind: KeyKind::Info }
     );
-    assert_eq!(file.info_key_opt::<Scalar<i32>>("TRID").unwrap(), None);
-    assert!(file.info_key_opt::<Str>("NOPE").unwrap().is_some(), "a String key resolves");
-    assert!(matches!(file.format_key_opt::<Scalar<f32>>("GQ"), Err(KeyError::TypeMismatch { .. })));
+    assert_eq!(lenient.info_key_opt::<Scalar<i32>>("TRID").unwrap(), None);
+    assert!(lenient.info_key_opt::<Str>("NOPE").unwrap().is_some(), "a String key resolves");
+    assert!(matches!(
+        lenient.format_key_opt::<Scalar<f32>>("GQ"),
+        Err(KeyError::TypeMismatch { .. })
+    ));
 
     let rec = file.reader::<FullRecord>().open().unwrap().read().unwrap().unwrap();
     let info = rec.info();
@@ -91,7 +105,7 @@ fn undeclared_keys_resolve_through_the_file() {
     assert_eq!(info.get(&dp).unwrap(), None);
     // r[verify vcf_values.access+2]
     // Present whatever its type, through `Any`.
-    let any = |name| -> seqair::vcf::InfoAny { file.info_key(name).unwrap() };
+    let any = |name| -> seqair::vcf::InfoAny { lenient.info_key(name).unwrap() };
     assert!(info.get(&any("TRID")).unwrap().is_some_and(|v| !v.is_missing()));
     assert!(matches!(info.get(&any("DB")).unwrap(), Some(DynValue::Flag)));
     assert!(matches!(info.get(&any("AN")).unwrap(), Some(DynValue::Int(_))));
@@ -125,16 +139,35 @@ fn undeclared_keys_resolve_through_the_file() {
 }
 
 // r[verify vcf_reader.field_table]
-/// A BCF record names fields by dictionary index: the file has the header's
-/// fields only, and a reserved key it does not declare is unknown.
+// r[verify vcf_values.file_keys+2]
+// r[verify vcf_values.lenient_keys]
+/// One header as VCF text and as BCF: plain keys resolve its fields only,
+/// lenient keys the same undeclared names to the same definitions, and a
+/// BCF record, which names fields by dictionary index, never holds one.
 #[test]
-fn a_bcf_file_has_its_headers_fields_only() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/rastair.bcf");
-    let file = VcfFile::open(path).unwrap();
-    assert!(file.header().infos().get("SVTYPE").is_none());
-    let err = file.info_key::<Str>("SVTYPE").unwrap_err();
-    assert_eq!(err, KeyError::UnknownField { name: "SVTYPE".into(), kind: KeyKind::Info });
-    assert_eq!(file.info_key_opt::<Str>("TRID").unwrap(), None);
+fn text_and_bcf_resolve_the_same_keys() {
+    let header = file(&[]).header().clone();
+    let files: Vec<VcfFile> = [OutputFormat::Vcf, OutputFormat::Bcf]
+        .into_iter()
+        .map(|format| {
+            let (bytes, _) =
+                Writer::new(Vec::new(), format).write_header(&header).unwrap().finish().unwrap();
+            VcfFile::from_bytes(bytes, None).unwrap()
+        })
+        .collect();
+    for file in &files {
+        let unknown =
+            |name: &str| KeyError::UnknownField { name: name.into(), kind: KeyKind::Info };
+        assert_eq!(file.info_key::<Str>("SVTYPE").unwrap_err(), unknown("SVTYPE"));
+        assert_eq!(file.info_key_opt::<Str>("TRID").unwrap(), None);
+        assert_eq!(file.format_key_opt::<Scalar<i32>>("GQ").unwrap(), None);
+        let lenient = file.lenient();
+        let svlen: InfoInts = lenient.info_key("SVLEN").unwrap();
+        assert_eq!(svlen.id().number(), Number::AlternateBases);
+        assert!(lenient.info_key_opt::<Str>("TRID").unwrap().is_some());
+        assert!(lenient.format_key_opt::<Scalar<i32>>("GQ").unwrap().is_some());
+        assert_eq!(lenient.info_key_opt::<Scalar<i32>>("TRID").unwrap(), None);
+    }
 }
 
 // r[verify vcf_values.header_brand+2]
@@ -144,8 +177,8 @@ fn a_bcf_file_has_its_headers_fields_only() {
 #[test]
 fn table_keys_read_their_file_and_no_writer_takes_them() {
     let file = file(&["chr1\t5\t.\tA\tC\t.\t.\tTRID=t1\t.\t.\t."]);
-    let trid: InfoString = file.info_key("TRID").unwrap();
-    let svtype: InfoKey<Str> = file.info_key("SVTYPE").unwrap();
+    let trid: InfoString = file.lenient().info_key("TRID").unwrap();
+    let svtype: InfoKey<Str> = file.lenient().info_key("SVTYPE").unwrap();
     let mut out = Vec::new();
     let mut writer = Writer::new(&mut out, OutputFormat::Vcf).write_header(file.header()).unwrap();
     let chr1 = file.header().contig("chr1").unwrap();
@@ -156,7 +189,7 @@ fn table_keys_read_their_file_and_no_writer_takes_them() {
     assert!(matches!(svtype.encode(&mut enc, "DEL"), Err(VcfError::ForeignKey { .. })));
     // Another file's table keys are foreign to this one.
     let other = self::file(&[]);
-    let foreign: InfoString = other.info_key("TRID").unwrap();
+    let foreign: InfoString = other.lenient().info_key("TRID").unwrap();
     let info = file.reader::<seqair::vcf::Info>().open().unwrap().read().unwrap().unwrap();
     assert_eq!(info.get(&trid).unwrap(), Some("t1"));
     assert!(matches!(info.get(&foreign), Err(seqair::vcf::VcfReadError::ForeignKey { .. })));
@@ -177,7 +210,7 @@ fn the_table_is_shared_by_threads() {
                     // Each thread resolves the keys in another order.
                     let keys: std::collections::HashMap<u32, InfoString> = (0..20)
                         .map(|k| (k + t * 7) % 20)
-                        .map(|k| (k, file.info_key(&format!("K{k}")).unwrap()))
+                        .map(|k| (k, file.lenient().info_key(&format!("K{k}")).unwrap()))
                         .collect();
                     let mut n = 0;
                     let mut reader = file.reader::<(Locus, seqair::vcf::Info)>().open().unwrap();

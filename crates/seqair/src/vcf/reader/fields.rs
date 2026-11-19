@@ -3,6 +3,7 @@
 
 use super::error::VcfReadError;
 use super::file::FileShared;
+use super::keys::LenientKeys;
 use super::raw::RawRecord;
 use crate::vcf::error::KeyError;
 use crate::vcf::header::{SampleIdx, VcfHeader};
@@ -193,7 +194,7 @@ impl<'a> PlanContext<'a> {
     /// # Errors
     /// As `VcfFile::info_key`.
     pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
-        self.file.info_key(name)
+        self.file.info_key(name, false)
     }
 
     /// A FORMAT key, as [`VcfFile::format_key`](super::VcfFile::format_key)
@@ -202,10 +203,10 @@ impl<'a> PlanContext<'a> {
     /// # Errors
     /// As `VcfFile::format_key`.
     pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
-        self.file.format_key(name)
+        self.file.format_key(name, false)
     }
 
-    /// An INFO key, or `None` if the file does not have it.
+    /// An INFO key, or `None` if the header does not declare it.
     ///
     /// # Errors
     /// As [`Self::info_key`], but for `UnknownField`.
@@ -213,7 +214,7 @@ impl<'a> PlanContext<'a> {
         optional(self.info_key(name))
     }
 
-    /// A FORMAT key, or `None` if the file does not have it.
+    /// A FORMAT key, or `None` if the header does not declare it.
     ///
     /// # Errors
     /// As [`Self::format_key`], but for `UnknownField`.
@@ -222,6 +223,13 @@ impl<'a> PlanContext<'a> {
         name: &str,
     ) -> Result<Option<FormatKey<V>>, KeyError> {
         optional(self.format_key(name))
+    }
+
+    // r[impl vcf_values.lenient_keys]
+    /// Keys that also resolve fields the header does not declare, as
+    /// [`VcfFile::lenient`](super::VcfFile::lenient) gives them.
+    pub fn lenient(&self) -> LenientKeys<'a> {
+        LenientKeys(self.file)
     }
 
     /// A FILTER the header declares.

@@ -312,29 +312,38 @@ assert!(longest > 1); // the deletions span more than their first base
 ## Fields a header leaves out, and fields a record lacks
 
 Not every file declares what it uses, and not every record holds every
-field. A VCF text file resolves keys against its header *and* the keys VCF
-4.5 reserves (`SVTYPE`, `SVLEN`, `END`, `PS`, …), typed as VCF defines them;
-any other key it does not declare reads as a String, with a warning. An
-optional field is an `Option` of a key, decided once. And `has` tells a
-field the record does not hold from one it holds as `.`.
+field. `file.info_key` resolves what the header declares, in VCF text and
+BCF alike; a record using a key the header leaves out logs a warning.
+To read such keys anyway, ask for them through `file.lenient()`: a key VCF
+4.5 reserves (`SVTYPE`, `SVLEN`, `END`, `PS`, …) is typed as VCF defines
+it, any other reads as a String, and each name logs a warning. An optional
+field is an `Option` of a key, decided once. And `has` tells a field the
+record does not hold from one it holds as `.`.
 
 ```rust
 use seqair::vcf::{FormatInt, Info, InfoAny, InfoFlag, InfoString, Locus, OnlySample, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let text = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n\
-##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+// (`concat!`: in a doctest, a line starting with `##` loses a `#`.)
+let text = concat!(
+    "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n",
+    "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n",
+    "\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\n\
 chr1\t100\t.\tA\t<DEL>\t.\tPASS\tSVTYPE=DEL;SVLEN=50;TRID=t1\tGT:PS\t0|1:100\n\
 chr1\t200\t.\tC\tT\t.\tPASS\tTRID=.\tGT:PS\t0/1:.\n\
-chr1\t300\t.\tG\tA\t.\tPASS\t.\tGT\t1/1\n";
+chr1\t300\t.\tG\tA\t.\tPASS\t.\tGT\t1/1\n");
 let file = VcfFile::from_bytes(text.as_bytes().to_vec(), None)?;
 
+// The header does not declare SVTYPE: a plain key does not resolve it.
+let plain: Option<InfoString> = file.info_key_opt("SVTYPE")?;
+assert!(plain.is_none());
+let lenient = file.lenient();
 // Reserved by VCF, so typed as VCF says, though the header is silent.
-let svtype: InfoString = file.info_key("SVTYPE")?;
-let ps: FormatInt = file.format_key("PS")?;
+let svtype: InfoString = lenient.info_key("SVTYPE")?;
+let ps: FormatInt = lenient.format_key("PS")?;
 // A tool's own key: present or not, whatever its type.
-let trid: InfoAny = file.info_key("TRID")?;
+let trid: InfoAny = lenient.info_key("TRID")?;
 // An annotation this file may not have: `None` here, an error only if
 // the file declares it as something a flag cannot read.
 let cpg: Option<InfoFlag> = file.info_key_opt("CPG")?;
@@ -366,7 +375,8 @@ assert_eq!(
 
 A key the header does not declare reads only this file: a writer refuses it,
 since the header it writes has no id for the field. BCF names fields by the
-header's dictionary, so a BCF file has exactly the header's fields.
+header's dictionary, so a BCF file has exactly the header's fields: there a
+lenient key resolves the same way but finds nothing.
 `OptArr<T>` (`InfoIntOpts`, `FormatFloatOpts`, …) reads a field of any
 `Number` and lets elements be `.`; `Arr<T>` (`FormatFloats`, …) fails on an
 element missing inside the vector.
@@ -386,10 +396,12 @@ let missing: Result<InfoInt, _> = file.info_key("NOPE");
 assert!(matches!(missing, Err(KeyError::UnknownField { kind: KeyKind::Info, .. })));
 
 // A malformed record says where it is; what is wrong is its source.
-let text = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n\
-##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+let text = concat!(
+    "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n",
+    "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n",
+    "\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
-chr1\t5\t.\tA\tC\t.\t.\tDP=lots\n";
+chr1\t5\t.\tA\tC\t.\t.\tDP=lots\n");
 let file = VcfFile::from_bytes(text.as_bytes().to_vec(), None)?;
 let dp: InfoInt = file.info_key("DP")?;
 let info = file.reader::<seqair::vcf::Info>().open()?.read()?.ok_or("empty")?;
