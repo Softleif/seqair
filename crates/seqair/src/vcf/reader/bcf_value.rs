@@ -190,12 +190,14 @@ impl<'a> TypedValue<'a> {
     // r[impl vcf_values.bcf_sentinels]
     /// The typed value at the start of `bytes`, and its encoded length
     /// (descriptor and elements), so the caller can step to the next one.
+    #[inline]
     pub(crate) fn parse(bytes: &'a [u8]) -> Result<(Self, usize), BcfValueError> {
         Self::parse_column(bytes, 1)
     }
 
     /// The values of `n` samples at the start of `bytes` (a FORMAT field's,
     /// after its key), and their encoded length.
+    #[inline]
     pub(crate) fn parse_column(bytes: &'a [u8], n: usize) -> Result<(Self, usize), BcfValueError> {
         let (ty, count, header) = descriptor(bytes)?;
         let len = payload_len(ty, count, n)?;

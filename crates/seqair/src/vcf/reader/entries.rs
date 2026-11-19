@@ -86,7 +86,11 @@ impl<'a> BcfEntries<'a> {
         let rest = self.bytes.get(self.at..).unwrap_or_default();
         let (key, key_len) = read_typed_int(rest)?;
         let value = rest.get(key_len..).unwrap_or_default();
-        let len = TypedValue::parse_column(value, self.samples.unwrap_or(1))?.1;
+        // One value is the common case, worth a call that folds `n = 1`.
+        let len = match self.samples {
+            None => TypedValue::parse(value)?.1,
+            Some(n) => TypedValue::parse_column(value, n)?.1,
+        };
         let start = self.at.saturating_add(key_len);
         let end = start.saturating_add(len);
         self.at = end;
