@@ -551,7 +551,11 @@ impl<W: Write> Writer<W> {
             return Err(VcfError::TbiForBcf);
         }
         let mut writer = self.apply_compression()?;
-        let header_text = header.to_vcf_text();
+        // r[impl vcf_header.serialization+2]
+        let header_text = match writer.inner {
+            WriterInner::Bcf { .. } => header.to_bcf_text(),
+            _ => header.to_vcf_text(),
+        };
         // Indexed by rid: a parsed header's contig dictionary may have holes.
         let n_refs = header.contig_map().len();
         // Only compressed output is indexed; plain VCF needs no contig names.

@@ -492,7 +492,7 @@ impl VcfHeader {
     /// the copied ones, in call order; a removed line is gone, and an id
     /// removed and registered again gets its old dictionary index back. A new
     /// id gets an index past every one taken (a new FILTER may land after the
-    /// copied INFO ids); [`to_vcf_text`](Self::to_vcf_text) then writes
+    /// copied INFO ids); [`to_bcf_text`](Self::to_bcf_text) then writes
     /// `IDX=` so a reader assigns the indices the writer encodes with.
     ///
     /// ```
@@ -699,7 +699,8 @@ impl VcfHeader {
             contigs: IndexMap::new(),
             samples: Vec::new(),
             other_lines: Vec::new(),
-            other_keys: HashSet::new(),
+            // The ##fileformat line itself: a repeat of it is dropped too.
+            other_keys: HashSet::from([SmolStr::from(format!("fileformat={version}"))]),
             lines: vec![Line::Def { kind: LineKind::Filter, id: pass.clone(), form: None }],
             canonical: true,
             parent: None,
@@ -760,16 +761,23 @@ impl VcfHeader {
         error
     }
 
-    // r[impl vcf_header.serialization]
-    // r[impl vcf_header.parse.preserve]
-    /// Serialize as VCF header text (all ## lines + #CHROM line), in the
-    /// header's line order.
-    ///
-    /// A header whose dictionary a reader of this text would not reproduce
-    /// (its file declared ids with `IDX` gaps, or a removal left a hole) gets
-    /// `IDX=` on every definition line, as htslib writes BCF headers, so a
-    /// re-read assigns the same indices.
+    // r[impl vcf_header.serialization+2]
+    /// The header as a VCF file carries it: every `##` line in order and the
+    /// `#CHROM` line, without `IDX=`, as htslib writes VCF text — a VCF
+    /// record names its fields, so it needs no dictionary index.
     pub fn to_vcf_text(&self) -> String {
+        self.text(false)
+    }
+
+    // r[impl vcf_header.serialization+2]
+    // r[impl vcf_header.parse.preserve+2]
+    /// The header as a BCF file's `l_text` carries it (without the NUL):
+    /// [`to_vcf_text`](Self::to_vcf_text)'s lines, with `IDX=` on every
+    /// definition line when a reader would not assign the header's
+    /// dictionary to them in their order (a parsed file's `IDX` gaps, a
+    /// removal's hole, a removed id registered again), so it decodes the
+    /// records' indices as the writer encoded them.
+    pub fn to_bcf_text(&self) -> String {
         self.text(true)
     }
 
@@ -1638,7 +1646,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // r[verify vcf_header.serialization]
+    // r[verify vcf_header.serialization+2]
     #[test]
     fn serialization_format() {
         let mut builder = VcfHeader::builder();
@@ -1659,7 +1667,7 @@ mod tests {
         assert!(text.contains("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"));
     }
 
-    // r[verify vcf_header.serialization]
+    // r[verify vcf_header.serialization+2]
     /// A quote or backslash in a description is escaped, and attributes the
     /// model does not interpret follow the description in order.
     #[test]
@@ -1682,7 +1690,7 @@ mod tests {
         assert!(text.contains("##contig=<ID=chr1,length=10,md5=abc>\n"), "{text}");
     }
 
-    // r[verify vcf_header.serialization]
+    // r[verify vcf_header.serialization+2]
     #[test]
     fn serialization_no_samples_omits_format_column() {
         let header = VcfHeader::builder().build().unwrap();

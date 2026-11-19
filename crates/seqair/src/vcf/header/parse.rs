@@ -668,6 +668,7 @@ mod tests {
             "#comment\n",
             "##no equals sign\n",
             "##fileformat=VCFv4.1\n",
+            "##fileformat=VCFv4.5\n",
         ))
         .unwrap();
         assert_eq!(
@@ -689,9 +690,41 @@ mod tests {
         assert_eq!(
             h.other_lines(),
             ["no equals sign", "fileformat=VCFv4.1"],
-            "a second ##fileformat is a line, as htslib keeps it"
+            "a second ##fileformat is a line, as htslib keeps it; a repeat of the first is not"
         );
         assert_eq!(h.version(), VcfVersion::V4_5);
+    }
+
+    // r[verify vcf_header.line_form]
+    /// A repeated other line is dropped as htslib's `bcf_hdr_add_hrec` drops
+    /// it (`bcftools view -h` prints these lines once): the same `key=value`,
+    /// or a structured line with the same key and `ID`. The builder drops
+    /// them too.
+    #[test]
+    fn a_repeated_other_line_is_dropped_as_htslib_drops_it() {
+        let h = parse(concat!(
+            "##source=x\n##source=x\n##source=y\n",
+            "##META=<ID=Assay, Type=String>\n##META=<ID=Assay,Type=Other>\n",
+            "##ALT=<ID=Assay,Description=\"other key\">\n",
+            "##META=<Type=no id>\n##META=<Type=no id>\n",
+        ))
+        .unwrap();
+        let expected = [
+            "source=x",
+            "source=y",
+            "META=<ID=Assay,Type=String>",
+            "ALT=<ID=Assay,Description=\"other key\">",
+            "META=<Type=no id>",
+            "META=<Type=no id>",
+        ];
+        assert_eq!(h.other_lines(), expected);
+        let mut builder = h.to_builder();
+        builder.add_other_line("source=y");
+        builder.add_other_line("META=<ID=Assay,Type=Third>");
+        builder.add_other_line("source=z");
+        let h = builder.build().unwrap();
+        assert_eq!(h.other_lines().len(), expected.len() + 1);
+        assert!(h.to_vcf_text().contains("##META=<Type=no id>\n##source=z\n#CHROM"));
     }
 
     // r[verify vcf_header.parse]
@@ -736,8 +769,9 @@ mod tests {
         // r[verify vcf_header.line_order]
         // Written back in the order read, the lines give the same dictionary
         // without IDX.
-        let text = h.to_vcf_text();
+        let text = h.to_bcf_text();
         assert!(!text.contains("IDX="), "{text}");
+        assert_eq!(text, h.to_vcf_text());
         let again = VcfHeader::parse(&text).unwrap();
         assert_eq!(again.string_map(), h.string_map());
         assert_eq!(again.contig_map(), h.contig_map());
@@ -766,8 +800,11 @@ mod tests {
     fn a_repeated_reserved_key_reads_and_writes_as_the_first() {
         let h = parse("##FILTER=<ID=f,Description=\"\",IDX=7,x=y,IDX=2,ID=g>\n").unwrap();
         assert_eq!(h.string_map().get("f"), Some(7));
-        // As htslib writes it: every key as read, IDX last.
+        // As htslib writes it: every key as read, but IDX.
         let text = h.to_vcf_text();
+        assert!(text.contains("##FILTER=<ID=f,Description=\"\",x=y,ID=g>\n"), "{text}");
+        assert_eq!(VcfHeader::parse(&text).unwrap().filters().keys().nth(1).unwrap(), "f");
+        let text = h.to_bcf_text();
         assert!(text.contains("##FILTER=<ID=f,Description=\"\",x=y,ID=g,IDX=7>"), "{text}");
         let again = VcfHeader::parse(&text).unwrap();
         assert_eq!(again.string_map(), h.string_map());
@@ -794,7 +831,9 @@ mod tests {
         // r[verify vcf_header.contigs]
         let contigs: Vec<_> = h.contigs().map(|(c, _)| (c.index(), c.name().clone())).collect();
         assert_eq!(contigs, [(3, "c".into())], "by IDX, the holes skipped");
-        let text = h.to_vcf_text();
+        // r[verify vcf_header.serialization+2]
+        assert!(!h.to_vcf_text().contains("IDX="), "VCF text never carries IDX");
+        let text = h.to_bcf_text();
         assert!(
             text.contains("##FILTER=<ID=PASS,Description=\"All filters passed\",IDX=0>"),
             "{text}"

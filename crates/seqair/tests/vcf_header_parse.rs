@@ -115,7 +115,7 @@ fn snapshot(h: &VcfHeader) -> Snapshot {
     }
 }
 
-// r[verify vcf_header.parse.round_trip]
+// r[verify vcf_header.parse.round_trip+2]
 // r[verify vcf_header.parse.dictionary]
 /// Real headers get the dictionary htslib gives them: the BCF ones by their
 /// `IDX=` (with the gaps a trimmed gnomAD header leaves, and 1000 Genomes'
@@ -129,24 +129,35 @@ fn real_headers_get_the_dictionaries_bcftools_assigns() {
     }
 }
 
-// r[verify vcf_header.parse.preserve]
-// r[verify vcf_header.parse.round_trip]
+// r[verify vcf_header.parse.preserve+2]
+// r[verify vcf_header.parse.round_trip+2]
+// r[verify vcf_header.serialization+2]
 /// Writing a parsed header back out loses nothing a re-read sees, and where
-/// its dictionary is not the emission order, the `IDX=` it writes give
-/// htslib the same dictionary too.
+/// its dictionary is not its line order, the `IDX=` its BCF text writes give
+/// htslib the same dictionary too. Its VCF text has no `IDX`, and loses
+/// nothing but the dictionary's holes.
 #[test]
 fn real_headers_round_trip() {
     for name in FIXTURES {
         let header = VcfHeader::parse(&fixture(name)).unwrap();
-        let text = header.to_vcf_text();
+        let text = header.to_bcf_text();
         let again = VcfHeader::parse(&text).unwrap_or_else(|e| panic!("{name}: {e}\n{text}"));
         assert_eq!(snapshot(&again), snapshot(&header), "{name}");
         assert_eq!(bcftools_dictionaries(&text), dictionaries(&header), "{name}");
-        assert_eq!(again.to_vcf_text(), text, "{name}: a second round trip is a fixed point");
+        assert_eq!(again.to_bcf_text(), text, "{name}: a second round trip is a fixed point");
 
         // kgp declares FORMAT GT between INFO lines: its line order is its dictionary.
         let gaps = name == "gnomad41_chr22.bcf.header";
         assert_eq!(text.contains(",IDX="), gaps, "{name}: IDX only where needed");
+
+        let vcf = header.to_vcf_text();
+        assert!(!vcf.contains("IDX="), "{name}");
+        let again = VcfHeader::parse(&vcf).unwrap();
+        let (mut ours, mut theirs) = (snapshot(&again), snapshot(&header));
+        assert_eq!(ours.dictionaries, bcftools_dictionaries(&vcf), "{name}");
+        (ours.dictionaries, theirs.dictionaries) = Default::default();
+        assert_eq!(ours, theirs, "{name}: the VCF text loses no line");
+        assert_eq!(again.to_vcf_text(), vcf, "{name}");
     }
 }
 
@@ -281,29 +292,29 @@ fn builder_header(tc: &TestCase) -> VcfHeader {
     builder.build().unwrap()
 }
 
-// r[verify vcf_header.parse.round_trip]
+// r[verify vcf_header.parse.round_trip+2]
 #[hegel::test]
 fn every_builder_header_parses_back_to_itself(tc: TestCase) {
     let header = tc.draw(builder_header());
     let text = header.to_vcf_text();
     let parsed = VcfHeader::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
     assert_eq!(snapshot(&parsed), snapshot(&header), "{text}");
-    assert!(!text.contains(",IDX="), "a built header's dictionary is its emission order");
+    assert_eq!(header.to_bcf_text(), text, "a built header's dictionary is its emission order");
     assert_ne!(parsed.id(), header.id(), "a parsed header is a header of its own");
 }
 
-// r[verify vcf_header.parse.round_trip]
+// r[verify vcf_header.parse.round_trip+2]
 // r[verify vcf_header.parse.dictionary]
 /// bcftools assigns a built header the dictionary seqair encodes records with.
 #[hegel::test(test_cases = pinned::cases(30))]
 fn bcftools_assigns_a_builder_header_the_same_dictionary(tc: TestCase) {
     let header = tc.draw(builder_header());
-    assert_eq!(bcftools_dictionaries(&header.to_vcf_text()), dictionaries(&header));
+    assert_eq!(bcftools_dictionaries(&header.to_bcf_text()), dictionaries(&header));
 }
 
 // ── Derived headers ────────────────────────────────────────────────────
 
-// r[verify vcf_header.to_builder]
+// r[verify vcf_header.to_builder+2]
 // r[verify vcf_header.brand+3]
 /// `to_builder().build()` is the header again, under an id of its own: built
 /// headers, and real ones whose `IDX=` leave gaps and reorder the dictionary.
@@ -316,7 +327,7 @@ fn a_derived_header_is_its_source_but_for_the_id(tc: TestCase) {
     assert_ne!(derived.id(), header.id());
 }
 
-// r[verify vcf_header.to_builder]
+// r[verify vcf_header.to_builder+2]
 #[test]
 fn a_derived_real_header_is_its_source_but_for_the_id() {
     for name in FIXTURES {
@@ -330,7 +341,7 @@ fn a_derived_real_header_is_its_source_but_for_the_id() {
 }
 
 // r[verify vcf_header.remove+2]
-// r[verify vcf_header.to_builder]
+// r[verify vcf_header.to_builder+2]
 /// Removing definitions leaves every other id at its index and the removed
 /// ones' slots empty unless another category still declares them; new ids
 /// go past every slot, and a removed id registered again gets its slot back,
@@ -388,7 +399,7 @@ fn removing_definitions_keeps_every_other_index(tc: TestCase) {
         expected.insert(id.to_string(), header.string_map().get(&id).unwrap());
     }
     assert_eq!(dictionaries(&derived), (expected, contigs));
-    let text = derived.to_vcf_text();
+    let text = derived.to_bcf_text();
     assert_eq!(bcftools_dictionaries(&text), dictionaries(&derived), "{text}");
     let again = VcfHeader::parse(&text).unwrap();
     assert_eq!(snapshot(&again), snapshot(&derived), "{text}");
@@ -420,7 +431,7 @@ fn set_samples_replaces_them_or_leaves_them() {
     assert_eq!(builder.build().unwrap().samples(), ["c", "b"]);
 }
 
-// r[verify vcf_header.to_builder]
+// r[verify vcf_header.to_builder+2]
 // r[verify vcf_header.remove+2]
 /// `HiPhase`'s case: copy the input's header, swap its FORMAT PS for its own
 /// PS and PF, add its `##HiPhase_*` lines, and write records with keys of

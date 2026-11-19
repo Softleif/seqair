@@ -504,7 +504,7 @@ fn multi_sample_bcf_readable_by_bcftools() {
 // ── A dictionary with a hole ───────────────────────────────────────────
 
 // r[verify vcf_header.remove+2]
-// r[verify vcf_header.parse.preserve]
+// r[verify vcf_header.parse.preserve+2]
 /// A derived header with a removed INFO id leaves a hole in the dictionary,
 /// which the written header spells with `IDX=`. noodles honours it: the BCF
 /// it reads renders, field for field, as the VCF text seqair writes.
@@ -525,7 +525,7 @@ fn noodles_reads_a_bcf_whose_dictionary_has_a_hole() {
     let mut builder = builder.build().unwrap().to_builder();
     assert!(builder.remove_info("XX"));
     let header = builder.build().unwrap();
-    assert!(header.to_vcf_text().contains(",IDX="), "a hole is spelled with IDX");
+    assert!(header.to_bcf_text().contains(",IDX="), "a hole is spelled with IDX");
 
     let dp: InfoInt = header.info_key("DP").unwrap();
     let zz: InfoInt = header.info_key("ZZ").unwrap();
