@@ -1,4 +1,5 @@
 //! `CramWriter` against seqair's CRAM reader and samtools.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

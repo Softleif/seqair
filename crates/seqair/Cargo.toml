@@ -146,9 +146,14 @@ required-features = ["cram"]
 name = "cram_tile_sweep"
 required-features = ["cram"]
 
+[[example]]
+name = "cram_write"
+required-features = ["cram"]
+
 [[bench]]
 name = "cram_encode"
 harness = false
+required-features = ["cram"]
 
 [lints]
 workspace = true
