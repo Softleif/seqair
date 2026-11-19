@@ -809,7 +809,7 @@ fn undeclared_keys_fail_are_dropped_or_declared() {
 
 // ── Edits ───────────────────────────────────────────────────────────────
 
-// r[verify vcf_passthrough.edit]
+// r[verify vcf_passthrough.edit+2]
 // r[verify vcf_passthrough.edit.emit]
 /// `HiPhase`'s rewrite: every sample's GT replaced (phased, its ploidy kept),
 /// PS added as an optional integer, PF on some records, the input's String
@@ -896,9 +896,30 @@ fn rewritten_genotypes_and_phase_sets_read_back_and_the_rest_is_copied(tc: TestC
     assert_eq!(rest(out.path()), rest(&vcf), "{format:?}\n{text}");
 }
 
-// r[verify vcf_passthrough.edit]
+/// Counts WARN events; nothing else about tracing matters here.
+struct WarnCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for WarnCounter {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+// r[verify vcf_passthrough.edit+2]
 /// An encode replaces a copied field where it stands, appends a new one,
-/// and INFO may follow FORMAT.
+/// and INFO may follow FORMAT; replacing warns of nothing.
 #[test]
 fn edits_replace_in_place_in_any_order() {
     if !bcftools() {
@@ -911,12 +932,16 @@ fn edits_replace_in_place_in_any_order() {
     let s1: seqair::vcf::InfoString = header.info_key("S1").unwrap();
     let map = FieldMap::new(&file, header).unwrap();
     for format in FORMATS {
-        let out = copy_with(&file, &map, format, |_, edit| {
-            fdp.encode(edit, &[9, 8]).unwrap();
-            dp.encode(edit, 42).unwrap();
-            s1.encode(edit, "new").unwrap();
+        let warns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let out = tracing::subscriber::with_default(WarnCounter(warns.clone()), || {
+            copy_with(&file, &map, format, |_, edit| {
+                fdp.encode(edit, &[9, 8]).unwrap();
+                dp.encode(edit, 42).unwrap();
+                s1.encode(edit, "new").unwrap();
+            })
         })
         .unwrap();
+        assert_eq!(warns.load(std::sync::atomic::Ordering::Relaxed), 0, "{format:?}");
         let lines = text_of(&out, format);
         let lines: Vec<&str> = lines.lines().collect();
         assert_eq!(

@@ -187,7 +187,6 @@ impl FieldTracker {
         &mut self,
         buf: &mut Vec<u8>,
         dict_idx: u32,
-        name: &str,
         start: usize,
         skip_sep: bool,
     ) -> bool {
@@ -195,7 +194,6 @@ impl FieldTracker {
             self.entries.push((dict_idx, start));
             return true;
         }
-        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
         let idx = self.find(dict_idx).expect("`seen` holds exactly the ids in `entries`");
         let (old_start, old_end) = self.byte_range(idx, start);
 
@@ -258,6 +256,9 @@ pub struct BcfRecordEncoder<'a> {
     pub(crate) rlen: i32,
     /// Where REF starts in `shared_buf`: the ID column is `24..alleles_start`.
     pub(crate) alleles_start: usize,
+    /// A passthrough edit (`r[vcf_passthrough.edit+2]`): replacing a field
+    /// is the point, so a duplicate is not warned of.
+    pub(crate) editing: bool,
     // Dedup trackers (borrowed from WriterInner for cross-record reuse)
     pub(crate) info_tracker: &'a mut FieldTracker,
     pub(crate) fmt_tracker: &'a mut FieldTracker,
@@ -488,6 +489,7 @@ mod tests {
             pos_0based: 0,
             rlen: 0,
             alleles_start: 0,
+            editing: false,
             info_tracker,
             fmt_tracker,
         }
@@ -553,7 +555,7 @@ mod tests {
     ) -> bool {
         let start = buf.len();
         buf.extend_from_slice(bytes);
-        t.commit(buf, dict_idx, "f", start, skip_sep)
+        t.commit(buf, dict_idx, start, skip_sep)
     }
 
     #[test]

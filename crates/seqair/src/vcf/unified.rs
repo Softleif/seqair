@@ -40,7 +40,7 @@ pub struct Filtered;
 /// Record state: sample count declared, FORMAT fields may be encoded.
 pub struct WithSamples;
 
-// r[impl vcf_passthrough.edit]
+// r[impl vcf_passthrough.edit+2]
 // r[impl vcf_passthrough.edit.alleles]
 /// Record state: a copied record ([`Writer::copy_record`]), whose INFO and
 /// FORMAT fields may be encoded, replaced or removed in any order.
@@ -672,6 +672,7 @@ impl<W: Write> Writer<W, Ready> {
                     pos_0based: 0,
                     rlen: 0,
                     alleles_start: 0,
+                    editing: false,
                     info_tracker,
                     fmt_tracker,
                 };
@@ -953,6 +954,9 @@ struct VcfEncoderFields<'a> {
     id_range: (usize, usize),
     n_samples: u32,
     filter_written: bool,
+    /// A passthrough edit (`r[vcf_passthrough.edit+2]`): replacing a field
+    /// is the point, so a duplicate is not warned of.
+    editing: bool,
     info_tracker: &'a mut FieldTracker,
     /// The `dict_idx` of every FORMAT field in `fmt_keys`, so the common
     /// first-write path needs no name comparison.
@@ -1040,6 +1044,7 @@ fn begin_vcf_record<'a>(
         id_range,
         n_samples,
         filter_written: false,
+        editing: false,
         info_tracker,
         fmt_seen,
     })
@@ -1129,6 +1134,16 @@ pub struct RecordEncoder<'a, S> {
 }
 
 impl<'a, S> RecordEncoder<'a, S> {
+    // r[impl vcf_passthrough.edit+2]
+    /// This record as an edit of a copy, whose replacements are not warned of.
+    pub(crate) fn into_edit(mut self) -> RecordEncoder<'a, Edit> {
+        match &mut self.inner {
+            EncoderInner::Bcf(e) => e.editing = true,
+            EncoderInner::Vcf(v) => v.editing = true,
+        }
+        self.into_state()
+    }
+
     pub(crate) fn into_state<T>(self) -> RecordEncoder<'a, T> {
         RecordEncoder {
             inner: self.inner,
@@ -1366,8 +1381,10 @@ impl VcfEncoderFields<'_> {
     /// previous occurrence in place (dropping the just-written leading `;` when
     /// the overwritten field is first); a new field bumps `info_count`.
     fn commit_info_field(&mut self, id: &FieldId, start: usize) {
-        if self.info_tracker.commit(self.buf, id.dict_idx(), id.name(), start, true) {
+        if self.info_tracker.commit(self.buf, id.dict_idx(), start, true) {
             self.info_count = self.info_count.saturating_add(1);
+        } else {
+            warn_twice(self.editing, id);
         }
     }
 }
@@ -1378,8 +1395,10 @@ impl BcfRecordEncoder<'_> {
     /// `shared_buf`. On a duplicate, splices the new bytes over the previous
     /// occurrence in place; otherwise bumps `n_info`.
     fn commit_info_field(&mut self, id: &FieldId, start: usize) {
-        if self.info_tracker.commit(self.shared_buf, id.dict_idx(), id.name(), start, false) {
+        if self.info_tracker.commit(self.shared_buf, id.dict_idx(), start, false) {
             self.n_info = self.n_info.saturating_add(1);
+        } else {
+            warn_twice(self.editing, id);
         }
     }
 
@@ -1387,9 +1406,20 @@ impl BcfRecordEncoder<'_> {
     /// FORMAT counterpart of [`commit_info_field`](Self::commit_info_field),
     /// operating on `indiv_buf` and `n_fmt`.
     fn commit_format_field(&mut self, id: &FieldId, start: usize) {
-        if self.fmt_tracker.commit(self.indiv_buf, id.dict_idx(), id.name(), start, false) {
+        if self.fmt_tracker.commit(self.indiv_buf, id.dict_idx(), start, false) {
             self.n_fmt = self.n_fmt.saturating_add(1);
+        } else {
+            warn_twice(self.editing, id);
         }
+    }
+}
+
+// r[impl vcf_passthrough.edit+2]
+/// A field encoded twice into a new record is likely a bug; in an edit of a
+/// copy, replacing it is what the caller asked for.
+fn warn_twice(editing: bool, id: &FieldId) {
+    if !editing {
+        tracing::warn!(field = id.name(), "field encoded twice; overwriting previous value");
     }
 }
 
@@ -1418,10 +1448,7 @@ impl VcfEncoderFields<'_> {
         }
         match self.fmt_keys.iter().position(|k| k.as_str() == id.name()) {
             Some(idx) => {
-                tracing::warn!(
-                    field = id.name(),
-                    "FORMAT field encoded twice; overwriting previous value"
-                );
+                warn_twice(self.editing, id);
                 // `+1`: the appended occupies a transient extra column we now fold away.
                 let total = self.fmt_keys.len().saturating_add(1);
                 for buf in self.sample_bufs.iter_mut() {

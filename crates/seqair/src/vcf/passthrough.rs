@@ -13,7 +13,7 @@ use super::header::{Number, ValueType, VcfHeader};
 use super::reader::{DictId, DynValue, FilterStatus, FullRecord, VcfFile};
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
-use super::unified::{Edit, Escape, Ready, RecordEdit, Writer};
+use super::unified::{Escape, Ready, RecordEdit, Writer};
 use seqair_types::{SmallVec, SmolStr};
 use std::borrow::Cow;
 use std::io::Write;
@@ -402,7 +402,7 @@ impl<W: Write> Writer<W, Ready> {
                 if failed.is_empty() { enc.filter_pass() } else { enc.filter_fail(&failed)? }
             }
         };
-        let mut enc = enc.begin_samples().into_state::<Edit>();
+        let mut enc = enc.begin_samples().into_edit();
         for field in record.info().iter_ids() {
             let (id, name, _, value) = field?;
             if let Some(out) = map.field(KeyKind::Info, id, name)? {
