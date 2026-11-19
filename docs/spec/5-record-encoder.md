@@ -23,7 +23,7 @@ r[record_encoder.writer_typestate]
 The writer MUST use a typestate pattern: `Writer<W, Unstarted>` only exposes `write_header()`, which consumes the writer and returns `Writer<W, Ready>`. `Writer<W, Ready>` exposes `begin_record()` and `finish()`.
 
 r[record_encoder.write_header+2]
-`write_header(self, header: &VcfHeader)` MUST consume the `Unstarted` writer, write the header to the output, set up the index builder, and return a `Ready` writer. Encoding MUST NOT consult the header — all field keys are pre-resolved at registration time; the writer keeps one copy of it only to build a passthrough copy's field map (`r[vcf_passthrough.implicit_map]`).
+`write_header(self, header: &VcfHeader)` MUST consume the `Unstarted` writer, write the header to the output, set up the index builder, and return a `Ready` writer. Encoding MUST NOT consult the header — all field keys are pre-resolved at registration time; the writer keeps one copy of it only to build a passthrough copy's field map (`r[vcf_passthrough.implicit_map+2]`).
 
 r[record_encoder.finish+2]
 `finish(self)` on `Writer<W, Ready>` MUST flush all buffered data, write the BGZF EOF marker (for compressed formats), finalize the index builder, and return `Result<(W, Option<CoordinateIndex>), VcfError>`: `Some` for `VcfGz` and `Bcf`, `None` for plain VCF. A `CoordinateIndex` knows its `kind()` and so its `suffix()`, and `write`/`write_to_path` serialize it in that format: TBI, CSI with tabix metadata for VCF.gz, plain CSI for BCF.
