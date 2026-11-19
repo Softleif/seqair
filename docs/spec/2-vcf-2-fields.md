@@ -39,7 +39,7 @@ The access patterns this covers: riker reads only positions (`Locus`); aardvark 
 > `RawRecord` is the reader's undecoded view of one record (the BCF sections or the text line with its column offsets); its decoding helpers are the only way a `fill` reads bytes. `Sections` says which parts of a record `fill` will read: the site columns, INFO, and which samples (none, one by index, all).
 
 r[vcf_fields.plan]
-A reader MUST call `F::plan` once, when it opens, and keep the plan for every record. Everything that depends only on the header — resolved keys, the selected sample's index, type checks — MUST happen in `plan`, so a type mismatch fails at open rather than on some record. Planning MUST be cheap enough to repeat per `file.query` (it runs once per reader, not per file).
+A reader MUST call `F::plan` once, when it opens, and keep the plan for every record. Everything that depends only on the header — resolved keys, the selected sample's index, type checks — MUST happen in `plan`, so a type mismatch fails at open rather than on some record. Planning MUST be cheap enough to repeat per `file.reader().query(…)` (it runs once per reader, not per file).
 
 r[vcf_fields.plan_context]
 `plan` MUST receive a `PlanContext` rather than the header and the options: `header()`; `info_key`, `format_key` and their `_opt` forms, resolved as the file resolves them (`r[vcf_values.file_keys+2]`), and `lenient()` (`r[vcf_values.lenient_keys]`); `filter(name)`; and `selected_sample() -> Result<SampleIdx, PlanError>`, the sample selection `Sample` itself uses (`r[vcf_fields.sample+2]`), so a user type reading one sample's FORMAT needs no logic of its own.
@@ -48,7 +48,7 @@ r[vcf_fields.with_plan]
 `builder.with_plan(plan)` MUST open the reader with a plan the caller built instead of calling `F::plan`. That is the way to give a type runtime context (a length band, a region, a trimming switch): it lives in the caller's `Plan`, whose keys come from `file.info_key` and friends.
 
 r[vcf_fields.sections]
-The reader MUST copy and index only the union of what `F::needs` asks for. Bytes of sections no component needs MUST be skipped in the decompressed stream without being copied: a BCF record's `l_indiv` bytes when no sample is needed, every sample but the selected one, and, for `Locus` alone, everything after the fixed fields (the BCF `rlen` is a fixed field; VCF text computes the end while reading, `r[vcf_values.rlen]`). Decompression itself cannot be skipped.
+The reader MUST copy and index only the union of what `F::needs` asks for. Bytes of sections no component needs MUST be skipped in the decompressed stream without being copied: a BCF record's `l_indiv` bytes when no sample is needed, every sample but the selected one, and, for `Locus` alone, everything after the fixed fields (the BCF `rlen` is a fixed field; VCF text computes the end while reading, `r[vcf_values.rlen+3]`). Decompression itself cannot be skipped.
 
 r[vcf_fields.tuples]
 `Fields` MUST be implemented for tuples of 1 to 8 elements that each implement `Fields`, by macro. A tuple's plan is the tuple of its elements' plans, its `needs` the union, and its `fill` fills each element from the same `RawRecord`. Element order has no effect on what is read. A duplicated or redundant element (`(Info, Info)`, `(Sample, Samples)`) is legal and costs only the redundant copy.
@@ -88,7 +88,7 @@ r[vcf_fields.sample+2]
 `Sample` MUST read the sample the builder's `.sample(sel)` selects — a name (`&str`, `SmolStr`) or a `SampleIdx` — failing to plan with `PlanError::Key(KeyError::UnknownSample { name })` for a name the header lacks, `ForeignKey` for a `SampleIdx` of another header, and `SampleNotSelected { n }` when nothing was selected and the header has more than one sample (with exactly one, it reads that one). It exposes the same `get`/`has` as `OnlySample` and `name()`.
 
 r[vcf_fields.samples]
-`Samples` MUST hold every sample and expose both views of the field-major FORMAT data: `column(&FormatKey<V>)`, an `ExactSizeIterator` over all samples' values with `get(SampleIdx)`, and `sample(SampleIdx)`, one sample's view with the same `get` as `OnlySample`. For VCF text the per-sample column offsets are built lazily (`r[vcf_fields.lazy]`) in one vectorised pass.
+`Samples` MUST hold every sample and expose both views of the field-major FORMAT data: `column(&FormatKey<V>)`, an `ExactSizeIterator` over all samples' values with `get(SampleIdx)`, and `sample(SampleIdx)`, one sample's view with the same `get` as `OnlySample`. For VCF text the per-sample column offsets are built lazily (`r[vcf_fields.lazy+2]`) in one vectorised pass.
 
 r[vcf_fields.sample_idx]
 `SampleIdx` MUST be obtainable only from a header (`header.sample(name)`, `header.samples()`) and carry the header's `HeaderId`; using it with a record from another header MUST fail with `ForeignKey`. A raw `usize` cannot name a sample.

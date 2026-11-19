@@ -22,7 +22,7 @@ r[vcf_values.lenient_keys]
 | other undeclared, `V` is `Str` or `Any` | a key read as `Type=String, Number=.` |
 | other undeclared, any other `V` | `UnknownField { name, kind }` |
 
-Resolving an undeclared name logs a `debug!` naming the `Type` and `Number` it is read with; a record that uses one is warned of (`r[vcf_reader.undeclared+5]`). The result MUST NOT depend on the format: in BCF the name gets an id past the dictionary, which no record can name, so the key resolves and finds nothing. A key the header does not declare MUST carry the file's own id rather than the header's, so the file's readers accept it and every writer refuses it as foreign (`r[vcf_values.header_brand+2]`): a writer would write a dictionary index its header lacks.
+Resolving an undeclared name logs a `debug!` naming the `Type` and `Number` it is read with; a record that uses one is warned of (`r[vcf_reader.undeclared+5]`). The result MUST NOT depend on the format: in BCF the name gets an id no record of that section can name — past the dictionary or, for a name the header declares in the other section, that declaration's id — so the key resolves and finds nothing. A key the header does not declare MUST carry the file's own id rather than the header's, so the file's readers accept it and every writer refuses it as foreign (`r[vcf_values.header_brand+2]`): a writer would write a dictionary index its header lacks.
 
 r[vcf_values.optional_keys+2]
 `info_key_opt`/`format_key_opt`, on the file, on `PlanContext` and on `LenientKeys`, MUST return `Result<Option<Key<V>>, KeyError>`: `Ok(None)` exactly where the plain form fails with `UnknownField`, every other error kept. An optional annotation (GIAB has no CPG, many headers no SVTYPE) is then one `?` and one `Option`. There MUST NOT be a `get(Option<&Key>)`: the `Option` belongs to the plan, not to every record.
@@ -31,7 +31,7 @@ r[vcf_values.field_kind]
 `FieldKind` MUST be the single source of a marker's `ValueType` and accepted `Number`s, used by reader key resolution and by the writer's `InfoFieldDef`/`FormatFieldDef`, so a definition whose marker disagrees with its declared `ValueType` (`InfoFieldDef::<Scalar<i32>>` with `ValueType::Float`) can no longer be written.
 
 r[vcf_values.header_brand+2]
-Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. A key of a file's field table that its header does not declare carries a second id, the file's own, which that file's records accept as well. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
+Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand+3]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. A key of a file's field table that its header does not declare carries a second id, the file's own, which that file's records accept as well. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
 
 r[vcf_values.reader_keys]
 `Reader::keys()` MUST return a `Keys` view resolving as `file.info_key`, `format_key`, their `_opt` forms and `lenient()` do, for the reader's file: a `VcfStream` reader has no `VcfFile` at hand, and without it a caller re-implements `_opt` by matching `UnknownField`.
@@ -65,10 +65,10 @@ r[vcf_values.text_strings]
 String values MUST be returned as stored, after UTF-8 validation (`from_utf8`, typed error); percent-encoding (`%3A`, …) MUST NOT be decoded, matching htslib, so VCF and BCF reads agree. BCF strings MUST be trimmed at their first NUL (padding).
 
 r[vcf_values.gt+2]
-`GenotypeRef` MUST yield each allele as `Option<u16>` (`None` for `.`) with its phase, offer `get(i)` and `ploidy()`, read the first allele's phase bit per `r[vcf_record.gt_first_phase]`, handle a ploidy that varies per sample (BCF pads with end-of-vector), and convert to the writer's owned `Genotype`.
+`GenotypeRef` MUST yield each allele as `Option<u16>` (`None` for `.`) with its phase, offer `get(i)` and `ploidy()`, read the first allele's phase bit per `r[vcf_record.gt_first_phase+3]`, handle a ploidy that varies per sample (BCF pads with end-of-vector), and convert to the writer's owned `Genotype`.
 
 r[vcf_values.gt_phased]
-`GenotypeRef::is_phased()` MUST say whether the genotype is phased whatever the file's version, by htslib's inference for a first allele without a phase indicator: a haploid genotype is phased unless its allele is `.`, any other is phased iff every allele after the first is. Before VCF 4.4 the first allele's own phase bit is always unphased (`r[vcf_record.gt_first_phase]`), so code ported from htslib that compares the first allele's phase with the others' reads `0|1` as unphased in VCF 4.3 (rastair's `convert` did); `is_phased` is what such code means.
+`GenotypeRef::is_phased()` MUST say whether the genotype is phased whatever the file's version, by htslib's inference for a first allele without a phase indicator: a haploid genotype is phased unless its allele is `.`, any other is phased iff every allele after the first is. Before VCF 4.4 the first allele's own phase bit is always unphased (`r[vcf_record.gt_first_phase+3]`), so code ported from htslib that compares the first allele's phase with the others' reads `0|1` as unphased in VCF 4.3 (rastair's `convert` did); `is_phased` is what such code means.
 
 r[vcf_values.qual]
 `qual()` MUST return `Option<f32>`: `None` for `.` or BCF's missing bit pattern, the stored `f32` otherwise, negative, huge and NaN values included. It MUST NOT return `Phred`: that type is `f64`, documented non-negative, and its `as_int` clamps to 0..=99, while QUAL values reach the thousands. BCF to BCF stays bit-exact.
