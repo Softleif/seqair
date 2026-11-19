@@ -1,6 +1,6 @@
 [package]
 name = "seqair"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
@@ -36,7 +36,7 @@ bytemuck = { workspace = true }
 fearless_simd = { workspace = true }
 fearless_simd_macros = { workspace = true }
 
-seqair-types = { version = "^0.4.2", path = "../seqair-types", default-features = false }
+seqair-types = { version = "0.4.2", path = "../seqair-types", default-features = false }
 
 indexmap = "2"
 itoa = "1"

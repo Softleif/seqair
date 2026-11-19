@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.11.0 (2026-11-19)
 
 Two big ones this time: seqair can now **write CRAM**, and it can **read VCF and BCF**. Plus a lot of VCF writer polish that fell out of building the reader, and a cleanup of how long CIGARs are handled.
 
@@ -23,9 +23,9 @@ Two big ones this time: seqair can now **write CRAM**, and it can **read VCF and
 
 ### New: VCF/BCF reader
 
-`seqair::vcf::reader` reads plain VCF, bgzipped VCF, and BCF behind one API. The module docs are the reading guide.
+`seqair::vcf::reader` reads plain VCF, bgzipped VCF, and BCF behind one API.
 
-- **Opening.** `VcfFile::open(path)` sniffs the format, parses the header and picks up a `.csi` or `.tbi` next to the file (a missing index is fine, a broken one is an error). It's `Send + Sync + Clone` and opening inflates nothing past the header. `VcfFile::from_bytes(data, index)` works on in-memory data, and `from_bytes_indexed(data)` builds a CSI on the fly, which is handy for queryable VCF in tests. `VcfStream` reads from pipes and stdin (no queries without an index, naturally).
+- **Opening.** `VcfFile::open(path)` opens any supported file format, parses the header and picks up a `.csi` or `.tbi` next to the file (a missing index is fine, a broken one is an error). It's `Send + Sync + Clone` and opening inflates nothing past the header. `VcfFile::from_bytes(data, index)` works on in-memory data, and `from_bytes_indexed(data)` builds a CSI on the fly, which is handy for queryable VCF in tests. `VcfStream` reads from pipes and stdin (no queries without an index, naturally).
 - **You decode only what you ask for.** `file.reader::<F>()` takes a `Fields` type: `Locus`, `Site`, `Info`, `OnlySample`, `Sample`, `Samples`, `FullRecord`, tuples of up to eight, or your own type built from `RawRecord`'s views. Sections you don't need are never copied, and `Sample` on VCF text stops scanning at its column. Read with `read()`, `read_into(&mut rec)` (reuses buffers), `next_record` or plain iteration. Builder options: `threads`/`threads_in`, `sample(..)`, `with_plan(..)`.
 - **Typed access with the writer's keys.** `get(&key)` returns `Option<i32>`, `Option<Values<f32>>`, `Option<GenotypeRef>` and so on, depending on the key's marker. `has(&key)` tells "absent" from "present but `.`". `InfoAny`/`FormatAny` read anything as `DynValue`, and `iter()` walks every field present. VCF text and BCF of the same record read identically through every accessor.
 - **Region queries and partitions.** `.query(region)` / `.query_many(regions)` stream only the matching records via the TBI/CSI. `Match::Overlapping` (default, END/SVLEN/LEN-aware, like `bcftools -r`) or `Match::StartsIn` (like `-t`). `requery` reuses the file handle and block cache. `VcfFile::partitions(n)` tiles the file into ~n chunks of roughly equal compressed size for parallel work. Regions accept `Pos0`/`Pos1` ranges, `RegionString`s or `FromStr`.
