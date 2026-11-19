@@ -1072,6 +1072,11 @@ fn text_records_read_their_columns() {
     ]);
     let at = |p| VcfPos::At(seqair_types::Pos1::new(p).unwrap());
     let [a, b, c] = &recs[..] else { panic!("three records") };
+    // r[verify vcf_fields.locus.bases0]
+    let pos0 = |p| seqair_types::Pos0::new(p).unwrap();
+    assert_eq!(a.locus().bases0(), Some(pos0(9)..pos0(10)));
+    assert_eq!(b.locus().bases0(), None, "the telomere only");
+    assert_eq!(c.locus().bases0(), Some(pos0(4)..pos0(6)));
     assert_eq!(
         (a.locus().contig().name().as_str(), a.locus().start(), a.locus().end()),
         ("chr1", at(10), at(10))

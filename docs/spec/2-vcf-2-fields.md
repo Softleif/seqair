@@ -67,6 +67,9 @@ A component that indexes its bytes (`Info`, the sample components) MUST build th
 r[vcf_fields.locus+3]
 `Locus` MUST hold the record's `ContigId`, its start and its inclusive end, and be `Clone + Eq + Hash`, cheap to clone (a contig name is a `SmolStr`). Start and end are `VcfPos`, an enum of `Telomere` (VCF POS 0, BCF POS −1) and `At(Pos1)`; POS N+1, the other telomere, is an ordinary `At`. `VcfPos::pos1()`/`pos0()` MUST return the position as `Option<Pos1>`/`Option<Pos0>` (`None` for the telomere), and `Locus::bases()` the reference bases the record spans as `Option<RangeInclusive<Pos1>>` (from base 1 when it starts at the telomere; `None` when it spans the telomere only), so htslib ports need no sentinel. `Locus` needs no section beyond the fixed fields.
 
+r[vcf_fields.locus.bases0]
+`Locus::bases0()` MUST return the same bases as `bases()` as a 0-based half-open `Option<Range<Pos0>>`, so BED-style callers (riker's masks) need no hand conversion between inclusive 1-based and exclusive 0-based ends.
+
 r[vcf_fields.site+2]
 `Site` MUST hold the ID, REF, ALT, QUAL and FILTER columns and expose:
 

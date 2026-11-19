@@ -6,7 +6,7 @@ use super::raw::RawRecord;
 use crate::vcf::header::HeaderId;
 use crate::vcf::record_encoder::ContigId;
 use seqair_types::{Pos0, Pos1};
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 
 /// A VCF position: POS 0 (BCF −1), the telomere before a contig's first
 /// base, or a base. POS N+1, the telomere after the last base, is an
@@ -114,6 +114,14 @@ impl Locus {
     pub fn bases(&self) -> Option<RangeInclusive<Pos1>> {
         let end = self.end.pos1()?;
         Some(self.start.pos1().unwrap_or(Pos1::MIN)..=end)
+    }
+
+    // r[impl vcf_fields.locus.bases0]
+    /// [`Self::bases`] as a 0-based half-open range.
+    pub fn bases0(&self) -> Option<Range<Pos0>> {
+        let bases = self.bases()?;
+        // Every 1-based position is a 0-based one: both stop at `i32::MAX`.
+        Some(bases.start().to_zero_based()..Pos0::new(bases.end().as_u32())?)
     }
 }
 
