@@ -256,6 +256,12 @@ pub enum VcfError {
     #[error("{name} was resolved from another header than the one being written")]
     ForeignKey { name: SmolStr },
 
+    // r[impl record_encoder.count_check+2]
+    #[error(
+        "field {field} is declared Number={number}, so it takes {expected} values, not {found}"
+    )]
+    CountMismatch { field: SmolStr, number: Number, expected: usize, found: usize },
+
     #[error("write_header() must be called before write_record()")]
     HeaderNotWritten,
 

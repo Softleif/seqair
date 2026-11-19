@@ -27,8 +27,8 @@ r[record_encoder.finish]
 
 ## Field Definitions
 
-r[record_encoder.field_def+2]
-Field definitions MUST carry all metadata needed for header construction, key resolution, and documentation: name (`&'static str`), Number, and description (`&'static str`). Field definitions MUST be parameterized by a value type marker to enable type-safe key resolution, and their ValueType MUST come from that marker (`FieldKind::VALUE_TYPE`, `r[vcf_values.field_kind]`), never from a separate argument that could disagree with it. Registering a `Gt` definition under any name but FORMAT `GT` MUST fail with `KeyError::NotGenotype`. The writer does not restrict `Number` by marker: a `Scalar` declared `Number=A` is how a biallelic caller writes one value per ALT.
+r[record_encoder.field_def+4]
+Field definitions MUST carry all metadata needed for header construction, key resolution, and documentation: name (`&'static str`), Number, and description (`&'static str`). Field definitions MUST be parameterized by a value type marker to enable type-safe key resolution, and their ValueType MUST come from that marker (`FieldKind::VALUE_TYPE`, `r[vcf_values.field_kind]`), never from a separate argument that could disagree with it. The `Number` MUST come from the marker too wherever the marker fixes it: `Scalar<T>` and `Gt` declare `Number=1` and `Flag` declares `Number=0`, and their constructors take no `Number` argument (`InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")`), so passing one does not compile. `Arr<T>`, `OptArr<T>` and `Str` definitions take a `Number`. A string's cardinality is not fixed by its marker: real files declare String fields `Number=1` and `Number=.` (ANN, CSQ, GIAB's `platformnames`). A `Str` value is still one string, which a caller with a list joins with commas, and its count is not checked (`r[record_encoder.count_check]`). A value per ALT is an `Arr` with `Number=A`, even at a biallelic site. The fields are private and read through `FieldDescription`, so a `Number` cannot be changed after construction. There is no INFO `Gt` constructor; registering a FORMAT `Gt` definition under any name but `GT` MUST fail with `KeyError::NotGenotype`.
 
 > r[record_encoder.field_def_types]
 > Three definition types MUST be provided:
@@ -105,11 +105,11 @@ The record encoder MUST use a typestate pattern to enforce the correct calling s
 > - `Filtered` — filters have been written. INFO methods and state transition methods are available.
 > - `WithSamples` — sample count has been declared. FORMAT methods and `emit()` are available.
 
-r[record_encoder.typestate_transitions]
+r[record_encoder.typestate_transitions+2]
 State transitions MUST consume the encoder by value and return the encoder in the new state, preventing use of the old state:
 
 - `writer.begin_record(contig, pos, alleles, qual)` → `RecordEncoder<Begun>`
-- `filter_pass(self)` / `filter_fail(self)` / `no_filter(self)` on `Begun` → `Filtered`
+- `filter_pass(self)` / `no_filter(self)` on `Begun` → `Filtered`; `filter_fail(self, filters)` → `Result<Filtered, VcfError>`, since its handles are checked (`r[record_encoder.foreign_keys]`)
 - `begin_samples(self, n)` on `Filtered` → `WithSamples`
 - `emit(self)` on `Filtered` (no samples) or `WithSamples` → consumed (borrow released)
 
@@ -122,19 +122,25 @@ The `RecordEncoder` type MUST NOT expose the writer's `W: Write` type parameter.
 r[record_encoder.begin_record]
 `begin_record()` MUST be a method on `Writer<W, Ready>`. It MUST accept a `ContigId`, 1-based position, `Alleles`, and optional quality. It MUST clear all per-record state and write/buffer the fixed fields. Overflow checks on position and allele counts MUST use checked conversions and return typed errors.
 
-r[record_encoder.filters]
-Exactly one filter method MUST be called per record: `filter_pass()` for PASS, `filter_fail(&[&FilterId])` for one or more failed filters, or `no_filter()` for not-applied. All three MUST consume the `Begun` state and return `Filtered`.
+r[record_encoder.filters+2]
+Exactly one filter method MUST be called per record: `filter_pass()` for PASS, `filter_fail(filters)` for one or more failed filters, or `no_filter()` for not-applied. All three MUST consume the `Begun` state; `filter_pass` and `no_filter` return `Filtered`, `filter_fail` returns `Result<Filtered, VcfError>` and fails with `ForeignKey` for a handle from another header (`r[record_encoder.foreign_keys]`).
 
 ## InfoEncoder Trait
 
 r[record_encoder.info_encoder]
 An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be implemented by `RecordEncoder<'_, Filtered>`. Its methods take `&mut self` and concrete parameter types; the typed [`InfoKey`] encode wrappers dispatch through it.
 
-r[record_encoder.info_methods+1]
-INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. They perform no I/O — they write to in-memory buffers, which cannot fail. The numeric ones nevertheless return `Result<(), VcfError>`, because they validate their argument before writing it: see `r[record_encoder.reserved_rejection]`. `info_flag` and `info_string` carry no numeric value and stay infallible.
+r[record_encoder.info_methods+2]
+INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. They perform no I/O — they write to in-memory buffers, which cannot fail. All of them nevertheless return `Result<(), VcfError>`, because they validate before writing: the key's header (`r[record_encoder.foreign_keys]`), the value count (`r[record_encoder.count_check]`) and reserved numbers (`r[record_encoder.reserved_rejection]`).
 
 r[record_encoder.reserved_rejection]
 Every entry point that accepts a caller-supplied number destined for a BCF numeric field MUST reject the reserved bit patterns of `r[bcf_encoder.reserved_bands]` before writing any bytes, and MUST report `VcfEncodeError::ReservedIntValue` / `VcfEncodeError::ReservedFloatValue` wrapped in `VcfError`. The affected entry points are the INFO methods `info_int`, `info_ints`, `info_int_opts`, `info_float` and `info_floats`; the FORMAT methods `format_int`, `format_ints`, `format_float`, `format_floats` and `format_float_opts` (for concrete elements); and the `qual` argument of `begin_record`. `format_gt` needs no test: its BCF encoding is `(allele_index + 1) << 1 | phased` over a `u16` allele index, which is never negative, and the FILTER methods only ever write non-negative dictionary indices. Rejection MUST leave the encoder's buffers as they were, so a caller that handles the error can continue with the same record.
+
+r[record_encoder.count_check+2]
+Encoding an `Arr` or `OptArr` value (not a `Str`, which is one string whatever its `Number`) MUST check its length (missing elements included) against the field's declared `Number`: `A` expects the record's number of ALT alleles, `R` its number of alleles, `Count(n)` exactly `n`, and `G` the number of genotypes for the sample's ploidy, `binomial(n_allele + ploidy - 1, ploidy)`, when the record's GT was already encoded (the writer rejects mixed ploidy, so one ploidy serves every sample); before GT, and for INFO, `G` is not checked. `.`, `M`, `P` and the local numbers `LA`/`LR`/`LG` are not checked. FORMAT checks apply per sample, and a sample with no values is missing (`.`), which every `Number` allows. A mismatch MUST return `VcfError::CountMismatch { field, number, expected, found }` before any byte of the field is written, so the record stays valid and can still be emitted. htslib does not check this; a wrong count silently produces a file other tools misread (a reader indexing `Number=R` values by allele reads past the end, or the wrong allele).
+
+r[record_encoder.foreign_keys]
+Every encode entry point MUST compare the handle's `HeaderId` with the header the writer wrote and fail with `VcfError::ForeignKey { name }` before writing anything: the contig of `begin_record`, every `FilterId` of `filter_fail`, and the `FieldId` of every INFO and FORMAT method (GT included). `FilterId::PASS` is index 0 in every header and MUST be accepted by every writer. A key of another header would otherwise write a valid-looking record naming whatever field holds the same dictionary index. A later header-merging feature MAY let a header derived from another, with its indices preserved, accept its ancestor's keys; until then the comparison is exact.
 
 r[record_encoder.info_state_queries]
 `InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.

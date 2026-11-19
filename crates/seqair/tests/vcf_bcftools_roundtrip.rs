@@ -16,9 +16,10 @@
 )]
 
 use seqair::vcf::record_encoder::{
-    FilterFieldDef, FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoFloat, InfoInt, InfoInts,
+    FilterFieldDef, FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoInt, InfoInts,
 };
 use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, Ready, VcfHeader, Writer};
+use seqair::vcf::{Arr, Gt, InfoFloats, Scalar};
 use seqair_types::{Base, Pos1};
 use std::process::Command;
 use std::sync::Arc;
@@ -27,8 +28,10 @@ struct Setup {
     header: Arc<VcfHeader>,
     contig: seqair::vcf::ContigId,
     dp_info: InfoInt,
-    af_info: InfoFloat,
+    af_info: InfoFloats,
     ad_info: InfoInts,
+    /// `Number=.`: any count, so an overwrite may change the width.
+    xs_info: InfoInts,
     gt_fmt: FormatGt,
     dp_fmt: FormatInt,
     gq_fmt: FormatInt,
@@ -40,27 +43,35 @@ fn make_setup() -> Setup {
     let mut builder = builder.filters();
     let _pass = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
-    let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
+    let dp_info = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "Allele Frequency"))
+        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+            "AF",
+            Number::AlternateBases,
+            "Allele Frequency",
+        ))
         .unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::new("AD", Number::ReferenceAlternateBases, "Allele Depth"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+            "AD",
+            Number::ReferenceAlternateBases,
+            "Allele Depth",
+        ))
+        .unwrap();
+    let xs_info = builder
+        .register_info(&InfoFieldDef::<Arr<i32>>::new("XS", Number::Unknown, "Any count"))
         .unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
-    let dp_fmt = builder
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
-        .unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+    let dp_fmt =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Read Depth")).unwrap();
     let gq_fmt = builder
-        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype Quality"))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("GQ", "Genotype Quality"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();
     let header = Arc::new(builder.build().unwrap());
-    Setup { header, contig, dp_info, af_info, ad_info, gt_fmt, dp_fmt, gq_fmt }
+    Setup { header, contig, dp_info, af_info, ad_info, xs_info, gt_fmt, dp_fmt, gq_fmt }
 }
 
 /// Write BCF to a temp file, return the path.
@@ -189,7 +200,7 @@ fn bcftools_multi_allelic() {
             .unwrap()
             .filter_pass();
         s.dp_info.encode(&mut enc, 100).unwrap();
-        s.af_info.encode(&mut enc, 0.35).unwrap();
+        s.af_info.encode(&mut enc, &[0.35]).unwrap();
         s.ad_info.encode(&mut enc, &[60, 40]).unwrap();
         enc.emit().unwrap();
     });
@@ -401,7 +412,7 @@ fn bcftools_dedup_interleaved_info() {
             .filter_pass();
         // DP=50, then AF in between, then DP=100 (overwrite the *first* field).
         s.dp_info.encode(&mut enc, 50).unwrap();
-        s.af_info.encode(&mut enc, 0.25).unwrap();
+        s.af_info.encode(&mut enc, &[0.25]).unwrap();
         s.dp_info.encode(&mut enc, 100).unwrap();
         enc.emit().unwrap();
     });
@@ -426,12 +437,12 @@ fn bcftools_dedup_array_width_change() {
             .unwrap()
             .filter_pass();
         s.dp_info.encode(&mut enc, 7).unwrap();
-        s.ad_info.encode(&mut enc, &[10, 20]).unwrap();
-        s.ad_info.encode(&mut enc, &[30, 40, 50]).unwrap(); // grow, with DP already after the old AD
+        s.xs_info.encode(&mut enc, &[10, 20]).unwrap();
+        s.xs_info.encode(&mut enc, &[30, 40, 50]).unwrap(); // grow, with DP already after the old XS
         enc.emit().unwrap();
     });
 
-    let result = bcftools_query(&bcf_path, "%INFO/AD\t%INFO/DP\n");
+    let result = bcftools_query(&bcf_path, "%INFO/XS\t%INFO/DP\n");
     let fields: Vec<&str> = result.trim().split('\t').collect();
     assert_eq!(fields[0], "30,40,50", "overwritten array reads back at its new width");
     assert_eq!(fields[1], "7", "the field written between the two AD writes is intact");
@@ -511,11 +522,11 @@ fn bcftools_dedup_all_fields_overwritten() {
             .filter_pass();
         // First pass.
         s.dp_info.encode(&mut enc, 50).unwrap();
-        s.af_info.encode(&mut enc, 0.1).unwrap();
+        s.af_info.encode(&mut enc, &[0.1]).unwrap();
         s.ad_info.encode(&mut enc, &[5, 6]).unwrap();
         // Second pass, same interleaving — every field overwritten in place.
         s.dp_info.encode(&mut enc, 100).unwrap();
-        s.af_info.encode(&mut enc, 0.5).unwrap();
+        s.af_info.encode(&mut enc, &[0.5]).unwrap();
         s.ad_info.encode(&mut enc, &[15, 16]).unwrap();
 
         let mut enc = enc.begin_samples();

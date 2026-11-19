@@ -23,7 +23,8 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoInt};
-use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Alleles, ContigDef, Genotype, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Gt, Scalar};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -40,13 +41,11 @@ fn make_setup() -> TestSetup {
     let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
-    let dp_fmt = builder
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
-        .unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+    let dp_fmt =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Read Depth")).unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();
     let header = Arc::new(builder.build().unwrap());

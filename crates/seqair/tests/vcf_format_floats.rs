@@ -11,6 +11,7 @@
 
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatFloats, FormatGt, InfoFieldDef, InfoInt};
 use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Arr, Gt, Scalar};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -26,13 +27,11 @@ fn make_setup() -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.infos();
-    let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
+    let dp_info = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let ml_fmt = builder
-        .register_format(&FormatFieldDef::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::new(
             "ML",
             Number::AlternateBases,
             "ML prediction per alt",
@@ -117,10 +116,9 @@ fn make_multi_setup(samples: &[&str]) -> MultiSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let vl_fmt = builder
-        .register_format(&FormatFieldDef::new(
+        .register_format(&FormatFieldDef::<Arr<f32>>::new(
             "VL",
             Number::Unknown,
             "Variable-length float list per sample",

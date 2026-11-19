@@ -38,8 +38,8 @@ use seqair::vcf::record_encoder::{
     InfoFieldDef, InfoInt, Scalar,
 };
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, VcfError, VcfHeader,
-    VcfHeaderError, Writer,
+    Alleles, ContigDef, ContigId, Genotype, OutputFormat, VcfError, VcfHeader, VcfHeaderError,
+    Writer,
 };
 use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
@@ -900,13 +900,11 @@ fn vcf_setup(samples: &[&str]) -> VcfSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
-    let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
+    let dp_info = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt = builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
-    let dp_format = builder
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
-        .unwrap();
+    let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "GT")).unwrap();
+    let dp_format =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Read Depth")).unwrap();
     let mut builder = builder.samples();
     for name in samples {
         builder.add_sample(*name).unwrap();
@@ -1049,7 +1047,7 @@ fn each_kind_of_duplicate_header_entry_has_its_own_variant() {
     assert_eq!(id, "q10");
 
     let mut builder = builder.infos();
-    let def: InfoFieldDef<Scalar<i32>> = InfoFieldDef::new("DP", Number::Count(1), "Depth");
+    let def: InfoFieldDef<Scalar<i32>> = InfoFieldDef::<Scalar<i32>>::new("DP", "Depth");
     builder.register_info(&def).unwrap();
     let err = builder.register_info(&def).expect_err("DP is declared");
     let VcfHeaderError::DuplicateInfo { id } = err else {
@@ -1058,7 +1056,7 @@ fn each_kind_of_duplicate_header_entry_has_its_own_variant() {
     assert_eq!(id, "DP");
 
     let mut builder = builder.formats();
-    let def: FormatFieldDef<Gt> = FormatFieldDef::new("GT", Number::Count(1), "Genotype");
+    let def: FormatFieldDef<Gt> = FormatFieldDef::<Gt>::new("GT", "Genotype");
     builder.register_format(&def).unwrap();
     let err = builder.register_format(&def).expect_err("GT is declared");
     let VcfHeaderError::DuplicateFormat { id } = err else {

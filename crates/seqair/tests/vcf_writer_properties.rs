@@ -12,8 +12,9 @@
 #[path = "../src/pinned.rs"]
 mod pinned;
 use hegel::prelude::*;
+use seqair::vcf::Scalar;
 use seqair::vcf::record_encoder::{FilterFieldDef, InfoFieldDef, InfoInt};
-use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Alleles, ContigDef, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -53,8 +54,7 @@ fn make_simple_setup() -> SimpleSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
-    let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
+    let dp_info = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let header = Arc::new(builder.build().unwrap());
     SimpleSetup { header, contig, dp_info }
 }
@@ -187,7 +187,7 @@ fn filter_serialization_correct(tc: TestCase) {
     let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
     let _dp: InfoInt =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Depth")).unwrap();
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
     let header = Arc::new(builder.build().unwrap());
 
     let pos_typed = Pos1::new(pos).unwrap();
@@ -225,6 +225,7 @@ fn filter_serialization_correct(tc: TestCase) {
                 .begin_record(&contig, pos_typed, &alleles, None)
                 .unwrap()
                 .filter_fail([&q20])
+                .unwrap()
                 .emit()
                 .unwrap();
             "q20"

@@ -107,7 +107,7 @@ fn filters_contigs_and_samples_resolve() {
     assert_eq!(all, [h.sample("NA12878").unwrap(), hg002]);
 }
 
-// r[verify vcf_header.brand]
+// r[verify vcf_header.brand+2]
 // r[verify vcf_values.header_brand]
 // r[verify vcf_fields.sample_idx]
 /// Two parses of the same text are two headers: their keys, contigs and
@@ -133,9 +133,7 @@ fn a_registered_key_is_the_resolved_key() {
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef::new(Some(10))).unwrap();
     let mut builder = builder.infos();
-    let dp = builder
-        .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ""))
-        .unwrap();
+    let dp = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "")).unwrap();
     let header = builder.build().unwrap();
     assert_eq!(header.info_key::<Scalar<i32>>("DP").unwrap(), dp);
     assert_eq!(header.contig("chr1").unwrap(), chr1);

@@ -15,7 +15,7 @@ mod parse;
 
 // r[impl vcf_header.info_def]
 /// Number of values for an INFO or FORMAT field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Number {
     /// Fixed count.
     Count(u32),
@@ -289,7 +289,7 @@ fn unknown_field(name: &str) -> KeyError {
     KeyError::UnknownField { name: SmolStr::from(name) }
 }
 
-// r[impl vcf_header.brand]
+// r[impl vcf_header.brand+2]
 /// Identifies one header within the process. Every header built or parsed
 /// gets a fresh one; a clone keeps it. Keys resolved from a header carry it,
 /// so a key cannot silently read a field of another file that happens to
@@ -420,7 +420,7 @@ impl VcfHeader {
     pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
         let def = self.infos.get(name).ok_or_else(|| unknown_field(name))?;
         check_kind::<V>(Section::Info, name, def.typ, def.number)?;
-        Ok(InfoKey(self.field_id(name)?, PhantomData))
+        Ok(InfoKey(self.field_id(name, def.number)?, PhantomData))
     }
 
     // r[impl vcf_values.keys]
@@ -428,12 +428,12 @@ impl VcfHeader {
     pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
         let def = self.formats.get(name).ok_or_else(|| unknown_field(name))?;
         check_kind::<V>(Section::Format, name, def.typ, def.number)?;
-        Ok(FormatKey(self.field_id(name)?, PhantomData))
+        Ok(FormatKey(self.field_id(name, def.number)?, PhantomData))
     }
 
-    fn field_id(&self, name: &str) -> Result<FieldId, KeyError> {
+    fn field_id(&self, name: &str, number: Number) -> Result<FieldId, KeyError> {
         let dict_idx = self.string_map.index(name).ok_or_else(|| unknown_field(name))?;
-        Ok(FieldId { dict_idx, name: SmolStr::from(name), header: self.id })
+        Ok(FieldId { dict_idx, name: SmolStr::from(name), number, header: self.id })
     }
 
     // r[impl vcf_values.keys]
@@ -477,7 +477,7 @@ impl VcfHeader {
         (0..n).map(|index| SampleIdx { index, header: self.id })
     }
 
-    // r[impl vcf_header.brand]
+    // r[impl vcf_header.brand+2]
     /// This header's identity: distinct from every other header's in the
     /// process, kept by a clone.
     pub fn id(&self) -> HeaderId {
@@ -734,14 +734,14 @@ pub struct Samples;
 /// passes for the wrong reason:
 ///
 /// ```
-/// use seqair::vcf::{VcfHeader, Number, ValueType};
+/// use seqair::vcf::VcfHeader;
 /// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let builder = VcfHeader::builder();
 /// let mut builder = builder.infos();
 /// let _dp: seqair::vcf::InfoInt = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
-///     "DP", Number::Count(1), "Depth",
+///     "DP", "Depth",
 /// ))?;
 /// # Ok(())
 /// # }
@@ -750,14 +750,14 @@ pub struct Samples;
 /// Out-of-order registration is a compile error:
 ///
 /// ```compile_fail,E0599
-/// use seqair::vcf::{VcfHeader, Number, ValueType};
+/// use seqair::vcf::VcfHeader;
 /// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = VcfHeader::builder();
 /// // ERROR: register_info is not available in the Contigs phase
 /// builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
-///     "DP", Number::Count(1), "Depth",
+///     "DP", "Depth",
 /// ))?;
 /// # Ok(())
 /// # }
@@ -966,13 +966,16 @@ impl VcfHeaderBuilder<Infos> {
         &mut self,
         def: &super::record_encoder::InfoFieldDef<V>,
     ) -> Result<super::record_encoder::InfoKey<V>, VcfHeaderError> {
-        // The writer takes any `Number`: a `Scalar` under `Number=A` is how a
-        // biallelic caller writes one value per ALT.
         check_genotype::<V>(Section::Info, def.name)?;
         let id = SmolStr::from(def.name);
         let dict_idx =
             self.insert_info(id.clone(), InfoDef::new(def.number, V::VALUE_TYPE, def.description))?;
-        let field = super::record_encoder::FieldId { dict_idx, name: id, header: self.header.id };
+        let field = super::record_encoder::FieldId {
+            dict_idx,
+            name: id,
+            number: def.number,
+            header: self.header.id,
+        };
         Ok(super::record_encoder::InfoKey(field, PhantomData))
     }
 
@@ -1026,7 +1029,12 @@ impl VcfHeaderBuilder<Formats> {
             id.clone(),
             FormatDef::new(def.number, V::VALUE_TYPE, def.description),
         )?;
-        let field = super::record_encoder::FieldId { dict_idx, name: id, header: self.header.id };
+        let field = super::record_encoder::FieldId {
+            dict_idx,
+            name: id,
+            number: def.number,
+            header: self.header.id,
+        };
         Ok(super::record_encoder::FormatKey(field, PhantomData))
     }
 
@@ -1198,7 +1206,7 @@ mod tests {
         assert!(!builder.header.formats.contains_key("overflow"));
     }
 
-    // r[verify vcf_header.brand]
+    // r[verify vcf_header.brand+2]
     #[test]
     fn every_header_has_its_own_id_and_a_clone_keeps_it() {
         use crate::vcf::record_encoder::{InfoFieldDef, Scalar};
@@ -1210,16 +1218,14 @@ mod tests {
         let mut builder = VcfHeader::builder();
         let contig = builder.register_contig("chr1", ContigDef::new(None)).unwrap();
         let mut builder = builder.infos();
-        let dp = builder
-            .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ""))
-            .unwrap();
+        let dp = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "")).unwrap();
         let header = builder.build().unwrap();
         assert_eq!(header.clone().id(), header.id());
         assert_eq!(contig.header, header.id(), "a registered contig carries the header's id");
         assert_eq!(dp.0.header, header.id(), "a registered key carries the header's id");
     }
 
-    // r[verify vcf_header.brand]
+    // r[verify vcf_header.brand+2]
     // r[verify vcf_values.header_brand]
     #[test]
     fn the_writer_refuses_a_contig_of_another_header() {
@@ -1349,13 +1355,9 @@ mod tests {
         let mut builder = builder.filters();
         builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let mut builder = builder.infos();
-        builder
-            .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth"))
-            .unwrap();
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")).unwrap();
         let mut builder = builder.formats();
-        builder
-            .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
-            .unwrap();
+        builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
         let mut builder = builder.samples();
         builder.add_sample("S1").unwrap();
 

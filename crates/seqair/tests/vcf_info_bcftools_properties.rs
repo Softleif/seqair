@@ -24,6 +24,7 @@ use seqair::vcf::record_encoder::{
     InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString,
 };
 use seqair::vcf::{Alleles, ContigDef, ContigId, Number, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Arr, Flag, OptArr, Scalar, Str};
 use seqair_types::{Base, Pos1};
 use std::process::Command;
 use std::sync::Arc;
@@ -56,22 +57,33 @@ fn setup() -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN))).unwrap();
     let mut b = builder.infos();
-    let int1 = b.register_info(&InfoFieldDef::new("II", Number::Count(1), "int")).unwrap();
-    let float1 = b.register_info(&InfoFieldDef::new("FF", Number::Count(1), "float")).unwrap();
-    let flag = b.register_info(&InfoFieldDef::new("FG", Number::Count(0), "flag")).unwrap();
-    let char1 = b.register_info(&InfoFieldDef::new("CH", Number::Count(1), "char")).unwrap();
-    let string1 = b.register_info(&InfoFieldDef::new("ST", Number::Count(1), "string")).unwrap();
-    let fixed3 = b.register_info(&InfoFieldDef::new("P3", Number::Count(3), "three")).unwrap();
-    let per_alt =
-        b.register_info(&InfoFieldDef::new("AI", Number::AlternateBases, "one per ALT")).unwrap();
-    let per_allele = b
-        .register_info(&InfoFieldDef::new("RI", Number::ReferenceAlternateBases, "one per allele"))
+    let int1 = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("II", "int")).unwrap();
+    let float1 = b.register_info(&InfoFieldDef::<Scalar<f32>>::new("FF", "float")).unwrap();
+    let flag = b.register_info(&InfoFieldDef::<Flag>::new("FG", "flag")).unwrap();
+    let char1 = b.register_info(&InfoFieldDef::<Str>::new("CH", Number::Count(1), "char")).unwrap();
+    let string1 =
+        b.register_info(&InfoFieldDef::<Str>::new("ST", Number::Count(1), "string")).unwrap();
+    let fixed3 =
+        b.register_info(&InfoFieldDef::<Arr<i32>>::new("P3", Number::Count(3), "three")).unwrap();
+    let per_alt = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::new("AI", Number::AlternateBases, "one per ALT"))
         .unwrap();
-    let per_genotype =
-        b.register_info(&InfoFieldDef::new("GI", Number::Genotypes, "one per genotype")).unwrap();
-    let unknown = b.register_info(&InfoFieldDef::new("UI", Number::Unknown, "any count")).unwrap();
-    let per_alt_float =
-        b.register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "one per ALT")).unwrap();
+    let per_allele = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+            "RI",
+            Number::ReferenceAlternateBases,
+            "one per allele",
+        ))
+        .unwrap();
+    let per_genotype = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::new("GI", Number::Genotypes, "one per genotype"))
+        .unwrap();
+    let unknown = b
+        .register_info(&InfoFieldDef::<Arr<i32>>::new("UI", Number::Unknown, "any count"))
+        .unwrap();
+    let per_alt_float = b
+        .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "one per ALT"))
+        .unwrap();
     let header = Arc::new(b.samples().build().unwrap());
     Setup {
         header,
@@ -312,10 +324,10 @@ fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
         s.int1.encode(&mut enc, rec.int1).unwrap();
         s.float1.encode(&mut enc, rec.float1).unwrap();
         if rec.flag {
-            s.flag.encode(&mut enc);
+            s.flag.encode(&mut enc).unwrap();
         }
-        s.char1.encode(&mut enc, rec.char1.to_string().as_str());
-        s.string1.encode(&mut enc, &rec.string1);
+        s.char1.encode(&mut enc, rec.char1.to_string().as_str()).unwrap();
+        s.string1.encode(&mut enc, &rec.string1).unwrap();
         s.fixed3.encode(&mut enc, &rec.fixed3).unwrap();
         // An `A`/`R`/`G` field with no values has no legal VCF spelling, so a
         // reference-only site simply omits the per-ALT ones.
@@ -536,7 +548,11 @@ fn opt_setup() -> OptSetup {
     let contig = builder.register_contig("chr1", ContigDef::new(Some(CONTIG_LEN))).unwrap();
     let mut b = builder.infos();
     let opts = b
-        .register_info(&InfoFieldDef::new("OI", Number::Unknown, "integers, some missing"))
+        .register_info(&InfoFieldDef::<OptArr<i32>>::new(
+            "OI",
+            Number::Unknown,
+            "integers, some missing",
+        ))
         .unwrap();
     OptSetup { header: Arc::new(b.samples().build().unwrap()), contig, opts }
 }

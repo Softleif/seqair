@@ -503,7 +503,7 @@ impl<W: Write> Writer<W, Ready> {
             }
         };
 
-        Ok(RecordEncoder { inner, _state: PhantomData })
+        Ok(RecordEncoder { inner, header: contig.header, ploidy: None, _state: PhantomData })
     }
 
     // r[impl record_encoder.finish]
@@ -860,7 +860,49 @@ fn begin_vcf_record<'a>(
 pub struct RecordEncoder<'a, S> {
     // r[impl record_encoder.typestate_w_erased]
     inner: EncoderInner<'a>,
+    /// The written header's id, which every key must carry
+    /// (`r[record_encoder.foreign_keys]`).
+    header: HeaderId,
+    /// The ploidy of the record's GT once it is encoded, for `Number=G`
+    /// counts (`r[record_encoder.count_check+2]`).
+    ploidy: Option<usize>,
     _state: PhantomData<S>,
+}
+
+impl<'a, S> RecordEncoder<'a, S> {
+    fn into_state<T>(self) -> RecordEncoder<'a, T> {
+        RecordEncoder {
+            inner: self.inner,
+            header: self.header,
+            ploidy: self.ploidy,
+            _state: PhantomData,
+        }
+    }
+
+    // r[impl record_encoder.foreign_keys]
+    fn check_key(&self, id: &FieldId) -> Result<(), VcfError> {
+        if id.header == self.header {
+            return Ok(());
+        }
+        Err(VcfError::ForeignKey { name: id.name.clone() })
+    }
+
+    fn n_allele_count(&self) -> usize {
+        match &self.inner {
+            EncoderInner::Bcf(e) => usize::from(e.n_allele),
+            EncoderInner::Vcf(v) => usize::from(v.n_allele),
+        }
+    }
+
+    // r[impl record_encoder.count_check+2]
+    /// Check every non-empty sample's count; an empty sample is missing (`.`).
+    fn check_sample_counts<T>(&self, id: &FieldId, per_sample: &[&[T]]) -> Result<(), VcfError> {
+        let n_allele = self.n_allele_count();
+        per_sample
+            .iter()
+            .filter(|s| !s.is_empty())
+            .try_for_each(|s| id.check_count(n_allele, self.ploidy, s.len()))
+    }
 }
 
 // r[impl record_encoder.typestate_w_erased]
@@ -894,8 +936,8 @@ impl EncoderInner<'_> {
 
 // ── Begun → Filtered ───────────────────────────────────────────────────
 
-// r[impl record_encoder.typestate_transitions]
-// r[impl record_encoder.filters]
+// r[impl record_encoder.typestate_transitions+2]
+// r[impl record_encoder.filters+2]
 impl<'a> RecordEncoder<'a, Begun> {
     pub fn filter_pass(mut self) -> RecordEncoder<'a, Filtered> {
         match &mut self.inner {
@@ -907,7 +949,7 @@ impl<'a> RecordEncoder<'a, Begun> {
                 vcf.buf.push(b'\t');
             }
         }
-        RecordEncoder { inner: self.inner, _state: PhantomData }
+        self.into_state()
     }
 
     /// Mark the record as failing the given filters. Accepts any iterator of
@@ -916,21 +958,30 @@ impl<'a> RecordEncoder<'a, Begun> {
     pub fn filter_fail<'f>(
         mut self,
         filters: impl IntoIterator<Item = &'f FilterId>,
-    ) -> RecordEncoder<'a, Filtered> {
+    ) -> Result<RecordEncoder<'a, Filtered>, VcfError> {
+        let filters: SmallVec<&FilterId, 3> = filters.into_iter().collect();
+        // r[impl record_encoder.foreign_keys]
+        // PASS (no header) is index 0 in every header.
+        if let Some(f) = filters.iter().find(|f| f.header.is_some_and(|h| h != self.header)) {
+            return Err(VcfError::ForeignKey { name: f.name.clone() });
+        }
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let indices: SmallVec<i32, 3> = filters
-                    .into_iter()
+                let indices = filters
+                    .iter()
                     .map(|f| {
-                        i32::try_from(f.dict_idx())
-                            .expect("filter dict_idx fits i32 (validated at registration)")
+                        i32::try_from(f.dict_idx()).map_err(|_| VcfError::ValueOverflow {
+                            field: "FILTER",
+                            value: u64::from(f.dict_idx()),
+                            target_type: "i32",
+                        })
                     })
-                    .collect();
+                    .collect::<Result<SmallVec<i32, 3>, _>>()?;
                 encode_typed_int_vec(enc.shared_buf, &indices);
             }
             EncoderInner::Vcf(vcf) => {
                 vcf.filter_written = true;
-                for (i, f) in filters.into_iter().enumerate() {
+                for (i, f) in filters.iter().enumerate() {
                     if i > 0 {
                         vcf.buf.push(b';');
                     }
@@ -939,7 +990,7 @@ impl<'a> RecordEncoder<'a, Begun> {
                 vcf.buf.push(b'\t');
             }
         }
-        RecordEncoder { inner: self.inner, _state: PhantomData }
+        Ok(self.into_state())
     }
 
     pub fn no_filter(mut self) -> RecordEncoder<'a, Filtered> {
@@ -951,7 +1002,7 @@ impl<'a> RecordEncoder<'a, Begun> {
                 vcf.buf.push(b'\t');
             }
         }
-        RecordEncoder { inner: self.inner, _state: PhantomData }
+        self.into_state()
     }
 }
 
@@ -1102,6 +1153,7 @@ fn nth_colon_field(buf: &[u8], n: usize) -> (usize, usize) {
 impl InfoEncoder for RecordEncoder<'_, Filtered> {
     // r[impl record_encoder.reserved_rejection]
     fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError> {
+        self.check_key(id)?;
         reject_reserved_ints(id.name(), [value])?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1128,6 +1180,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_float(&mut self, id: &FieldId, value: f32) -> Result<(), VcfError> {
+        self.check_key(id)?;
         reject_reserved_floats(id.name(), [value])?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1154,6 +1207,8 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_ints(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        id.check_count(self.n_allele_count(), None, values.len())?;
         reject_reserved_ints(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1182,6 +1237,8 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_floats(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        id.check_count(self.n_allele_count(), None, values.len())?;
         reject_reserved_floats(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1208,7 +1265,8 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
         }
         Ok(())
     }
-    fn info_flag(&mut self, id: &FieldId) {
+    fn info_flag(&mut self, id: &FieldId) -> Result<(), VcfError> {
+        self.check_key(id)?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1224,8 +1282,10 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
-    fn info_string(&mut self, id: &FieldId, value: &str) {
+    fn info_string(&mut self, id: &FieldId, value: &str) -> Result<(), VcfError> {
+        self.check_key(id)?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1243,9 +1303,12 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        id.check_count(self.n_allele_count(), None, values.len())?;
         reject_reserved_ints(id.name(), values.iter().filter_map(|v| *v))?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1296,7 +1359,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     }
 }
 
-// r[impl record_encoder.typestate_transitions]
+// r[impl record_encoder.typestate_transitions+2]
 impl<'a> RecordEncoder<'a, Filtered> {
     /// Transition to the `WithSamples` state for encoding FORMAT fields.
     ///
@@ -1315,7 +1378,7 @@ impl<'a> RecordEncoder<'a, Filtered> {
                 }
             }
         }
-        RecordEncoder { inner: self.inner, _state: PhantomData }
+        self.into_state()
     }
     // r[impl record_encoder.emit]
     // r[impl record_encoder.emit_no_samples]
@@ -1335,6 +1398,7 @@ impl<'a> RecordEncoder<'a, Filtered> {
 #[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(gts.len(), self.n_samples(), "one GT per sample");
         // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
@@ -1368,23 +1432,24 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 encode_type_byte(enc.indiv_buf, ploidy, typ);
                 for gt in gts {
                     for (i, allele_opt) in gt.alleles.iter().enumerate() {
+                        // r[impl vcf_record.gt_first_phase+3]
+                        // The first allele carries a phase bit too, and from
+                        // VCF 4.4 it is read rather than ignored: the spec
+                        // makes the leading indicator "`/` if any phasing
+                        // indicators are `/` and `|` otherwise". A haploid call
+                        // has no separator, so it is phased.
+                        let phased = if i == 0 {
+                            gt.phased.iter().all(|p| *p)
+                        } else {
+                            gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
+                        };
                         let encoded: i32 = match allele_opt {
                             Some(idx) => {
-                                // r[impl vcf_record.gt_first_phase+3]
-                                // The first allele carries a phase bit too, and
-                                // from VCF 4.4 it is read rather than ignored:
-                                // the spec makes the leading indicator "`/` if
-                                // any phasing indicators are `/` and `|`
-                                // otherwise". A haploid call has no separator,
-                                // so it is phased.
-                                let phased = if i == 0 {
-                                    gt.phased.iter().all(|p| *p)
-                                } else {
-                                    gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
-                                };
                                 (i32::from(*idx).saturating_add(1) << 1) | i32::from(phased)
                             }
-                            None => 0,
+                            // A missing allele keeps its phase bit, as htslib
+                            // encodes `.|.`; a missing haploid call is `0x00`.
+                            None => i32::from(phased && ploidy > 1),
                         };
                         encode_int_as(enc.indiv_buf, encoded, typ);
                     }
@@ -1413,10 +1478,12 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 vcf.commit_format_field(id);
             }
         }
+        self.ploidy = Some(ploidy);
         Ok(())
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         reject_reserved_ints(id.name(), values.iter().copied())?;
@@ -1447,6 +1514,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         reject_reserved_floats(id.name(), values.iter().copied())?;
@@ -1480,8 +1548,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        self.check_sample_counts(id, per_sample)?;
         reject_reserved_ints(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
@@ -1541,8 +1611,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     }
     // r[impl record_encoder.reserved_rejection]
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        self.check_sample_counts(id, per_sample)?;
         reject_reserved_floats(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
@@ -1601,8 +1673,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         id: &FieldId,
         per_sample: &[&[Option<f32>]],
     ) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        self.check_sample_counts(id, per_sample)?;
         reject_reserved_floats(
             id.name(),
             per_sample.iter().flat_map(|s| s.iter().filter_map(|v| *v)),
@@ -1666,6 +1740,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
+        self.check_key(id)?;
         self.inner.check_format_room(id)?;
         debug_assert_eq!(values.len(), self.n_samples(), "one string per sample");
         // A missing (empty) sample is stored as the literal `.` char (htslib's BCF

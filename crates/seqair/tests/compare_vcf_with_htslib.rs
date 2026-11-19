@@ -16,7 +16,7 @@
 mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
-use seqair::vcf::header::{ContigDef, Number};
+use seqair::vcf::header::ContigDef;
 use seqair::vcf::record::Genotype;
 use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 use seqair::vcf::{ContigId, FormatGt, FormatInt, InfoInt, OutputFormat, VcfHeader, Writer};
@@ -36,14 +36,11 @@ fn shared_setup() -> TestSetup {
     let contig = builder.register_contig("chr1", ContigDef::new(Some(250_000_000))).unwrap();
     let mut builder = builder.infos();
     let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total Depth")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt = builder
-        .register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))
-        .unwrap();
-    let dp_fmt = builder
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Read Depth"))
-        .unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+    let dp_fmt =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Read Depth")).unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();
     let header = Arc::new(builder.build().unwrap());
@@ -208,6 +205,38 @@ fn bcftools_reads_a_haploid_gt_without_a_leading_indicator() {
     let vcf_text = bcftools_view(tmp.path()).unwrap();
     let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
     assert!(fields[9].starts_with("1:"), "expected haploid GT 1, got: {}", fields[9]);
+}
+
+/// A missing allele keeps its phase bit, as htslib encodes it (`vcf.c`:
+/// `x[l++] = is_phased`), so `.|.` stays phased; a missing haploid call is
+/// `0x00`. bcftools must print each genotype back as written.
+// r[verify vcf_record.gt_first_phase+3]
+#[test]
+fn bcftools_reads_missing_alleles_with_their_phase() {
+    if !has_bcftools() {
+        eprintln!("skipping: bcftools not found");
+        return;
+    }
+
+    let genotype = |alleles: &[Option<u16>], phased: &[bool]| Genotype {
+        alleles: alleles.iter().copied().collect(),
+        phased: phased.iter().copied().collect(),
+    };
+    let cases = [
+        (genotype(&[None, None], &[true]), ".|."),
+        (genotype(&[None, None], &[false]), "./."),
+        (genotype(&[None, Some(1)], &[true]), ".|1"),
+        (genotype(&[Some(1), None], &[true]), "1|."),
+        (genotype(&[None], &[]), "."),
+    ];
+    let setup = shared_setup();
+    for (gt, expected) in cases {
+        let tmp = write_seqair_bcf_with_gt(&setup, 1000, Base::C, Base::G, 99.0, 100, gt);
+        let vcf_text = bcftools_view(tmp.path()).unwrap();
+        let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
+        let sample_gt = fields.get(9).and_then(|s| s.split(':').next());
+        assert_eq!(sample_gt, Some(expected), "GT {expected} must survive bcftools");
+    }
 }
 
 // r[verify bcf_writer.gt_encoding]

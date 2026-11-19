@@ -106,16 +106,10 @@ fn setup(tc: &TestCase) -> Setup {
     let on = || tc.draw(gs::booleans());
     let unknown = Number::Unknown;
     if on() {
-        keys.i1 = Some(
-            b.register_info(&InfoFieldDef::<Scalar<i32>>::new("I1", Number::Count(1), "i"))
-                .unwrap(),
-        );
+        keys.i1 = Some(b.register_info(&InfoFieldDef::<Scalar<i32>>::new("I1", "i")).unwrap());
     }
     if on() {
-        keys.f1 = Some(
-            b.register_info(&InfoFieldDef::<Scalar<f32>>::new("F1", Number::Count(1), "f"))
-                .unwrap(),
-        );
+        keys.f1 = Some(b.register_info(&InfoFieldDef::<Scalar<f32>>::new("F1", "f")).unwrap());
     }
     if on() {
         keys.ia =
@@ -130,9 +124,7 @@ fn setup(tc: &TestCase) -> Setup {
             Some(b.register_info(&InfoFieldDef::<OptArr<i32>>::new("IO", unknown, "io")).unwrap());
     }
     if on() {
-        keys.fl = Some(
-            b.register_info(&InfoFieldDef::<Flag>::new("FL", Number::Count(0), "fl")).unwrap(),
-        );
+        keys.fl = Some(b.register_info(&InfoFieldDef::<Flag>::new("FL", "fl")).unwrap());
     }
     if on() {
         keys.s1 =
@@ -140,15 +132,10 @@ fn setup(tc: &TestCase) -> Setup {
     }
     let mut b = b.formats();
     if on() {
-        keys.gt = Some(
-            b.register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "gt")).unwrap(),
-        );
+        keys.gt = Some(b.register_format(&FormatFieldDef::<Gt>::new("GT", "gt")).unwrap());
     }
     if on() {
-        keys.dp = Some(
-            b.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "dp"))
-                .unwrap(),
-        );
+        keys.dp = Some(b.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "dp")).unwrap());
     }
     if on() {
         keys.af =
@@ -308,7 +295,7 @@ fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
         let mut enc = match &r.filter {
             Filter::Pass => enc.filter_pass(),
             Filter::Missing => enc.no_filter(),
-            Filter::Failed(ids) => enc.filter_fail(ids.iter().map(|&i| &s.filters[i])),
+            Filter::Failed(ids) => enc.filter_fail(ids.iter().map(|&i| &s.filters[i])).unwrap(),
         };
         let i = &r.info;
         if let (Some(key), Some(v)) = (&k.i1, i.i1) {
@@ -327,10 +314,10 @@ fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
             key.encode(&mut enc, v).unwrap();
         }
         if let (Some(key), true) = (&k.fl, i.fl) {
-            key.encode(&mut enc);
+            key.encode(&mut enc).unwrap();
         }
         if let (Some(key), Some(v)) = (&k.s1, &i.s1) {
-            key.encode(&mut enc, v);
+            key.encode(&mut enc, v).unwrap();
         }
         if s.n_samples == 0 {
             enc.emit().unwrap();
@@ -403,7 +390,6 @@ fn as_read_record(w: &Record, format: OutputFormat) -> Record {
 }
 
 fn check(s: &Setup, written: &Record, read: &FullRecord, format: OutputFormat) {
-    let text = format != OutputFormat::Bcf;
     let at = format!("{format:?}: {written:?}");
     let written = &as_read_record(written, format);
     let locus = read.locus();
@@ -480,22 +466,13 @@ fn check(s: &Setup, written: &Record, read: &FullRecord, format: OutputFormat) {
     for (i, idx) in s.header.sample_indices().enumerate() {
         let sample = samples.sample(idx);
         if let Some(key) = &k.gt {
-            // shortcut: the BCF writer still encodes a missing allele as 0,
-            // without the phase bit `r[vcf_record.gt_first_phase+3]` now asks
-            // for; VCF text keeps it. Drop the BCF arm once the writer does.
+            // A missing allele keeps its phase bit; a missing haploid call
+            // reads as absent (`r[vcf_record.gt_first_phase+3]`).
             let expected =
                 f.gt.as_ref()
                     .map(|g| &g[i])
                     .filter(|g| !(g.alleles.len() == 1 && g.alleles[0].is_none()))
-                    .map(|g| {
-                        let phased = g
-                            .phased
-                            .iter()
-                            .zip(&g.alleles[1..])
-                            .map(|(&p, a)| p && (text || a.is_some()))
-                            .collect();
-                        Genotype { alleles: g.alleles.clone(), phased }
-                    });
+                    .cloned();
             let expected = expected.as_ref();
             let got = sample.get(key).unwrap();
             assert_eq!(

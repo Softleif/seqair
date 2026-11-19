@@ -68,7 +68,7 @@ fn write_bcf(pad: usize) -> Written {
         let pos = Pos1::new(i * STRIDE + 1).unwrap();
         let mut enc =
             writer.begin_record(&contig, pos, &alleles, Some(30.0)).unwrap().filter_pass();
-        sc.encode(&mut enc, &padding);
+        sc.encode(&mut enc, &padding).unwrap();
         enc.emit().unwrap();
     }
     let (_inner, index) = writer.finish().unwrap();

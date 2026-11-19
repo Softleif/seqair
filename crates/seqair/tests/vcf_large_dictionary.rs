@@ -11,10 +11,10 @@
 )]
 
 use noodles::vcf::variant::io::Write as _;
+use seqair::vcf::Scalar;
 use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
-    Alleles, ContigDef, ContigId, FormatInt, InfoInt, Number, OutputFormat, VcfError, VcfHeader,
-    Writer,
+    Alleles, ContigDef, ContigId, FormatInt, InfoInt, OutputFormat, VcfError, VcfHeader, Writer,
 };
 use seqair_types::{Base, Pos1};
 use std::io::Cursor;
@@ -47,7 +47,7 @@ fn setup_with(n_info: usize, n_format: usize) -> Setup {
     let mut builder = builder.infos();
     let infos = (0..n_info)
         .map(|k| {
-            let def = InfoFieldDef::new(leak(format!("I{k}")), Number::Count(1), "i");
+            let def = InfoFieldDef::<Scalar<i32>>::new(leak(format!("I{k}")), "i");
             builder.register_info(&def).unwrap()
         })
         .collect();
@@ -55,7 +55,7 @@ fn setup_with(n_info: usize, n_format: usize) -> Setup {
     // PASS and the INFO ids come first, so every FORMAT id is past 320.
     let formats = (0..n_format)
         .map(|k| {
-            let def = FormatFieldDef::new(leak(format!("F{k}")), Number::Count(1), "f");
+            let def = FormatFieldDef::<Scalar<i32>>::new(leak(format!("F{k}")), "f");
             builder.register_format(&def).unwrap()
         })
         .collect();

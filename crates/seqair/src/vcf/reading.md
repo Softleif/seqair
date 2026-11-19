@@ -247,7 +247,7 @@ riker masks the reference span of every variant. `Locus` alone skips everything
 past the fixed fields; the end already accounts for INFO END, SVLEN and gVCF
 blocks, as htslib computes it.
 
-```rust,ignore
+```rust
 use seqair::vcf::{Locus, VcfFile, VcfPos};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -257,7 +257,7 @@ let mut reader = file.reader::<Locus>().open()?;
 let mut longest = 0;
 while let Some(locus) = reader.next_record()? {
     if let (VcfPos::At(start), VcfPos::At(end)) = (locus.start(), locus.end()) {
-        longest = longest.max(end.get() - start.get() + 1);
+        longest = longest.max(end.as_u32() - start.as_u32() + 1);
     }
 }
 assert!(longest > 1); // the deletions span more than their first base

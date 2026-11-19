@@ -13,7 +13,6 @@ const STILL_IGNORED: &[(&str, usize, &str)] = &[
     ("Region queries", 0, "region queries"),
     ("Region queries", 1, "query_many"),
     ("Many threads", 0, "partitions"),
-    ("Positions only", 0, "calls `Pos1::get`, which is `as_u32`; the example needs fixing"),
 ];
 
 // r[verify vcf_fields.guide]

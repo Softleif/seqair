@@ -162,24 +162,17 @@ fn main() -> anyhow::Result<()> {
     let mut builder = from_bam.builder.infos();
 
     // INFO fields: DP (total depth), AF (alt allele frequency)
-    let dp_info: InfoInt = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
-        "DP",
-        Number::Count(1),
-        "Total depth",
-    ))?;
+    let dp_info: InfoInt =
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total depth"))?;
     let af_info: seqair::vcf::InfoFloats = builder.register_info(
         &InfoFieldDef::<Arr<f32>>::new("AF", Number::AlternateBases, "Allele frequency"),
     )?;
 
     // FORMAT fields: GT (genotype), DP (sample depth), AD (allelic depths)
     let mut builder = builder.formats();
-    let gt_fmt: FormatGt =
-        builder.register_format(&FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype"))?;
-    let dp_fmt: FormatInt = builder.register_format(&FormatFieldDef::<Scalar<i32>>::new(
-        "DP",
-        Number::Count(1),
-        "Sample depth",
-    ))?;
+    let gt_fmt: FormatGt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype"))?;
+    let dp_fmt: FormatInt =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Sample depth"))?;
 
     let mut builder = builder.samples();
     builder.add_sample(&args.sample)?;

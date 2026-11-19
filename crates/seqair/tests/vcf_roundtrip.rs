@@ -28,6 +28,7 @@ use seqair::vcf::record_encoder::{
 use seqair::vcf::{
     Alleles, ContigDef, FilterId, Genotype, Number, OutputFormat, Ready, VcfHeader, Writer,
 };
+use seqair::vcf::{Arr, Flag, Gt, Scalar};
 use seqair_types::{Base, Pos1};
 use std::io::Cursor;
 use std::sync::Arc;
@@ -56,27 +57,31 @@ fn make_setup() -> RoundtripSetup {
         builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
     let mut builder = builder.infos();
     let dp_info =
-        builder.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total Depth")).unwrap();
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total Depth")).unwrap();
     let ad_info = builder
-        .register_info(&InfoFieldDef::new("AD", Number::ReferenceAlternateBases, "Allele Depth"))
+        .register_info(&InfoFieldDef::<Arr<i32>>::new(
+            "AD",
+            Number::ReferenceAlternateBases,
+            "Allele Depth",
+        ))
         .unwrap();
     let af_info = builder
-        .register_info(&InfoFieldDef::new("AF", Number::AlternateBases, "Allele Frequency"))
+        .register_info(&InfoFieldDef::<Arr<f32>>::new(
+            "AF",
+            Number::AlternateBases,
+            "Allele Frequency",
+        ))
         .unwrap();
-    let db_flag = builder
-        .register_info(&InfoFieldDef::new("DB", Number::Count(0), "dbSNP membership"))
-        .unwrap();
-    let mq_info = builder
-        .register_info(&InfoFieldDef::new("MQ", Number::Count(1), "Mapping Quality"))
-        .unwrap();
+    let db_flag =
+        builder.register_info(&InfoFieldDef::<Flag>::new("DB", "dbSNP membership")).unwrap();
+    let mq_info =
+        builder.register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", "Mapping Quality")).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
-    let dp_fmt = builder
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Read Depth"))
-        .unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
+    let dp_fmt =
+        builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Read Depth")).unwrap();
     let gq_fmt = builder
-        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype Quality"))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("GQ", "Genotype Quality"))
         .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("sample1").unwrap();
@@ -148,8 +153,11 @@ fn write_one_record<W: std::io::Write>(
         .begin_record(&setup.contig, Pos1::new(rec.pos).unwrap(), &rec.alleles, rec.qual)
         .unwrap();
 
-    let mut enc =
-        if rec.filter_pass { enc.filter_pass() } else { enc.filter_fail([&setup.q20_filter]) };
+    let mut enc = if rec.filter_pass {
+        enc.filter_pass()
+    } else {
+        enc.filter_fail([&setup.q20_filter]).unwrap()
+    };
 
     // INFO fields
     setup.dp_info.encode(&mut enc, rec.dp).unwrap();
@@ -169,7 +177,7 @@ fn write_one_record<W: std::io::Write>(
     }
 
     if rec.has_db_flag {
-        setup.db_flag.encode(&mut enc);
+        setup.db_flag.encode(&mut enc).unwrap();
     }
     setup.mq_info.encode(&mut enc, rec.mq).unwrap();
 

@@ -20,6 +20,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use noodles::vcf::variant::io::Write as _;
+use seqair::vcf::{Arr, Gt, Scalar};
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
@@ -85,54 +86,46 @@ fn seqair_setup() -> SeqairSetup {
 
     let mut b = b.infos();
     let dp_info =
-        b.register_info(&InfoFieldDef::new("DP", Number::Count(1), "Total read depth")).unwrap();
+        b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Total read depth")).unwrap();
     let an_info = b
-        .register_info(&InfoFieldDef::new(
-            "AN",
-            Number::Count(1),
-            "Total allele count in genotypes",
-        ))
+        .register_info(&InfoFieldDef::<Scalar<i32>>::new("AN", "Total allele count in genotypes"))
         .unwrap();
     let ac_info = b
-        .register_info(&InfoFieldDef::new(
+        .register_info(&InfoFieldDef::<Arr<i32>>::new(
             "AC",
             Number::AlternateBases,
             "Allele count in genotypes, for each ALT",
         ))
         .unwrap();
     let af_info = b
-        .register_info(&InfoFieldDef::new(
+        .register_info(&InfoFieldDef::<Arr<f32>>::new(
             "AF",
             Number::AlternateBases,
             "Allele frequency from GT counts, for each ALT",
         ))
         .unwrap();
     let mq_info =
-        b.register_info(&InfoFieldDef::new("MQ", Number::Count(1), "RMS mapping quality")).unwrap();
+        b.register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", "RMS mapping quality")).unwrap();
     let qd_info = b
-        .register_info(&InfoFieldDef::new(
+        .register_info(&InfoFieldDef::<Scalar<f32>>::new(
             "QD",
-            Number::Count(1),
             "Variant confidence divided by unfiltered depth",
         ))
         .unwrap();
     let fs_info = b
-        .register_info(&InfoFieldDef::new(
+        .register_info(&InfoFieldDef::<Scalar<f32>>::new(
             "FS",
-            Number::Count(1),
             "Phred-scaled p-value using Fisher's exact test for strand bias",
         ))
         .unwrap();
 
     let mut b = b.formats();
-    let gt_fmt =
-        b.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
+    let gt_fmt = b.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let dp_fmt = b
-        .register_format(&FormatFieldDef::new("DP", Number::Count(1), "Approximate read depth"))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "Approximate read depth"))
         .unwrap();
-    let gq_fmt = b
-        .register_format(&FormatFieldDef::new("GQ", Number::Count(1), "Genotype quality"))
-        .unwrap();
+    let gq_fmt =
+        b.register_format(&FormatFieldDef::<Scalar<i32>>::new("GQ", "Genotype quality")).unwrap();
 
     let mut b = b.samples();
     for s in 1..=N_SAMPLES {
@@ -189,7 +182,7 @@ fn seqair_encode_record<W: std::io::Write>(
     let enc =
         writer.begin_record(&s.contig, pos, alleles, Some(10.0 + (i % 50) as f32 * 2.0)).unwrap();
     let mut enc =
-        if i % 10 == 7 { enc.filter_fail([&s.lowqual_filter]) } else { enc.filter_pass() };
+        if i % 10 == 7 { enc.filter_fail([&s.lowqual_filter]).unwrap() } else { enc.filter_pass() };
 
     let dp = 30 + (i % 70) as i32;
     s.dp_info.encode(&mut enc, dp).unwrap();

@@ -67,13 +67,11 @@ fn info_header() -> (Arc<VcfHeader>, ContigId, InfoKeys) {
     let mut b = VcfHeader::builder();
     let contig = b.register_contig("chr1", ContigDef::new(Some(1_000_000))).unwrap();
     let mut b = b.infos();
-    let dp =
-        b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d")).unwrap();
-    let bq =
-        b.register_info(&InfoFieldDef::<Scalar<f32>>::new("BQ", Number::Count(1), "q")).unwrap();
+    let dp = b.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "d")).unwrap();
+    let bq = b.register_info(&InfoFieldDef::<Scalar<f32>>::new("BQ", "q")).unwrap();
     let ad = b.register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "a")).unwrap();
     let sc = b.register_info(&InfoFieldDef::<Str>::new("SC", Number::Count(1), "s")).unwrap();
-    let flag = b.register_info(&InfoFieldDef::<Flag>::new("FL", Number::Count(0), "f")).unwrap();
+    let flag = b.register_info(&InfoFieldDef::<Flag>::new("FL", "f")).unwrap();
     let header = Arc::new(b.build().unwrap());
     (header, contig, InfoKeys { dp, bq, ad, sc, flag })
 }
@@ -120,8 +118,8 @@ fn encode_info(
             InfoOp::Dp(v) => keys.dp.encode(&mut enc, *v).unwrap(),
             InfoOp::Bq(v) => keys.bq.encode(&mut enc, *v).unwrap(),
             InfoOp::Ad(v) => keys.ad.encode(&mut enc, v).unwrap(),
-            InfoOp::Sc(v) => keys.sc.encode(&mut enc, v),
-            InfoOp::Flag => keys.flag.encode(&mut enc),
+            InfoOp::Sc(v) => keys.sc.encode(&mut enc, v).unwrap(),
+            InfoOp::Flag => keys.flag.encode(&mut enc).unwrap(),
         }
     }
     enc.emit().unwrap();
@@ -177,12 +175,8 @@ fn fmt_header() -> (Arc<VcfHeader>, ContigId, FmtKeys) {
     let mut b = VcfHeader::builder();
     let contig = b.register_contig("chr1", ContigDef::new(Some(1_000_000))).unwrap();
     let mut b = b.formats();
-    let dp = b
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "d"))
-        .unwrap();
-    let q = b
-        .register_format(&FormatFieldDef::<Scalar<f32>>::new("GQ", Number::Count(1), "q"))
-        .unwrap();
+    let dp = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("DP", "d")).unwrap();
+    let q = b.register_format(&FormatFieldDef::<Scalar<f32>>::new("GQ", "q")).unwrap();
     let pl =
         b.register_format(&FormatFieldDef::<Arr<f32>>::new("PL", Number::Unknown, "p")).unwrap();
     let mut b = b.samples();

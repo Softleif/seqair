@@ -3,10 +3,10 @@
 //! Covers `vcf_header.file_format` and `vcf_header.file_format.single_version`.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 
-use seqair::vcf::{FormatFieldDef, Number, Scalar, VcfHeader, VcfVersion};
+use seqair::vcf::{Arr, FormatFieldDef, Number, VcfHeader, VcfVersion};
 
-const fn format_def(name: &'static str, number: Number) -> FormatFieldDef<Scalar<f32>> {
-    FormatFieldDef::new(name, number, "test field")
+const fn format_def(name: &'static str, number: Number) -> FormatFieldDef<Arr<f32>> {
+    FormatFieldDef::<Arr<f32>>::new(name, number, "test field")
 }
 
 /// The declared version has to be one that defines `Number=M`, which is VCF

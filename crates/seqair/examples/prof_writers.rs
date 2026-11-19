@@ -207,21 +207,23 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
         .collect();
     let mut b = b.infos();
     let r = Number::ReferenceAlternateBases;
-    let one = Number::Count(1);
     macro_rules! info {
+        ($kind:ty, $name:expr) => {
+            b.register_info(&InfoFieldDef::<$kind>::new($name, "d")).unwrap()
+        };
         ($kind:ty, $name:expr, $num:expr) => {
             b.register_info(&InfoFieldDef::<$kind>::new($name, $num, "d")).unwrap()
         };
     }
     let ad = info!(Arr<i32>, "AD", r);
-    let bq = info!(Scalar<f32>, "BQ", one);
-    let dp = info!(Scalar<i32>, "DP", one);
-    let mq = info!(Scalar<f32>, "MQ", one);
-    let mq0 = info!(Scalar<i32>, "MQ0", one);
-    let ns = info!(Scalar<i32>, "NS", one);
+    let bq = info!(Scalar<f32>, "BQ");
+    let dp = info!(Scalar<i32>, "DP");
+    let mq = info!(Scalar<f32>, "MQ");
+    let mq0 = info!(Scalar<i32>, "MQ0");
+    let ns = info!(Scalar<i32>, "NS");
     let as_sb_ot = info!(Arr<i32>, "AS_SB_OT", r);
     let as_sb_ob = info!(Arr<i32>, "AS_SB_OB", r);
-    let sc5 = info!(Str, "SC5", one);
+    let sc5 = info!(Str, "SC5", Number::Count(1));
     let af = info!(Arr<f32>, "AF", Number::AlternateBases);
     let abq = info!(Arr<f32>, "ABQ", r);
     let amq = info!(Arr<f32>, "AMQ", r);
@@ -230,22 +232,25 @@ fn build_schema(contigs: &[(String, u64)]) -> (VcfHeader, Schema) {
     let as_ss_mq_ot = info!(Arr<f32>, "AS_SS_MQ_OT", r);
     let as_ss_mq_ob = info!(Arr<f32>, "AS_SS_MQ_OB", r);
     let pir = info!(Arr<f32>, "PIR", r);
-    let ent100 = info!(Scalar<f32>, "ENT100", one);
+    let ent100 = info!(Scalar<f32>, "ENT100");
     let nab = info!(Arr<f32>, "NAB", r);
     let noi = info!(Arr<f32>, "NOI", r);
     let m5mc_strands = info!(Arr<i32>, "M5mC_Strands", Number::Count(4));
-    let cpg = info!(seqair::vcf::Flag, "CPG", Number::Count(0));
-    let cpgnovo = info!(seqair::vcf::Flag, "CPGnovo", Number::Count(0));
+    let cpg = info!(seqair::vcf::Flag, "CPG");
+    let cpgnovo = info!(seqair::vcf::Flag, "CPGnovo");
     let mut b = b.formats();
     macro_rules! format {
+        ($kind:ty, $name:expr) => {
+            b.register_format(&FormatFieldDef::<$kind>::new($name, "d")).unwrap()
+        };
         ($kind:ty, $name:expr, $num:expr) => {
             b.register_format(&FormatFieldDef::<$kind>::new($name, $num, "d")).unwrap()
         };
     }
-    let gt = format!(seqair::vcf::Gt, "GT", one);
+    let gt = format!(seqair::vcf::Gt, "GT");
     let gl = format!(Arr<f32>, "GL", Number::Genotypes);
     let gc = format!(Arr<f32>, "GC", Number::Genotypes);
-    let fdp = format!(Scalar<i32>, "DP", one);
+    let fdp = format!(Scalar<i32>, "DP");
     let m5mc = format!(Arr<f32>, "M5mC", Number::Unknown);
     let dpm5mc = format!(Arr<i32>, "DPM5mC", Number::Unknown);
     let adm5mc = format!(Arr<i32>, "ADM5mC", Number::Unknown);
@@ -462,7 +467,7 @@ fn encode_rec<W: Write>(w: &mut Writer<W, Ready>, s: &Schema, r: &Rec) {
     let mut enc = if r.filters.is_empty() {
         enc.filter_pass()
     } else {
-        enc.filter_fail(r.filters.iter().map(|&i| &s.filters[i as usize].1))
+        enc.filter_fail(r.filters.iter().map(|&i| &s.filters[i as usize].1)).unwrap()
     };
     for (idx, v) in &r.info {
         let e = &mut enc;
@@ -475,7 +480,7 @@ fn encode_rec<W: Write>(w: &mut Writer<W, Ready>, s: &Schema, r: &Rec) {
             (5, Val::Int(n)) => s.ns.encode(e, *n).unwrap(),
             (6, Val::Ints(a)) => s.as_sb_ot.encode(e, a).unwrap(),
             (7, Val::Ints(a)) => s.as_sb_ob.encode(e, a).unwrap(),
-            (8, Val::Str(x)) => s.sc5.encode(e, x.as_str()),
+            (8, Val::Str(x)) => s.sc5.encode(e, x.as_str()).unwrap(),
             (9, Val::Floats(a)) => s.af.encode(e, a).unwrap(),
             (10, Val::Floats(a)) => s.abq.encode(e, a).unwrap(),
             (11, Val::Floats(a)) => s.amq.encode(e, a).unwrap(),
@@ -488,8 +493,8 @@ fn encode_rec<W: Write>(w: &mut Writer<W, Ready>, s: &Schema, r: &Rec) {
             (18, Val::Floats(a)) => s.nab.encode(e, a).unwrap(),
             (19, Val::Floats(a)) => s.noi.encode(e, a).unwrap(),
             (20, Val::Ints(a)) => s.m5mc_strands.encode(e, a).unwrap(),
-            (21, Val::Flag) => s.cpg.encode(e),
-            (22, Val::Flag) => s.cpgnovo.encode(e),
+            (21, Val::Flag) => s.cpg.encode(e).unwrap(),
+            (22, Val::Flag) => s.cpgnovo.encode(e).unwrap(),
             _ => panic!("INFO kind mismatch for {}", INFO_IDS[*idx as usize]),
         }
     }

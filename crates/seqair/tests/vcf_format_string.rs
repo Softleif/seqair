@@ -10,7 +10,8 @@
 )]
 
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, FormatString};
-use seqair::vcf::{Alleles, ContigDef, Genotype, Number, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Alleles, ContigDef, Genotype, OutputFormat, VcfHeader, Writer};
+use seqair::vcf::{Gt, Number, Str};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
@@ -25,10 +26,9 @@ fn make_setup(samples: &[&str]) -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(1000))).unwrap();
     let mut builder = builder.formats();
-    let gt_fmt =
-        builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "Genotype")).unwrap();
+    let gt_fmt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "Genotype")).unwrap();
     let lbl_fmt = builder
-        .register_format(&FormatFieldDef::new("LBL", Number::Count(1), "Per-sample label"))
+        .register_format(&FormatFieldDef::<Str>::new("LBL", Number::Count(1), "Per-sample label"))
         .unwrap();
     let mut builder = builder.samples();
     for name in samples {

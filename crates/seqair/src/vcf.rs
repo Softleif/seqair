@@ -34,14 +34,14 @@
 //! let chr1 = builder.register_contig("chr1", ContigDef::new(Some(248_956_422)))?;
 //! let mut builder = builder.infos();
 //! let dp_info: InfoInt = builder.register_info(
-//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Total read depth")
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", "Total read depth")
 //! )?;
 //! let mut builder = builder.formats();
 //! let gt_fmt: FormatGt = builder.register_format(
-//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype")
+//!     &FormatFieldDef::<Gt>::new("GT", "Genotype")
 //! )?;
 //! let dp_fmt: FormatInt = builder.register_format(
-//!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Sample depth")
+//!     &FormatFieldDef::<Scalar<i32>>::new("DP", "Sample depth")
 //! )?;
 //! let mut builder = builder.samples();
 //! builder.add_sample("sample1")?;
@@ -88,11 +88,11 @@
 //! let contig = builder.register_contig("chr1", ContigDef::new(Some(1000)))?;
 //! let mut builder = builder.infos();
 //! let dp: InfoInt = builder.register_info(
-//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Depth")
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", "Depth")
 //! )?;
 //! let mut builder = builder.formats();
 //! let gt: FormatGt = builder.register_format(
-//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), "Genotype")
+//!     &FormatFieldDef::<Gt>::new("GT", "Genotype")
 //! )?;
 //! let mut builder = builder.samples();
 //! builder.add_sample("sample1")?;
@@ -134,8 +134,8 @@
 //! use seqair::vcf;
 //!
 //! // header metadata for the field, defined once
-//! const DP_DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::new(
-//!     "DP", vcf::Number::Count(1), "Combined depth"
+//! const DP_DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::<vcf::Scalar<i32>>::new(
+//!     "DP", "Combined depth"
 //! );
 //!
 //! // all resolved keys your app will encode through

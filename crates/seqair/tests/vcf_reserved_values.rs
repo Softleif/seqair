@@ -22,6 +22,7 @@
 )]
 
 use hegel::prelude::*;
+use seqair::vcf::Gt;
 use seqair::vcf::record_encoder::{
     Arr, FormatEncoder, FormatFieldDef, FormatFloats, FormatGt, FormatInt, FormatInts, InfoEncoder,
     InfoFieldDef, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, OptArr, Scalar,
@@ -62,9 +63,8 @@ fn setup() -> Setup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef::new(Some(100_000))).unwrap();
     let mut builder = builder.infos();
-    let info_int = builder
-        .register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), "Scalar integer"))
-        .unwrap();
+    let info_int =
+        builder.register_info(&InfoFieldDef::<Scalar<i32>>::new("DP", "Scalar integer")).unwrap();
     let info_ints = builder
         .register_info(&InfoFieldDef::<Arr<i32>>::new("AD", Number::Unknown, "Integer list"))
         .unwrap();
@@ -75,20 +75,15 @@ fn setup() -> Setup {
             "Integer list with missing elements",
         ))
         .unwrap();
-    let info_float = builder
-        .register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", Number::Count(1), "Scalar float"))
-        .unwrap();
+    let info_float =
+        builder.register_info(&InfoFieldDef::<Scalar<f32>>::new("MQ", "Scalar float")).unwrap();
     let info_floats = builder
         .register_info(&InfoFieldDef::<Arr<f32>>::new("AF", Number::Unknown, "Float list"))
         .unwrap();
     let mut builder = builder.formats();
-    let gt = builder.register_format(&FormatFieldDef::new("GT", Number::Count(1), "GT")).unwrap();
+    let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "GT")).unwrap();
     let fmt_int = builder
-        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
-            "FD",
-            Number::Count(1),
-            "Per-sample integer",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new("FD", "Per-sample integer"))
         .unwrap();
     let fmt_ints = builder
         .register_format(&FormatFieldDef::<Arr<i32>>::new(
@@ -98,11 +93,7 @@ fn setup() -> Setup {
         ))
         .unwrap();
     let fmt_float = builder
-        .register_format(&FormatFieldDef::<Scalar<f32>>::new(
-            "FQ",
-            Number::Count(1),
-            "Per-sample float",
-        ))
+        .register_format(&FormatFieldDef::<Scalar<f32>>::new("FQ", "Per-sample float"))
         .unwrap();
     let fmt_floats = builder
         .register_format(&FormatFieldDef::<Arr<f32>>::new(
