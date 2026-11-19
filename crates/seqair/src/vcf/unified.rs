@@ -1285,9 +1285,12 @@ impl<'a> RecordEncoder<'a, Begun> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let from = enc.shared_buf.len();
-                let len = ids.iter().map(|id| id.len().saturating_add(1)).sum::<usize>().max(2);
+                // r[impl bcf_writer.shared_variable+2]
+                let len = ids.iter().map(|id| id.len().saturating_add(1)).sum::<usize>();
                 encode_type_byte(enc.shared_buf, len.saturating_sub(1), BCF_BT_CHAR);
-                write_column(enc.shared_buf);
+                if !ids.is_empty() {
+                    write_column(enc.shared_buf);
+                }
                 let new_len = splice_appended(enc.shared_buf, 24..enc.alleles_start, from);
                 enc.alleles_start = 24usize.saturating_add(new_len);
             }

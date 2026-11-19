@@ -358,9 +358,9 @@ use super::alleles::Alleles;
 use seqair_types::Pos1;
 
 impl Alleles {
-    // r[impl bcf_encoder.begin_record]
+    // r[impl bcf_encoder.begin_record+2]
     // r[impl bcf_encoder.checked_casts]
-    // r[impl bcf_writer.shared_variable]
+    // r[impl bcf_writer.shared_variable+2]
     /// Begin a BCF record: write the 24-byte fixed header, ID, and alleles.
     /// Sets `n_allele/n_alt` on the encoder for downstream field validation.
     pub(crate) fn begin_record(
@@ -419,9 +419,8 @@ impl Alleles {
         // Placeholder for n_fmt|n_sample (patched at emit)
         enc.shared_buf.extend_from_slice(&0u32.to_le_bytes());
 
-        // ID = "." until `RecordEncoder::ids` replaces it.
-        encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
-        enc.shared_buf.push(b'.');
+        // No ID until `RecordEncoder::ids` replaces it: the empty string.
+        encode_type_byte(enc.shared_buf, 0, BCF_BT_CHAR);
         enc.alleles_start = enc.shared_buf.len();
 
         // REF allele (zero-alloc): compute length, write type header, then data.
@@ -518,7 +517,7 @@ mod tests {
         }
     }
 
-    // r[verify bcf_encoder.begin_record]
+    // r[verify bcf_encoder.begin_record+2]
     #[test]
     fn begin_record_writes_fixed_header_and_alleles() {
         let mut shared = Vec::new();
@@ -538,6 +537,7 @@ mod tests {
         assert_eq!(enc.pos_0based, 99); // 0-based
         assert_eq!(enc.rlen, 1);
         assert!(shared.len() >= 24, "must have at least 24-byte header");
+        assert_eq!(shared.get(24), Some(&0x07), "no ID is the empty string");
     }
 
     // ── FieldTracker unit tests ─────────────────────────────────────

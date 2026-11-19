@@ -127,7 +127,7 @@ fn has_bcftools() -> bool {
 // ── Deterministic tests ────────────────────────────────────────────────
 
 // r[verify bcf_writer.fixed_fields]
-// r[verify bcf_writer.shared_variable]
+// r[verify bcf_writer.shared_variable+2]
 // r[verify bcf_writer.filter_pass]
 #[test]
 fn bcftools_reads_seqair_simple_snv() {

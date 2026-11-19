@@ -15,8 +15,8 @@ r[bcf_encoder.bcf_value_float]
 
 ## BCF Record Encoding
 
-r[bcf_encoder.begin_record]
-Beginning a BCF record MUST write the 24-byte fixed header (with placeholder n_info/n_fmt), ID as `.`, and REF/ALT allele strings using zero-alloc `write_ref_into`/`write_alts_into`. It MUST set `n_allele` and `n_alt` for downstream validation.
+r[bcf_encoder.begin_record+2]
+Beginning a BCF record MUST write the 24-byte fixed header (with placeholder n_info/n_fmt), the missing ID (`r[bcf_writer.shared_variable+2]`), and REF/ALT allele strings using zero-alloc `write_ref_into`/`write_alts_into`. It MUST set `n_allele` and `n_alt` for downstream validation.
 
 r[bcf_encoder.checked_casts]
 All conversions from `usize`/`u32` to narrower integer types (`i32`, `u16`, `u8`) for user-controlled values (contig tid, position, allele count, sample count) MUST use checked conversion (`try_from`) and return a typed error on overflow rather than silently truncating via `as`.

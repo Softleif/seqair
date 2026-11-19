@@ -34,8 +34,8 @@ Missing values MUST use the type-specific sentinel: int8=0x80, int16=0x8000 (LE)
 r[bcf_writer.end_of_vector]
 When samples have variable-length values for a FORMAT field, shorter vectors MUST be padded with end-of-vector sentinels: int8=0x81, int16=0x8001, int32=0x80000001, float=0x7F800002, char=0x00 (NUL).
 
-r[bcf_writer.shared_variable]
-After the 24 fixed bytes, shared data MUST contain in order: ID (typed string, `.` if missing), alleles (n_allele typed strings, REF first), FILTER (typed integer vector of dictionary indices; PASS=[0], not-applied=type 0/count 0), INFO key-value pairs (typed int key = dictionary index, typed value).
+r[bcf_writer.shared_variable+2]
+After the 24 fixed bytes, shared data MUST contain in order: ID (typed string; a record without ID is the empty string, type byte `0x07`, as htslib writes it — a stored `.` is an identifier to noodles, which reads it back as ID `.`), alleles (n_allele typed strings, REF first), FILTER (typed integer vector of dictionary indices; PASS=[0], not-applied=type 0/count 0), INFO key-value pairs (typed int key = dictionary index, typed value).
 
 > _[BCF2] — FORMAT/sample encoding: field-major layout, key + type + n_sample values per FORMAT field_
 

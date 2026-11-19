@@ -410,7 +410,7 @@ fn info_scalar_types_round_trip_through_bcftools(tc: TestCase) {
 }
 
 // r[verify record_encoder.key_encode+2]
-// r[verify bcf_writer.shared_variable]
+// r[verify bcf_writer.shared_variable+2]
 // r[verify vcf_header.info_def]
 /// The `Number` cardinalities that are derived from the ALT count — `A`, `R`,
 /// `G` — keep exactly the width the record's allele count implies, and a fixed
@@ -455,7 +455,7 @@ fn info_number_cardinalities_survive_bcftools(tc: TestCase) {
 }
 
 // r[verify vcf_record.alleles_serialization]
-// r[verify bcf_writer.shared_variable]
+// r[verify bcf_writer.shared_variable+2]
 /// Every allele kind the type-safe `Alleles` API can build — a reference-only
 /// site, a 1..3-ALT SNV, an insertion, a deletion and a complex site — spells
 /// the REF and ALT columns that the draw implies, as bcftools reads them back
