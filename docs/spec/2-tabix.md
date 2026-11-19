@@ -88,6 +88,9 @@ References longer than 512 Mbp require CSI (BAI/tabix with min_shift=14, depth=5
 r[index.edge.no_records]
 A reference with no records has no bins and no linear index entries. Queries for such references MUST return an empty chunk list (not an error).
 
+r[index.query_clamp]
+A query's end MUST be clamped to where the reference's last bin ends (computed once, at load) before listing candidate bins: no bin holds a position past it, so the chunks are the same, and an open-ended region (`start..`, clamped to the binning's 2^29 or more) no longer walks the ~37 000 leaf bins of the whole binning on every query (84 µs per requery in HiPhase's profile). A property test MUST compare `query` with the unclamped scan over every bin (`query_annotated`), on bounded and open-ended regions of real BAI, TBI and CSI indexes.
+
 r[index.edge.name_mismatch+2]
 Tabix numbers its sequences by its own name list, not by the SAM header: `tabix -p sam` lists only the sequences that have records, in file order, and unplaced lines under `*`. The reader MUST key each tabix sequence by the header tid of its name, so a header sequence the index lacks has no bins and queries on it return nothing. A name the header lacks, other than `*`, SHOULD produce a warning (the index may be stale); a name list whose length is not `n_ref` MUST fail with `BaiError::TabixNameCount`. CSI and BAI do NOT store sequence names and are keyed by tid — this applies only to tabix.
 
