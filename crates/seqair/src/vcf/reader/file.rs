@@ -1,7 +1,7 @@
 //! [`VcfFile`]: a VCF/BCF file opened once — format, header, index and the
 //! tables every reader of it shares (`r[vcf_reader.file+2]`).
 
-use super::error::{VcfFormat, VcfReadError};
+use super::error::{OpenError, VcfFormat, VcfReadError};
 use super::fields::Fields;
 use super::keys::FieldTable;
 use super::query::Partition;
@@ -166,7 +166,7 @@ impl Source {
         match self {
             Source::Path(path) => File::open(path)
                 .map(|f| Input::File(BufReader::with_capacity(FILE_BUFFER, f)))
-                .map_err(|source| VcfReadError::Open { path: path.clone(), source }),
+                .map_err(|e| VcfReadError::Open { path: Some(path.clone()), source: e.into() }),
             Source::Bytes(bytes) => Ok(Input::Bytes(Cursor::new(Arc::clone(bytes)))),
             // Its one reader holds the input; nothing reopens it but a
             // query, which fails first for want of an index.
@@ -248,15 +248,19 @@ impl VcfFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, VcfReadError> {
         let path = path.as_ref();
         let source = Source::Path(path.to_path_buf());
-        let start = read_header(source.open()?)?;
-        let index = match crate::utils::find_index(path, index_extensions(start.0)) {
-            Some(index) => Some(
-                std::fs::read(&index)
-                    .map_err(|source| VcfReadError::Open { path: index, source })?,
-            ),
-            None => None,
+        let input = source.open()?;
+        let open = || {
+            let start = read_header(input)?;
+            let index = match crate::utils::find_index(path, index_extensions(start.0)) {
+                Some(index) => Some(
+                    std::fs::read(&index)
+                        .map_err(|source| OpenError::IndexRead { path: index, source })?,
+                ),
+                None => None,
+            };
+            Self::new(source, start, index.as_deref())
         };
-        Self::new(source, start, index.as_deref())
+        open().map_err(|source| VcfReadError::Open { path: Some(path.to_path_buf()), source })
     }
 
     /// A file held in memory, with its index's bytes (TBI or CSI) if it has
@@ -268,16 +272,19 @@ impl VcfFile {
         data: impl Into<Arc<[u8]>>,
         index: Option<&[u8]>,
     ) -> Result<Self, VcfReadError> {
-        let source = Source::Bytes(data.into());
-        let start = read_header(source.open()?)?;
-        Self::new(source, start, index)
+        let data: Arc<[u8]> = data.into();
+        let open = || {
+            let start = read_header(Input::Bytes(Cursor::new(Arc::clone(&data))))?;
+            Self::new(Source::Bytes(data), start, index)
+        };
+        open().map_err(|source| VcfReadError::Open { path: None, source })
     }
 
     pub(crate) fn new(
         source: Source,
         (format, header, data_start, header_lines): HeaderStart,
         index: Option<&[u8]>,
-    ) -> Result<Self, VcfReadError> {
+    ) -> Result<Self, OpenError> {
         let mut contigs = ContigTable::new(&header);
         let index = match index {
             Some(bytes) if format != VcfFormat::Vcf => {
@@ -400,27 +407,27 @@ pub(crate) fn container(prefix: &[u8]) -> Container {
 }
 
 /// The format a decompressed (or plain) start of a file names.
-pub(crate) fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> {
+pub(crate) fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, OpenError> {
     if start.starts_with(BCF_MAGIC) {
-        return if compressed { Ok(VcfFormat::Bcf) } else { Err(VcfReadError::UncompressedBcf) };
+        return if compressed { Ok(VcfFormat::Bcf) } else { Err(OpenError::UncompressedBcf) };
     }
     if start.starts_with(BCF_21_MAGIC) {
-        return Err(VcfReadError::Bcf21);
+        return Err(OpenError::Bcf21);
     }
     if start.starts_with(VCF_MAGIC) {
         return Ok(if compressed { VcfFormat::VcfGz } else { VcfFormat::Vcf });
     }
-    Err(VcfReadError::UnknownFormat)
+    Err(OpenError::UnknownFormat)
 }
 
 /// Detect the format, read the header, and find where records start and
 /// (VCF text) how many lines the header took.
-fn read_header(mut input: Input) -> Result<HeaderStart, VcfReadError> {
+fn read_header(mut input: Input) -> Result<HeaderStart, OpenError> {
     let mut prefix = Vec::with_capacity(64);
-    (&mut input).take(64).read_to_end(&mut prefix).map_err(read_failed)?;
-    input.seek(SeekFrom::Start(0)).map_err(read_failed)?;
+    (&mut input).take(64).read_to_end(&mut prefix)?;
+    input.seek(SeekFrom::Start(0))?;
     match container(&prefix) {
-        Container::Gzip => Err(VcfReadError::NotBgzf),
+        Container::Gzip => Err(OpenError::NotBgzf),
         Container::Plain => {
             let format = format_of(&prefix, false)?;
             let (header, len, lines) = read_text_header(&mut input)?;
@@ -447,7 +454,7 @@ fn read_header(mut input: Input) -> Result<HeaderStart, VcfReadError> {
 /// A BCF header after its magic, and the bytes it took.
 pub(crate) fn read_bcf_header(
     stream: &mut BgzfStream<Input>,
-) -> Result<(VcfHeader, u64), VcfReadError> {
+) -> Result<(VcfHeader, u64), OpenError> {
     stream.advance(BCF_MAGIC.len());
     let mut l_text = [0u8; 4];
     stream.read_exact_into(&mut l_text)?;
@@ -460,8 +467,7 @@ pub(crate) fn read_bcf_header(
     }
     let mut text = vec![0u8; l_text];
     stream.read_exact_into(&mut text)?;
-    let text =
-        std::str::from_utf8(&text).map_err(|source| VcfReadError::HeaderNotUtf8 { source })?;
+    let text = std::str::from_utf8(&text).map_err(|source| OpenError::HeaderNotUtf8 { source })?;
     let header = VcfHeader::parse(text)?;
     let len = (BCF_MAGIC.len() as u64).saturating_add(4).saturating_add(l_text as u64);
     Ok((header, len))
@@ -472,18 +478,18 @@ pub(crate) fn read_bcf_header(
 /// [`VcfHeader::parse`] says what is missing.
 pub(crate) fn read_text_header(
     input: &mut impl BufRead,
-) -> Result<(VcfHeader, u64, u64), VcfReadError> {
+) -> Result<(VcfHeader, u64, u64), OpenError> {
     let mut text = Vec::new();
     let mut lines = 0u64;
     loop {
         let start = text.len();
         // r[impl vcf_reader.limits]
         let room = (MAX_HEADER_TEXT.saturating_sub(start) as u64).saturating_add(1);
-        let peek = input.fill_buf().map_err(read_failed)?;
+        let peek = input.fill_buf()?;
         if peek.first().is_some_and(|&b| b != b'#') {
             break;
         }
-        let n = (&mut *input).take(room).read_until(b'\n', &mut text).map_err(read_failed)?;
+        let n = (&mut *input).take(room).read_until(b'\n', &mut text)?;
         lines = lines.saturating_add(u64::from(n > 0));
         if text.len() > MAX_HEADER_TEXT {
             let len = text.len();
@@ -496,13 +502,8 @@ pub(crate) fn read_text_header(
         }
     }
     let len = text.len() as u64;
-    let text =
-        std::str::from_utf8(&text).map_err(|source| VcfReadError::HeaderNotUtf8 { source })?;
+    let text = std::str::from_utf8(&text).map_err(|source| OpenError::HeaderNotUtf8 { source })?;
     Ok((VcfHeader::parse(text)?, len, lines))
-}
-
-pub(crate) fn read_failed(source: std::io::Error) -> VcfReadError {
-    VcfReadError::Bgzf(crate::bam::bgzf::BgzfError::ReadFailed { source })
 }
 
 // r[impl vcf_reader.contigs]
@@ -640,12 +641,12 @@ mod tests {
     #[test]
     fn formats_are_detected_from_content() {
         assert!(matches!(container(b"BCF\x02\x02"), Container::Plain));
-        assert!(matches!(format_of(b"BCF\x02\x02", false), Err(VcfReadError::UncompressedBcf)));
-        assert!(matches!(format_of(b"BCF\x02\x01", true), Err(VcfReadError::Bcf21)));
+        assert!(matches!(format_of(b"BCF\x02\x02", false), Err(OpenError::UncompressedBcf)));
+        assert!(matches!(format_of(b"BCF\x02\x01", true), Err(OpenError::Bcf21)));
         assert!(matches!(format_of(b"##fileformat=VCFv4.2", false), Ok(VcfFormat::Vcf)));
         assert!(matches!(format_of(b"##fileformat=VCFv4.2", true), Ok(VcfFormat::VcfGz)));
         assert!(matches!(format_of(b"BCF\x02\x02", true), Ok(VcfFormat::Bcf)));
-        assert!(matches!(format_of(b"hello", true), Err(VcfReadError::UnknownFormat)));
+        assert!(matches!(format_of(b"hello", true), Err(OpenError::UnknownFormat)));
         // A gzip member without BGZF's extra field.
         assert!(matches!(container(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]), Container::Gzip));
     }

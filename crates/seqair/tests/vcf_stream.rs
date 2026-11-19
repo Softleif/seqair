@@ -2,7 +2,9 @@
 //! that cannot seek read as the same file read through `VcfFile`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
 
-use seqair::vcf::{FullRecord, Locus, PlanError, Sample, Site, VcfFile, VcfReadError, VcfStream};
+use seqair::vcf::{
+    FullRecord, Locus, OpenError, PlanError, Sample, Site, VcfFile, VcfReadError, VcfStream,
+};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -105,11 +107,11 @@ fn stream_options_and_errors() {
     }
     assert!(matches!(
         VcfStream::new(std::io::Cursor::new(gz)).reader::<Locus>().open(),
-        Err(VcfReadError::NotBgzf)
+        Err(VcfReadError::Open { path: None, source: OpenError::NotBgzf })
     ));
     assert!(matches!(
         VcfStream::new(std::io::Cursor::new(b"hello".to_vec())).reader::<Locus>().open(),
-        Err(VcfReadError::UnknownFormat)
+        Err(VcfReadError::Open { path: None, source: OpenError::UnknownFormat })
     ));
     // A stream reader has no index to requery.
     let mut reader = panel().reader::<Locus>().open().unwrap();

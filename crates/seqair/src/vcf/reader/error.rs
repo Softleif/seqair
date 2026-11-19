@@ -20,36 +20,17 @@ use std::str::Utf8Error;
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfReadError {
-    #[error("could not open {path}")]
-    Open { path: PathBuf, source: std::io::Error },
+    // r[impl vcf_reader.errors.open]
+    /// Opening the file failed: `path` is the file (`None` for bytes in
+    /// memory or a stream), `source` what failed.
+    #[error("could not open {}", OpenPath(path.as_deref()))]
+    Open { path: Option<PathBuf>, source: OpenError },
 
     #[error(transparent)]
     Bgzf(#[from] BgzfError),
 
     #[error(transparent)]
-    Header(#[from] VcfHeaderError),
-
-    #[error("the header text is not UTF-8")]
-    HeaderNotUtf8 { source: Utf8Error },
-
-    #[error(transparent)]
-    Index(#[from] CsiError),
-
-    #[error(transparent)]
     Plan(#[from] PlanError),
-
-    // r[impl vcf_reader.formats]
-    #[error("the input is gzip-compressed but not BGZF; recompress it with `bgzip`")]
-    NotBgzf,
-
-    #[error("BCF 2.1 is not supported; convert the file with `bcftools view -Ob`")]
-    Bcf21,
-
-    #[error("uncompressed BCF is not supported; compress the file with `bcftools view -Ob`")]
-    UncompressedBcf,
-
-    #[error("the input is neither VCF nor BCF")]
-    UnknownFormat,
 
     // r[impl vcf_reader.errors+3]
     /// A record is malformed: `at` says where it is, `source` what is wrong.
@@ -64,12 +45,6 @@ pub enum VcfReadError {
     NotRequested { section: RecordSection },
 
     // Region queries (`docs/spec/2-vcf-1-reader.md`, "Region queries").
-    #[error(transparent)]
-    Tabix(#[from] BaiError),
-
-    #[error("the index is neither TBI nor CSI")]
-    UnknownIndexFormat,
-
     // r[impl vcf_reader.file+2]
     #[error("the file has no index; queries and partitions need a .csi or .tbi next to it")]
     NoIndex,
@@ -80,6 +55,62 @@ pub enum VcfReadError {
 
     #[error(transparent)]
     Region(#[from] super::region::RegionError),
+}
+
+/// A file's path in a message, or what stands for one.
+struct OpenPath<'a>(Option<&'a Path>);
+
+impl std::fmt::Display for OpenPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(path) => write!(f, "{}", path.display()),
+            None => f.write_str("the input"),
+        }
+    }
+}
+
+// r[impl vcf_reader.errors.open]
+/// What failed while opening a file ([`VcfReadError::Open`], which names it).
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Bgzf(#[from] BgzfError),
+
+    #[error(transparent)]
+    Header(#[from] VcfHeaderError),
+
+    #[error("the header text is not UTF-8")]
+    HeaderNotUtf8 { source: Utf8Error },
+
+    // r[impl vcf_reader.formats]
+    #[error("the input is gzip-compressed but not BGZF; recompress it with `bgzip`")]
+    NotBgzf,
+
+    #[error("BCF 2.1 is not supported; convert the file with `bcftools view -Ob`")]
+    Bcf21,
+
+    #[error("uncompressed BCF is not supported; compress the file with `bcftools view -Ob`")]
+    UncompressedBcf,
+
+    #[error("the input is neither VCF nor BCF")]
+    UnknownFormat,
+
+    /// The index file next to it could not be read.
+    #[error("could not read its index {path}")]
+    IndexRead { path: PathBuf, source: std::io::Error },
+
+    #[error(transparent)]
+    Csi(#[from] CsiError),
+
+    #[error(transparent)]
+    Tabix(#[from] BaiError),
+
+    #[error("the index is neither TBI nor CSI")]
+    UnknownIndexFormat,
 }
 
 /// Where a malformed record is, as far as the reader knows.

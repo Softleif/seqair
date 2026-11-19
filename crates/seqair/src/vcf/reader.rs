@@ -43,7 +43,7 @@ mod vcf_stream;
 pub use access::{Any, DecodeCx, DynValue, FormatAny, InfoAny, ReadKind, Stored};
 pub use bcf_value::{BcfType, BcfValueError};
 pub use error::{
-    FieldError, KeyKind, RecordError, RecordPart, RecordPlace, RecordSection, VcfFormat,
+    FieldError, KeyKind, OpenError, RecordError, RecordPart, RecordPlace, RecordSection, VcfFormat,
     VcfReadError,
 };
 pub use fields::{

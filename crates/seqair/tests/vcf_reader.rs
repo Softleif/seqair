@@ -20,8 +20,8 @@ use seqair::vcf::reader::{
 };
 use seqair::vcf::{
     Allele, DynValue, Fields, FormatGt, FullRecord, Info, InfoFlag, InfoInt, KeyError, Locus,
-    OnlySample, PlanContext, PlanError, RawRecord, RecordError, Sample, Samples, Sections, Site,
-    VcfFile, VcfPos, VcfReadError,
+    OnlySample, OpenError, PlanContext, PlanError, RawRecord, RecordError, Sample, Samples,
+    Sections, Site, VcfFile, VcfPos, VcfReadError,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -1025,12 +1025,18 @@ fn formats_are_detected_and_refused_by_content() {
         e.write_all(HEADER.as_bytes()).unwrap();
         e.finish().unwrap()
     };
-    assert!(matches!(VcfFile::from_bytes(gzip, None), Err(VcfReadError::NotBgzf)));
+    assert!(matches!(
+        VcfFile::from_bytes(gzip, None),
+        Err(VcfReadError::Open { path: None, source: OpenError::NotBgzf })
+    ));
     let mut bcf21 = bcf(&[]);
     let mut w = BgzfWriter::new(Vec::new());
     w.write_all(b"BCF\x02\x01").unwrap();
     bcf21.clone_from(&w.finish().unwrap());
-    assert!(matches!(VcfFile::from_bytes(bcf21, None), Err(VcfReadError::Bcf21)));
+    assert!(matches!(
+        VcfFile::from_bytes(bcf21, None),
+        Err(VcfReadError::Open { path: None, source: OpenError::Bcf21 })
+    ));
     let plain = VcfFile::from_bytes(HEADER.as_bytes().to_vec(), None).unwrap();
     assert_eq!(plain.format(), seqair::vcf::reader::VcfFormat::Vcf);
     let mut w = BgzfWriter::new(Vec::new());
@@ -1043,7 +1049,7 @@ fn formats_are_detected_and_refused_by_content() {
     );
     assert!(matches!(
         VcfFile::from_bytes(b"hello".to_vec(), None),
-        Err(VcfReadError::UnknownFormat)
+        Err(VcfReadError::Open { path: None, source: OpenError::UnknownFormat })
     ));
     // A file with no records reads none.
     let empty = VcfFile::from_bytes(bcf(&[]), None).unwrap();
@@ -1060,7 +1066,58 @@ fn a_missing_index_is_fine_and_a_broken_one_fails_open() {
     assert!(!file.has_index());
     assert_eq!(file.reader::<Locus>().open().unwrap().into_iter().count(), 1);
     std::fs::write(dir.path().join("x.bcf.csi"), b"not an index").unwrap();
-    assert!(matches!(VcfFile::open(&path), Err(VcfReadError::UnknownIndexFormat)));
+    assert!(matches!(
+        VcfFile::open(&path),
+        Err(VcfReadError::Open { path: Some(p), source: OpenError::UnknownIndexFormat })
+            if p == path
+    ));
+}
+
+// r[verify vcf_reader.errors.open]
+/// Every open error names the file, once in its whole chain: a header that
+/// does not parse, a format refused, a file that is not there, an index
+/// that does not parse; bytes in memory are "the input".
+#[test]
+fn open_errors_name_the_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = |e: VcfReadError| format!("{:#}", anyhow::Error::from(e));
+    let once = |chain: &str, path: &std::path::Path| {
+        let shown = path.display().to_string();
+        assert_eq!(chain.matches(&shown).count(), 1, "{chain}");
+    };
+
+    let bad = dir.path().join("bad.vcf");
+    let text = "##fileformat=VCFv4.3\n\
+                ##INFO=<ID=X,Number=Q,Type=Integer,Description=\"x\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+    std::fs::write(&bad, text).unwrap();
+    let e = VcfFile::open(&bad).unwrap_err();
+    assert!(matches!(&e, VcfReadError::Open { source: OpenError::Header(_), .. }), "{e:?}");
+    assert_eq!(e.to_string(), format!("could not open {}", bad.display()));
+    let c = chain(e);
+    assert!(c.contains("unknown Number=Q"), "{c}");
+    once(&c, &bad);
+
+    let hello = dir.path().join("hello.vcf");
+    std::fs::write(&hello, "hello").unwrap();
+    let c = chain(VcfFile::open(&hello).unwrap_err());
+    assert!(c.ends_with("the input is neither VCF nor BCF"), "{c}");
+    once(&c, &hello);
+
+    let missing = dir.path().join("missing.vcf");
+    let e = VcfFile::open(&missing).unwrap_err();
+    assert!(matches!(&e, VcfReadError::Open { source: OpenError::Io(_), .. }), "{e:?}");
+    once(&chain(e), &missing);
+
+    let bcf_path = dir.path().join("x.bcf");
+    std::fs::write(&bcf_path, bcf(&[Rec::default()])).unwrap();
+    std::fs::write(dir.path().join("x.bcf.csi"), b"not an index").unwrap();
+    let c = chain(VcfFile::open(&bcf_path).unwrap_err());
+    assert!(c.ends_with("the index is neither TBI nor CSI"), "{c}");
+    once(&c, &bcf_path);
+
+    let e = VcfFile::from_bytes(b"hello".to_vec(), None).unwrap_err();
+    assert_eq!(e.to_string(), "could not open the input");
 }
 
 // ── Crafted VCF text ────────────────────────────────────────────────────

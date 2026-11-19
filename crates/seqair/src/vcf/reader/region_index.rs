@@ -1,7 +1,7 @@
 //! A VCF or BCF file's TBI or CSI index, its references keyed by the file's
 //! contig table (`r[vcf_reader.reuse_io+2]`).
 
-use super::error::VcfReadError;
+use super::error::OpenError;
 use super::file::ContigTable;
 use crate::bam::bgzf::VirtualOffset;
 use crate::bam::csi_index::CsiIndex;
@@ -37,7 +37,7 @@ impl VcfIndex {
         bytes: &[u8],
         header: &VcfHeader,
         contigs: &mut ContigTable,
-    ) -> Result<Self, VcfReadError> {
+    ) -> Result<Self, OpenError> {
         let decompressed;
         let data = if bytes.starts_with(&[0x1f, 0x8b]) {
             decompressed = decompress_bgzf_file(bytes)?;
@@ -53,7 +53,7 @@ impl VcfIndex {
             let names = tabix_aux_names(index.aux());
             (AlignmentIndex::Csi(index), names)
         } else {
-            return Err(VcfReadError::UnknownIndexFormat);
+            return Err(OpenError::UnknownIndexFormat);
         };
         let mut by_contig = Vec::new();
         let mut set = |tid: u32, reference: usize| {

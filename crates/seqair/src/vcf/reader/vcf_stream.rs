@@ -1,11 +1,11 @@
 //! [`VcfStream`]: VCF or BCF from input that cannot seek — a pipe, standard
 //! input (`r[vcf_reader.stream]`).
 
-use super::error::{VcfFormat, VcfReadError};
+use super::error::{OpenError, VcfFormat, VcfReadError};
 use super::fields::{Fields, SampleSel};
 use super::file::{
     Container, DataStart, FILE_BUFFER, HeaderStart, Input, Source, VcfFile, container, format_of,
-    read_bcf_header, read_failed, read_text_header,
+    read_bcf_header, read_text_header,
 };
 use super::stream::{Framed, Reader, ReaderBuilder, Start, batches};
 use crate::bam::bgzf::{BgzfStream, Workers};
@@ -111,8 +111,9 @@ impl<F: Fields> StreamReaderBuilder<F> {
             Some((n, pool)) => Workers::Threads { n: batches(*n), pool: pool.clone() },
             None => Workers::Inline,
         };
-        let (start, input) = read_stream_header(self.input, workers)?;
-        let file = VcfFile::new(Source::Stream, start, None)?;
+        let opened = read_stream_header(self.input, workers)
+            .and_then(|(start, input)| Ok((VcfFile::new(Source::Stream, start, None)?, input)));
+        let (file, input) = opened.map_err(|source| VcfReadError::Open { path: None, source })?;
         let mut builder = ReaderBuilder::<F>::new(&file);
         if let Some(sample) = self.sample {
             builder = builder.sample(sample);
@@ -129,15 +130,15 @@ impl<F: Fields> StreamReaderBuilder<F> {
 fn read_stream_header(
     mut input: Box<dyn Read + Send>,
     workers: Workers,
-) -> Result<(HeaderStart, Framed), VcfReadError> {
+) -> Result<(HeaderStart, Framed), OpenError> {
     let mut prefix = Vec::with_capacity(64);
-    (&mut input).take(64).read_to_end(&mut prefix).map_err(read_failed)?;
+    (&mut input).take(64).read_to_end(&mut prefix)?;
     let container = container(&prefix);
     let plain_format = format_of(&prefix, false);
     let chained: Box<dyn Read + Send> = Box::new(Cursor::new(prefix).chain(input));
     let mut input = Input::Stream(BufReader::with_capacity(FILE_BUFFER, chained));
     match container {
-        Container::Gzip => Err(VcfReadError::NotBgzf),
+        Container::Gzip => Err(OpenError::NotBgzf),
         Container::Plain => {
             let format = plain_format?;
             let (header, len, lines) = read_text_header(&mut input)?;
