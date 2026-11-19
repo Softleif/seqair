@@ -5,15 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.4.2 (2026-11-19)
 
 ### Added
 
 - `Pos0` and `Pos1` implement `TryFrom<usize>`, as `TryFrom<u64>`.
+- **`IupacBase::ascii_prefix_len(bases, ascii)`**: how many leading bases match the ASCII letters beside them (a lower-case byte never matches), as a SIMD scan at every `fearless_simd` level. The CRAM writer uses it to find runs of reference matches.
 
 ### Changed
 
 - MSRV 1.98.1 → 1.100: `smallvec` 2.0.0-beta.5, which the lock file resolves, declares `rust-version = "1.100"`.
+
+### Documentation
+
+- Runnable examples on the core types.
 
 ## v0.4.1 (2026-11-11)
 
