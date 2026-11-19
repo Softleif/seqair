@@ -361,7 +361,7 @@ pub enum VcfError {
     #[error("a record on {contig} at the telomere (POS 0) cannot be written")]
     TelomereRecord { contig: SmolStr },
 
-    // r[impl vcf_passthrough.undeclared]
+    // r[impl vcf_passthrough.undeclared+2]
     #[error("{kind} {name} is declared by neither the input nor the output header")]
     UndeclaredField { kind: KeyKind, name: SmolStr },
 
