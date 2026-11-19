@@ -1247,7 +1247,7 @@ fn text_records_read_their_columns() {
 // r[verify vcf_values.access+2]
 // r[verify vcf_values.duplicates+2]
 // r[verify vcf_reader.field_table]
-// r[verify vcf_reader.undeclared.filter]
+// r[verify vcf_reader.undeclared.filter+2]
 /// A sample may drop trailing FORMAT fields (they read as missing); a
 /// repeated key reads its first value; an undeclared INFO or FORMAT key
 /// reads as a String; a flag given a value is set; an integer key without a
@@ -1299,6 +1299,65 @@ fn text_edge_cases_read_as_htslib_reads_them() {
     };
     assert_eq!(failed.count(), 0);
     assert_eq!(recs[2].samples().sample(s1).iter().count(), 0, "FORMAT . has no fields");
+}
+
+/// Counts WARN events; nothing else about tracing matters here.
+struct WarnCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for WarnCounter {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The `warn!`s reading every record of `file` as `F` logs, after `visit`
+/// sees each record.
+fn warnings<F: Fields>(file: &VcfFile, mut visit: impl FnMut(&F)) -> usize {
+    let warns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tracing::subscriber::with_default(WarnCounter(warns.clone()), || {
+        let mut reader = file.reader::<F>().open().unwrap();
+        while let Some(record) = reader.next_record().unwrap() {
+            visit(record);
+        }
+    });
+    warns.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// r[verify vcf_reader.undeclared+5]
+// r[verify vcf_reader.undeclared.filter+2]
+/// Undeclared FILTER names warn once per file wherever `Site` reads them;
+/// undeclared keys warn once more, but only where an index meets one.
+#[test]
+fn undeclared_filters_and_keys_warn_once_each_where_met() {
+    let lines = [
+        "chr1\t10\t.\tA\tC\t.\tnope\tDP=1;XX=3\tGT:ZZ\t0/1:a\t1/1:b",
+        "chr1\t11\t.\tA\tC\t.\tnah;q10\tDP=2;YY=2\tGT:WW\t0/1:a\t1/1:b",
+    ];
+    let file = || text_file(&lines);
+    assert_eq!(warnings::<Locus>(&file(), |_| {}), 0, "nothing reads FILTER or INFO");
+    assert_eq!(warnings::<(Locus, Site)>(&file(), |_| {}), 1, "the FILTER names");
+    let fresh = file();
+    let dp: InfoInt = fresh.header().info_key("DP").unwrap();
+    let early = warnings::<Info>(&fresh, |info| {
+        info.get(&dp).unwrap();
+    });
+    assert_eq!(early, 0, "a lookup of DP stops before the undeclared keys");
+    let all = warnings::<FullRecord>(&file(), |r| {
+        r.info().iter().for_each(|f| assert!(f.is_ok()));
+    });
+    assert_eq!(all, 2, "one for the FILTER names, one for the keys");
 }
 
 // r[verify vcf_reader.contigs]
