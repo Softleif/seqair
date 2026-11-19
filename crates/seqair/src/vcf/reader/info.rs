@@ -44,6 +44,7 @@ impl<'a> InfoSource<'a> {
     /// The value of `entry`: a BCF typed value, or the VCF text that follows
     /// its key, which the scan keeps with its `=` so that a key without one
     /// (holding nothing) and `key=` (holding `.`) differ.
+    #[inline]
     fn value(self, entry: Entry) -> Result<Stored<'a>, RecordError> {
         match self {
             Self::Bcf { bytes, .. } => {
@@ -150,10 +151,11 @@ impl<'a> InfoRef<'a> {
     /// The first entry of `id`, indexing no further than that.
     #[inline]
     fn find(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
-        let found = self.index.borrow_mut().find(id, self.info, self.file);
-        found.map_err(|e| self.at.error(self.file, e))
+        let mut index = self.index.borrow_mut();
+        index.find(id, self.info, self.file).map_err(|e| self.at.error(self.file, e.clone()))
     }
 
+    #[inline]
     fn value(&self, entry: Entry) -> Result<Stored<'a>, VcfReadError> {
         self.info.value(entry).map_err(|e| self.at.error(self.file, e))
     }
@@ -202,7 +204,7 @@ impl<'a> InfoRef<'a> {
     {
         let this = *self;
         let Self { info, index, file, at } = this;
-        let finished = index.borrow_mut().finish(info, file);
+        let finished = index.borrow_mut().finish(info, file).map_err(RecordError::clone);
         let (error, len) = match finished {
             Ok(()) => (None, index.borrow().entries().len()),
             Err(e) => (Some(Err(at.error(file, e))), 0),

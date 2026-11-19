@@ -191,14 +191,19 @@ impl<'a> FormatView<'a> {
     /// Index the whole FORMAT data, on first access.
     fn finish(&self) -> Result<(), VcfReadError> {
         let Self { source, file, at, .. } = *self;
-        let finished = self.index.borrow_mut().finish(source, file);
-        finished.map_err(|e| at.error(file, e))
+        let mut index = self.index.borrow_mut();
+        index.finish(source, file).map_err(|e| at.error(file, e.clone()))
     }
 
     /// The entry of field `id`, if the record has it.
+    #[inline]
     fn entry(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
-        self.finish()?;
-        Ok(self.index.borrow().keys.get(id))
+        let Self { source, file, at, .. } = *self;
+        let mut index = self.index.borrow_mut();
+        match index.finish(source, file) {
+            Ok(()) => Ok(index.keys.get(id)),
+            Err(e) => Err(at.error(file, e.clone())),
+        }
     }
 
     /// The `i`th field present, once indexed.
@@ -216,6 +221,7 @@ impl<'a> FormatView<'a> {
     }
 
     /// The values of the field an index entry names.
+    #[inline]
     fn field_at(&self, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
         match self.source {
             FormatSource::Text { samples, n_samples, .. } => {
@@ -237,6 +243,7 @@ impl<'a> FormatView<'a> {
     }
 
     /// Field `key`'s values, if the record has it.
+    #[inline]
     fn field(&self, key: &FieldId) -> Result<Option<FieldAt<'a>>, VcfReadError> {
         check_brand(key, self.file)?;
         self.entry(key.id)?.map(|e| self.field_at(e)).transpose()

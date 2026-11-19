@@ -49,12 +49,15 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Progress {
     /// Indexed up to byte `at`, `walked` entries in (BCF counts its entries;
-    /// VCF text leaves `walked` at 0).
-    Scanning { at: usize, walked: usize },
+    /// VCF text leaves `walked` at 0). `u32`, as an [`Entry`]'s offsets are:
+    /// the state stays one 8-byte word.
+    Scanning { at: u32, walked: u32 },
     /// The whole section is indexed.
     Done,
     /// The scan met malformed data; what it indexed before stays readable.
-    Failed(RecordError),
+    /// Boxed: the error is rare, and a small `Progress` keeps the per-record
+    /// reset to a few stores.
+    Failed(Box<RecordError>),
 }
 
 // r[impl vcf_values.index+2]
@@ -148,18 +151,24 @@ impl SectionIndex {
 
     /// The first entry of `id` in the INFO section `info`, indexing no
     /// further than that (`r[vcf_values.index+2]`). Malformed data fails the
-    /// lookup only if the scan meets it before `id`.
+    /// lookup only if the scan meets it before `id`. The error is the
+    /// index's, borrowed: the hot path moves nothing larger than an entry.
     #[inline]
     pub(crate) fn find(
         &mut self,
         id: DictId,
         info: InfoSource<'_>,
         file: &FileShared,
-    ) -> Result<Option<Entry>, RecordError> {
-        match self.get(id) {
-            Some(entry) => Ok(Some(entry)),
-            None => self.resume(info, Some(id), file),
+    ) -> Result<Option<Entry>, &RecordError> {
+        if let Some(entry) = self.get(id) {
+            return Ok(Some(entry));
         }
+        if let Progress::Scanning { at, walked } = self.progress
+            && let Some(entry) = self.scan(info, at, walked, Some(id), file)
+        {
+            return Ok(Some(entry));
+        }
+        self.outcome().map(|()| None)
     }
 
     /// Index the rest of the INFO section `info`.
@@ -167,21 +176,19 @@ impl SectionIndex {
         &mut self,
         info: InfoSource<'_>,
         file: &FileShared,
-    ) -> Result<(), RecordError> {
-        self.resume(info, None, file).map(drop)
+    ) -> Result<(), &RecordError> {
+        if let Progress::Scanning { at, walked } = self.progress {
+            self.scan(info, at, walked, None, file);
+        }
+        self.outcome()
     }
 
+    /// A settled scan's outcome: its error, if it failed.
     #[inline]
-    fn resume(
-        &mut self,
-        info: InfoSource<'_>,
-        until: Option<DictId>,
-        file: &FileShared,
-    ) -> Result<Option<Entry>, RecordError> {
-        match self.progress {
-            Progress::Done => Ok(None),
-            Progress::Failed(ref e) => Err(e.clone()),
-            Progress::Scanning { at, walked } => self.scan(info, at, walked, until, file),
+    fn outcome(&self) -> Result<(), &RecordError> {
+        match &self.progress {
+            Progress::Failed(e) => Err(e),
+            Progress::Scanning { .. } | Progress::Done => Ok(()),
         }
     }
 
@@ -191,11 +198,11 @@ impl SectionIndex {
     fn scan(
         &mut self,
         info: InfoSource<'_>,
-        at: usize,
-        walked: usize,
+        at: u32,
+        walked: u32,
         until: Option<DictId>,
         file: &FileShared,
-    ) -> Result<Option<Entry>, RecordError> {
+    ) -> Option<Entry> {
         let found = match info {
             InfoSource::Bcf { bytes, n } => {
                 let entries = BcfEntries::new(bytes, n, None, at, walked);
@@ -206,22 +213,16 @@ impl SectionIndex {
         self.settle(found)
     }
 
-    /// Record a scan's end: found (still scanning), done or failed.
-    pub(crate) fn settle(
-        &mut self,
-        found: Result<Option<Entry>, RecordError>,
-    ) -> Result<Option<Entry>, RecordError> {
+    /// Record a scan's end: the entry it stopped at (still scanning), or the
+    /// section's end (done) or its error (failed), which [`Self::outcome`]
+    /// then returns.
+    pub(crate) fn settle(&mut self, found: Result<Option<Entry>, RecordError>) -> Option<Entry> {
         match found {
-            Ok(Some(entry)) => Ok(Some(entry)),
-            Ok(None) => {
-                self.progress = Progress::Done;
-                Ok(None)
-            }
-            Err(e) => {
-                self.progress = Progress::Failed(e.clone());
-                Err(e)
-            }
+            Ok(Some(entry)) => return Some(entry),
+            Ok(None) => self.progress = Progress::Done,
+            Err(e) => self.progress = Progress::Failed(Box::new(e)),
         }
+        None
     }
 }
 
@@ -243,6 +244,7 @@ pub(crate) struct FormatIndex {
 
 impl FormatIndex {
     /// Forget the last record's FORMAT fields, keeping the buffers.
+    #[inline]
     pub(crate) fn reset(&mut self) {
         self.keys.reset();
         self.cells.clear();
@@ -251,7 +253,7 @@ impl FormatIndex {
 
     /// Fail every access with `e`: the FORMAT data could not be copied.
     pub(crate) fn fail(&mut self, e: RecordError) {
-        self.keys.progress = Progress::Failed(e);
+        self.keys.progress = Progress::Failed(Box::new(e));
     }
 
     /// Where sample `sample`'s value of the `k`th key lies in the sample
@@ -263,21 +265,21 @@ impl FormatIndex {
 
     /// Index the whole FORMAT data `source` (once; later calls return the
     /// first one's outcome).
+    #[inline]
     pub(crate) fn finish(
         &mut self,
         source: FormatSource<'_>,
         file: &FileShared,
-    ) -> Result<(), RecordError> {
-        match &self.keys.progress {
-            Progress::Done => Ok(()),
-            Progress::Failed(e) => Err(e.clone()),
-            Progress::Scanning { .. } => self.scan(source, file),
+    ) -> Result<(), &RecordError> {
+        if let Progress::Scanning { .. } = self.keys.progress {
+            self.scan(source, file);
         }
+        self.keys.outcome()
     }
 
     #[cold]
     #[inline(never)]
-    fn scan(&mut self, source: FormatSource<'_>, file: &FileShared) -> Result<(), RecordError> {
+    fn scan(&mut self, source: FormatSource<'_>, file: &FileShared) {
         let found = match source {
             FormatSource::Bcf { indiv, n_fmt, n_samples } => {
                 let entries = BcfEntries::new(indiv, n_fmt, Some(n_samples), 0, 0);
@@ -287,7 +289,7 @@ impl FormatIndex {
                 self.scan_text(keys, samples, n_samples, file).map(|()| None)
             }
         };
-        self.keys.settle(found).map(drop)
+        self.keys.settle(found);
     }
 }
 

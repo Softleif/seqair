@@ -34,10 +34,10 @@ impl<'a> BcfEntries<'a> {
         bytes: &'a [u8],
         n: usize,
         samples: Option<usize>,
-        at: usize,
-        walked: usize,
+        at: u32,
+        walked: u32,
     ) -> Self {
-        Self { bytes, at, walked, n, samples }
+        Self { bytes, at: at as usize, walked: walked as usize, n, samples }
     }
 
     #[inline]
@@ -176,7 +176,10 @@ impl SectionIndex {
             if !self.push(entry) {
                 warn_duplicate_id(file, id);
             } else if until == Some(id) {
-                self.progress = Progress::Scanning { at: entries.at, walked: entries.walked };
+                // `at` is this entry's end, checked above; `walked` is below BCF's 16-bit counts.
+                let walked =
+                    u32::try_from(entries.walked).map_err(|_| too_large(entries.walked))?;
+                self.progress = Progress::Scanning { at: end, walked };
                 return Ok(Some(entry));
             }
         }
@@ -196,10 +199,11 @@ impl SectionIndex {
     pub(crate) fn scan_text_info(
         &mut self,
         info: &[u8],
-        at: usize,
+        at: u32,
         until: Option<DictId>,
         file: &FileShared,
     ) -> Result<Option<Entry>, RecordError> {
+        let at = at as usize;
         let Some(rest) = info.get(at..).filter(|_| info != b".") else { return Ok(None) };
         let flow = for_each_info_entry(rest, |entry| {
             let (key_start, key_end) =
@@ -218,7 +222,8 @@ impl SectionIndex {
                     if !self.push(found) {
                         file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
                     } else if until == Some(id) {
-                        return ControlFlow::Break(Ok((end.saturating_add(1), found)));
+                        let next = span_end.checked_add(1).ok_or_else(|| too_large(end));
+                        return ControlFlow::Break(next.map(|next| (next, found)));
                     }
                     ControlFlow::Continue(())
                 }
@@ -460,7 +465,7 @@ mod incremental {
     /// index has for its key, or its error if it has none.
     fn check(file: &FileShared, info: InfoSource<'_>, accesses: &[Option<usize>]) {
         let mut whole = SectionIndex::default();
-        let result = whole.finish(info, file);
+        let result = whole.finish(info, file).map_err(RecordError::clone);
         let mut index = SectionIndex::default();
         for _ in 0..2 {
             index.reset();
@@ -472,10 +477,12 @@ mod incremental {
                             Some(entry) => Ok(Some(entry)),
                             None => result.clone().map(|()| None),
                         };
-                        assert_eq!(index.find(id, info, file), expected, "K{k}");
+                        let got = index.find(id, info, file).map_err(RecordError::clone);
+                        assert_eq!(got, expected, "K{k}");
                     }
                     None => {
-                        let got = index.finish(info, file).map(|()| index.entries().to_vec());
+                        let finished = index.finish(info, file).map_err(RecordError::clone);
+                        let got = finished.map(|()| index.entries().to_vec());
                         let expected = result.clone().map(|()| whole.entries().to_vec());
                         assert_eq!(got, expected);
                     }
