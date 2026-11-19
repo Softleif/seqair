@@ -4,9 +4,7 @@
 
 use super::access::{DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::{BcfValueError, FormatColumn, read_typed_int};
-use super::entries::{
-    BcfEntries, Cursor, FormatIndex, LazyIndex, Scan, index_bcf, index_text_format,
-};
+use super::entries::{FormatIndex, LazyIndex};
 use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
@@ -118,17 +116,16 @@ impl FormatData {
     }
 
     fn view(&self) -> FormatView<'_> {
-        let (keys, samples) = if self.file.is_text() {
+        let n_samples = self.n_samples;
+        let source = if self.file.is_text() {
             let samples = self.bytes.get(self.keys_len.saturating_add(1)..).unwrap_or_default();
-            (self.bytes.get(..self.keys_len).unwrap_or_default(), samples)
+            let keys = self.bytes.get(..self.keys_len).unwrap_or_default();
+            FormatSource::Text { keys, samples, n_samples }
         } else {
-            (&[][..], &self.bytes[..])
+            FormatSource::Bcf { indiv: &self.bytes, n_fmt: self.n_fmt, n_samples }
         };
         FormatView {
-            keys,
-            samples,
-            n_fmt: self.n_fmt,
-            n_samples: self.n_samples,
+            source,
             index: &self.index,
             failed: self.failed.as_ref(),
             file: &self.file,
@@ -168,12 +165,7 @@ fn copy_one_sample(
 /// FORMAT data as a view reads it, indexed on first access.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FormatView<'a> {
-    /// VCF text: the FORMAT column.
-    keys: &'a [u8],
-    /// BCF: the individual section. VCF text: the sample columns.
-    samples: &'a [u8],
-    n_fmt: usize,
-    n_samples: usize,
+    source: FormatSource<'a>,
     index: &'a LazyIndex<FormatIndex>,
     /// Copying the data failed: every access returns this.
     failed: Option<&'a RecordError>,
@@ -189,28 +181,22 @@ impl<'a> FormatView<'a> {
         file: &'a FileShared,
         at: RecordAt,
     ) -> Self {
-        let (keys, samples, n_fmt, n_samples) = match source {
-            FormatSource::Bcf { indiv, n_fmt, n_samples } => (&[][..], indiv, n_fmt, n_samples),
-            FormatSource::Text { keys, samples, n_samples } => (keys, samples, 0, n_samples),
-        };
-        Self { keys, samples, n_fmt, n_samples, index, failed: None, file, at }
+        Self { source, index, failed: None, file, at }
+    }
+
+    /// How many samples the data holds.
+    fn n_samples(&self) -> usize {
+        match self.source {
+            FormatSource::Bcf { n_samples, .. } | FormatSource::Text { n_samples, .. } => n_samples,
+        }
     }
 
     fn index(&self) -> Result<&'a FormatIndex, VcfReadError> {
-        let Self { keys, samples, n_fmt, n_samples, file, at, .. } = *self;
+        let Self { source, file, at, .. } = *self;
         if let Some(e) = self.failed {
             return Err(at.error(file, e.clone()));
         }
-        self.index
-            .get(|index: &mut FormatIndex, cursor: &mut Cursor, _| {
-                if file.is_text() {
-                    index_text_format(index, keys, samples, n_samples, file).map(|()| Scan::End)
-                } else {
-                    let entries = BcfEntries::new(samples, n_fmt, Some(n_samples), *cursor);
-                    index_bcf(&mut index.keys, entries, cursor, None, KeyKind::Format, file)
-                }
-            })
-            .map_err(|e| at.error(file, e.clone()))
+        self.index.whole(|index| index.finish(source, file)).map_err(|e| at.error(file, e))
     }
 
     fn malformed(&self, source: BcfValueError) -> VcfReadError {
@@ -219,19 +205,21 @@ impl<'a> FormatView<'a> {
 
     /// The values of the field an index entry names.
     fn field_at(&self, index: &'a FormatIndex, entry: Entry) -> Result<FieldAt<'a>, VcfReadError> {
-        if self.file.is_text() {
-            return Ok(FieldAt::Text {
+        match self.source {
+            FormatSource::Text { samples, n_samples, .. } => Ok(FieldAt::Text {
                 values: &index.values,
-                samples: self.samples,
+                samples,
                 n_keys: index.n_keys,
                 k: entry.start as usize,
-                n_samples: self.n_samples,
-            });
+                n_samples,
+            }),
+            FormatSource::Bcf { indiv, n_samples, .. } => {
+                let bytes = indiv.get(entry.span()).unwrap_or_default();
+                let (column, _) =
+                    FormatColumn::parse(bytes, n_samples).map_err(|e| self.malformed(e))?;
+                Ok(FieldAt::Bcf(column))
+            }
         }
-        let bytes = self.samples.get(entry.span()).unwrap_or_default();
-        let (column, _) =
-            FormatColumn::parse(bytes, self.n_samples).map_err(|e| self.malformed(e))?;
-        Ok(FieldAt::Bcf(column))
     }
 
     /// Whether the record has field `key`.
@@ -444,7 +432,7 @@ impl<'a> SamplesRef<'a> {
         key: &FormatKey<V>,
     ) -> Result<Option<Column<'a, V>>, VcfReadError> {
         let Some(field) = self.view.field(&key.0)? else { return Ok(None) };
-        let (file, at, n) = (self.view.file, self.view.at, self.view.n_samples);
+        let (file, at, n) = (self.view.file, self.view.at, self.view.n_samples());
         let checked = match field {
             FieldAt::Bcf(column) => {
                 let (all, per_sample) = column.all();
@@ -473,7 +461,7 @@ impl<'a> SamplesRef<'a> {
 
     /// How many samples there are.
     pub fn len(&self) -> usize {
-        self.view.n_samples
+        self.view.n_samples()
     }
 
     /// Every FORMAT field present, in record order (a repeated key once).

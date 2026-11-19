@@ -2,11 +2,11 @@
 
 use super::access::{DecodeCx, DynValue, ReadKind, Stored, StoredRepr};
 use super::bcf_value::TypedValue;
-use super::entries::{BcfEntries, Cursor, LazyIndex, Scan, index_bcf, index_text_info};
-use super::error::{KeyKind, RecordAt, RecordError, RecordPart, VcfReadError};
+use super::entries::LazyIndex;
+use super::error::{RecordAt, RecordError, RecordPart, VcfReadError};
 use super::fields::{Fields, PlanContext, PlanError, Sections};
 use super::file::FileShared;
-use super::index::{DictId, Entry, FieldIndex};
+use super::index::{DictId, Entry, SectionIndex};
 use super::raw::RawRecord;
 use crate::vcf::header::{InfoDef, ValueType};
 use crate::vcf::record_encoder::{FieldId, InfoKey};
@@ -22,24 +22,39 @@ pub(crate) fn check_brand(key: &FieldId, file: &FileShared) -> Result<(), VcfRea
     }
 }
 
-/// One field's value in a section's bytes: a BCF typed value, or the VCF
-/// text that follows an INFO key (empty, or `=` and the value) or one
-/// sample's value of a FORMAT field.
-pub(crate) fn stored<'a>(
-    bytes: &'a [u8],
-    file: &FileShared,
-    part: RecordPart,
-    at: RecordAt,
-) -> Result<Stored<'a>, VcfReadError> {
-    if !file.is_text() {
-        let (value, _) = TypedValue::parse(bytes)
-            .map_err(|source| at.error(file, RecordError::Value { part, source }))?;
-        return Ok(Stored(StoredRepr::Bcf(value)));
+/// A record's INFO column as its file lays it out; what a view scans and
+/// reads values from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InfoSource<'a> {
+    /// BCF: `n` entries, each a typed key and a typed value.
+    Bcf { bytes: &'a [u8], n: usize },
+    /// VCF text: `;`-separated `key` or `key=value` entries.
+    Text(&'a [u8]),
+}
+
+impl<'a> InfoSource<'a> {
+    /// `bytes` as `file` lays INFO out; `n` is BCF's `n_info`.
+    pub(crate) fn new(bytes: &'a [u8], n: usize, file: &FileShared) -> Self {
+        if file.is_text() { Self::Text(bytes) } else { Self::Bcf { bytes, n } }
     }
-    Ok(Stored(StoredRepr::Text(match part {
-        RecordPart::Info => bytes.split_first().map(|(_, value)| value),
-        _ => Some(bytes),
-    })))
+
+    /// The value of `entry`: a BCF typed value, or the VCF text that follows
+    /// its key, which the scan keeps with its `=` so that a key without one
+    /// (holding nothing) and `key=` (holding `.`) differ.
+    fn value(self, entry: Entry) -> Result<Stored<'a>, RecordError> {
+        match self {
+            Self::Bcf { bytes, .. } => {
+                let bytes = bytes.get(entry.span()).unwrap_or_default();
+                let (value, _) = TypedValue::parse(bytes)
+                    .map_err(|source| RecordError::Value { part: RecordPart::Info, source })?;
+                Ok(Stored(StoredRepr::Bcf(value)))
+            }
+            Self::Text(bytes) => {
+                let after_key = bytes.get(entry.span()).unwrap_or_default();
+                Ok(Stored(StoredRepr::Text(after_key.split_first().map(|(_, value)| value))))
+            }
+        }
+    }
 }
 
 /// Decode `value`, the field `key`'s, as `V`.
@@ -97,30 +112,10 @@ pub(crate) fn debug_fields<'a, D: 'a>(
     map.finish()
 }
 
-/// Index an INFO column as its file's format lays it out, from `cursor` on
-/// and up to the first entry of `stop`.
-fn step(
-    index: &mut FieldIndex,
-    cursor: &mut Cursor,
-    stop: Option<DictId>,
-    bytes: &[u8],
-    n: usize,
-    file: &FileShared,
-) -> Result<Scan, RecordError> {
-    if file.is_text() {
-        index_text_info(index, bytes, cursor, stop, file)
-    } else {
-        let entries = BcfEntries::new(bytes, n, None, *cursor);
-        index_bcf(index, entries, cursor, stop, KeyKind::Info, file)
-    }
-}
-
 /// A record's INFO column, borrowed; indexed on first access.
 #[derive(Clone, Copy)]
 pub struct InfoRef<'a> {
-    bytes: &'a [u8],
-    /// BCF's `n_info`.
-    n: usize,
+    info: InfoSource<'a>,
     index: &'a LazyIndex,
     file: &'a FileShared,
     at: RecordAt,
@@ -142,31 +137,21 @@ impl<'a> InfoRef<'a> {
         file: &'a FileShared,
         at: RecordAt,
     ) -> Self {
-        Self { bytes, n, index, file, at }
+        Self { info: InfoSource::new(bytes, n, file), index, file, at }
     }
 
-    fn index(&self) -> Result<&'a FieldIndex, VcfReadError> {
-        let Self { bytes, n, file, at, .. } = *self;
-        self.index
-            .get(|index: &mut FieldIndex, cursor: &mut Cursor, stop| {
-                step(index, cursor, stop, bytes, n, file)
-            })
-            .map_err(|e| at.error(file, e.clone()))
+    fn index(&self) -> Result<&'a SectionIndex, VcfReadError> {
+        let Self { info, file, at, .. } = *self;
+        self.index.whole(|index| index.finish(info, file)).map_err(|e| at.error(file, e))
     }
 
     /// The first entry of `id`, indexing no further than that.
     fn find(&self, id: DictId) -> Result<Option<Entry>, VcfReadError> {
-        let Self { bytes, n, file, at, .. } = *self;
-        self.index
-            .find(id, |index: &mut FieldIndex, cursor: &mut Cursor, stop| {
-                step(index, cursor, stop, bytes, n, file)
-            })
-            .map_err(|e| at.error(file, e.clone()))
+        self.index.find(id, self.info, self.file).map_err(|e| self.at.error(self.file, e))
     }
 
-    fn value(&self, span: std::ops::Range<usize>) -> Result<Stored<'a>, VcfReadError> {
-        let bytes = self.bytes.get(span).unwrap_or_default();
-        stored(bytes, self.file, RecordPart::Info, self.at)
+    fn value(&self, entry: Entry) -> Result<Stored<'a>, VcfReadError> {
+        self.info.value(entry).map_err(|e| self.at.error(self.file, e))
     }
 
     // r[impl vcf_values.access+2]
@@ -179,7 +164,7 @@ impl<'a> InfoRef<'a> {
     pub fn get<V: ReadKind>(&self, key: &InfoKey<V>) -> Result<V::Out<'a>, VcfReadError> {
         check_brand(&key.0, self.file)?;
         match self.find(key.0.id)? {
-            Some(entry) => decode::<V>(self.value(entry.span())?, &key.0, self.file, self.at),
+            Some(entry) => decode::<V>(self.value(entry)?, &key.0, self.file, self.at),
             None => Ok(V::absent()),
         }
     }
@@ -219,9 +204,8 @@ impl<'a> InfoRef<'a> {
         };
         error.into_iter().chain(entries.iter().filter_map(move |e| {
             let (name, def) = file.fields.info_def(&file.header, e.id)?;
-            let value = this
-                .value(e.span())
-                .and_then(|v| dyn_decode(v, name, def.typ, false, file, this.at));
+            let value =
+                this.value(*e).and_then(|v| dyn_decode(v, name, def.typ, false, file, this.at));
             Some(value.map(|v| (e.id, name, def, v)))
         }))
     }

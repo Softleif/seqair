@@ -1,10 +1,12 @@
-//! Walking a BCF INFO or FORMAT section entry by entry, and the lazily built
-//! index of one (`r[vcf_fields.lazy]`, `r[vcf_values.index+2]`).
+//! Scanning a section's bytes into its [`SectionIndex`]: BCF INFO and
+//! FORMAT entry by entry, VCF text INFO key by key, VCF text FORMAT keys
+//! and sample cells in one pass (`r[vcf_fields.lazy+3]`, `r[vcf_values.index+2]`).
 
 use super::bcf_value::{BcfValueError, FormatColumn, TypedValue, read_typed_int};
 use super::error::{KeyKind, RecordError, RecordPart};
 use super::file::FileShared;
-use super::index::{DictId, Entry, FieldIndex};
+use super::index::{DictId, Entry, Progress, SectionIndex};
+use super::samples::FormatSource;
 use crate::io::text_scan::{for_each_info_entry, for_each_of_two};
 use std::cell::{Cell, OnceCell};
 use std::ops::{ControlFlow, Range};
@@ -15,19 +17,21 @@ use std::ops::{ControlFlow, Range};
 pub(crate) struct BcfEntries<'a> {
     bytes: &'a [u8],
     at: usize,
-    left: usize,
+    walked: usize,
+    n: usize,
     samples: Option<usize>,
 }
 
 impl<'a> BcfEntries<'a> {
-    /// The `n` entries of `bytes`, from `cursor` on.
-    pub(crate) fn new(bytes: &'a [u8], n: usize, samples: Option<usize>, cursor: Cursor) -> Self {
-        Self { bytes, at: cursor.at, left: n.saturating_sub(cursor.walked), samples }
-    }
-
-    /// Where the entries walked so far end.
-    pub(crate) fn end(&self) -> usize {
-        self.at
+    /// The `n` entries of `bytes`, from byte `at`, `walked` entries in.
+    pub(crate) fn new(
+        bytes: &'a [u8],
+        n: usize,
+        samples: Option<usize>,
+        at: usize,
+        walked: usize,
+    ) -> Self {
+        Self { bytes, at, walked, n, samples }
     }
 
     #[inline]
@@ -123,85 +127,112 @@ impl Iterator for BcfEntries<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.left = self.left.checked_sub(1)?;
+        if self.walked >= self.n {
+            return None;
+        }
+        self.walked = self.walked.saturating_add(1);
         let entry = self.entry();
         if entry.is_err() {
-            self.left = 0;
+            self.walked = self.n;
         }
         Some(entry)
     }
 }
 
-/// How far an index got: it stopped at the key asked for, or indexed the
-/// whole section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scan {
-    Found,
-    End,
-}
+impl SectionIndex {
+    // r[impl vcf_values.index+2]
+    /// Index BCF INFO or FORMAT `entries`, stopping after the first entry of
+    /// `until` (`Some`, with the scan left where it stopped): every key must
+    /// be a declared field of its kind (`r[vcf_reader.field_table]`), and
+    /// the entries must fill the section.
+    pub(crate) fn scan_bcf(
+        &mut self,
+        mut entries: BcfEntries<'_>,
+        until: Option<DictId>,
+        kind: KeyKind,
+        file: &FileShared,
+    ) -> Result<Option<Entry>, RecordError> {
+        let part = if kind == KeyKind::Format { RecordPart::Format } else { RecordPart::Info };
+        while let Some(entry) = entries.next() {
+            let (key, span) = entry.map_err(|source| RecordError::Value { part, source })?;
+            let id = u32::try_from(key)
+                .ok()
+                .and_then(DictId::new)
+                .filter(|&id| file.fields.declared(kind, id).is_some())
+                .ok_or(RecordError::UnknownKey { index: key, kind })?;
+            let (Ok(start), Ok(end)) = (u32::try_from(span.start), u32::try_from(span.end)) else {
+                return Err(RecordError::TooLarge {
+                    size: span.end as u64,
+                    max: u64::from(u32::MAX),
+                });
+            };
+            let entry = Entry { id, start, end };
+            if !self.push(entry) {
+                warn_duplicate_id(file, id);
+            } else if until == Some(id) {
+                self.progress = Progress::Scanning { at: entries.at, walked: entries.walked };
+                return Ok(Some(entry));
+            }
+        }
+        let len = entries.bytes.len().saturating_sub(entries.at);
+        if len > 0 {
+            return Err(RecordError::TrailingBytes { part, len });
+        }
+        Ok(None)
+    }
 
-/// Where an incremental index stopped: the byte after the last entry
-/// indexed, and how many entries that was.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Cursor {
-    pub(crate) at: usize,
-    pub(crate) walked: usize,
-}
-
-// r[impl vcf_values.index+2]
-/// Index a BCF INFO or FORMAT section from `cursor` on, stopping after the
-/// first entry of `stop`: every key must be a declared field of its kind
-/// (`r[vcf_reader.field_table]`), and the entries must fill the section.
-pub(crate) fn index_bcf(
-    index: &mut FieldIndex,
-    mut entries: BcfEntries<'_>,
-    cursor: &mut Cursor,
-    stop: Option<DictId>,
-    kind: KeyKind,
-    file: &FileShared,
-) -> Result<Scan, RecordError> {
-    let part = if kind == KeyKind::Format { RecordPart::Format } else { RecordPart::Info };
-    let left = entries.left;
-    for entry in &mut entries {
-        let (key, span) = entry.map_err(|source| RecordError::Value { part, source })?;
-        let id = u32::try_from(key)
-            .ok()
-            .and_then(DictId::new)
-            .filter(|&id| file.fields.declared(kind, id).is_some())
-            .ok_or(RecordError::UnknownKey { index: key, kind })?;
-        let (Ok(start), Ok(end)) = (u32::try_from(span.start), u32::try_from(span.end)) else {
-            return Err(RecordError::TooLarge { size: span.end as u64, max: u64::from(u32::MAX) });
-        };
-        if !index.push(Entry { id, start, end }) {
-            warn_duplicate_id(file, id);
-        } else if stop == Some(id) {
-            cursor.at = entries.at;
-            cursor.walked = cursor.walked.saturating_add(left.saturating_sub(entries.left));
-            return Ok(Scan::Found);
+    // r[impl vcf_reader.field_table]
+    // r[impl vcf_values.duplicates+2]
+    /// Index a VCF text INFO column from byte `at`, stopping after the
+    /// first entry of `until`: each key's span is what follows it (empty, or
+    /// `=` and the value). A key the field table does not hold yet is added
+    /// to it; `.` and empty entries hold nothing.
+    pub(crate) fn scan_text_info(
+        &mut self,
+        info: &[u8],
+        at: usize,
+        until: Option<DictId>,
+        file: &FileShared,
+    ) -> Result<Option<Entry>, RecordError> {
+        let Some(rest) = info.get(at..).filter(|_| info != b".") else { return Ok(None) };
+        let flow = for_each_info_entry(rest, |entry| {
+            let (key_start, key_end) =
+                (at.saturating_add(entry.key.start), at.saturating_add(entry.key.end));
+            let key = info.get(key_start..key_end).unwrap_or_default();
+            if key.is_empty() {
+                return ControlFlow::Continue(());
+            }
+            let Some(id) = file.fields.text_id(KeyKind::Info, key) else {
+                return ControlFlow::Continue(());
+            };
+            let end = entry.value.map_or(key_end, |v| at.saturating_add(v.end));
+            match span32(key_end..end) {
+                Ok((start, span_end)) => {
+                    let found = Entry { id, start, end: span_end };
+                    if !self.push(found) {
+                        file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
+                    } else if until == Some(id) {
+                        return ControlFlow::Break(Ok((end.saturating_add(1), found)));
+                    }
+                    ControlFlow::Continue(())
+                }
+                Err(e) => ControlFlow::Break(Err(e)),
+            }
+        });
+        match flow {
+            ControlFlow::Break(Ok((next, found))) => {
+                self.progress = Progress::Scanning { at: next, walked: 0 };
+                Ok(Some(found))
+            }
+            ControlFlow::Break(Err(e)) => Err(e),
+            ControlFlow::Continue(()) => Ok(None),
         }
     }
-    let len = entries.bytes.len().saturating_sub(entries.end());
-    if len > 0 {
-        return Err(RecordError::TrailingBytes { part, len });
-    }
-    Ok(Scan::End)
 }
 
 #[cold]
 fn warn_duplicate_id(file: &FileShared, id: DictId) {
     file.warn_duplicate(file.fields.name(&file.header, id).unwrap_or_default());
-}
-
-/// An index a [`LazyIndex`] builds and keeps the buffers of.
-pub(crate) trait Rebuild: Default {
-    /// Start indexing a new section.
-    fn restart(&mut self);
-}
-
-impl Rebuild for FieldIndex {
-    fn restart(&mut self) {
-        self.begin();
-    }
 }
 
 /// The FORMAT fields of a record: which are present, and for VCF text
@@ -210,55 +241,162 @@ impl Rebuild for FieldIndex {
 pub(crate) struct FormatIndex {
     /// For BCF, each field's column span; for VCF text, each field's
     /// position among the FORMAT keys (`k..k + 1`).
-    pub(crate) keys: FieldIndex,
+    pub(crate) keys: SectionIndex,
     /// VCF text only: sample `s`'s value of the `k`th key at
     /// `s * n_keys + k`, empty where the sample dropped it.
     pub(crate) values: Vec<Range<u32>>,
     pub(crate) n_keys: usize,
 }
 
-impl Rebuild for FormatIndex {
-    fn restart(&mut self) {
-        self.keys.begin();
+impl FormatIndex {
+    /// Forget the last record's FORMAT fields, keeping the buffers.
+    pub(crate) fn reset(&mut self) {
+        self.keys.reset();
         self.values.clear();
         self.n_keys = 0;
     }
+
+    /// Index the whole FORMAT data `source` (once; later calls return the
+    /// first one's outcome).
+    pub(crate) fn finish(
+        &mut self,
+        source: FormatSource<'_>,
+        file: &FileShared,
+    ) -> Result<(), RecordError> {
+        match &self.keys.progress {
+            Progress::Done => Ok(()),
+            Progress::Failed(e) => Err(e.clone()),
+            Progress::Scanning { .. } => self.scan(source, file),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scan(&mut self, source: FormatSource<'_>, file: &FileShared) -> Result<(), RecordError> {
+        let found = match source {
+            FormatSource::Bcf { indiv, n_fmt, n_samples } => {
+                let entries = BcfEntries::new(indiv, n_fmt, Some(n_samples), 0, 0);
+                self.keys.scan_bcf(entries, None, KeyKind::Format, file)
+            }
+            FormatSource::Text { keys, samples, n_samples } => {
+                self.scan_text(keys, samples, n_samples, file).map(|()| None)
+            }
+        };
+        self.keys.settle(found).map(drop)
+    }
+
+    // r[impl vcf_fields.samples]
+    // r[impl vcf_reader.field_table]
+    /// Index VCF text FORMAT data: `keys` (the FORMAT column) and `samples`
+    /// (`n_samples` TAB-separated columns), in one pass over the samples. A
+    /// sample may drop trailing fields; one with more fields than FORMAT has
+    /// keys, or a column count other than `n_samples`, is malformed.
+    fn scan_text(
+        &mut self,
+        keys: &[u8],
+        samples: &[u8],
+        n_samples: usize,
+        file: &FileShared,
+    ) -> Result<(), RecordError> {
+        if keys.is_empty() || keys == b"." {
+            return Ok(());
+        }
+        let mut n_keys = 0usize;
+        for (k, key) in keys.split(|&b| b == b':').enumerate() {
+            n_keys = k.saturating_add(1);
+            let Some(id) = file.fields.text_id(KeyKind::Format, key) else {
+                continue;
+            };
+            let (start, end) = span32(k..n_keys)?;
+            if !self.keys.push(Entry { id, start, end }) {
+                file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
+            }
+        }
+        self.n_keys = n_keys;
+        let total = n_samples.saturating_mul(n_keys);
+        self.values.resize(total, 0..0);
+        let (mut sample, mut field, mut start) = (0usize, 0usize, 0usize);
+        let flow = for_each_of_two(samples, b'\t', b':', |pos, next_sample| {
+            let Some(slot) =
+                self.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
+            else {
+                return ControlFlow::Break(too_many(sample, field, n_samples, n_keys));
+            };
+            match span32(start..pos) {
+                Ok((s, e)) => *slot = s..e,
+                Err(e) => return ControlFlow::Break(e),
+            }
+            start = pos.saturating_add(1);
+            if next_sample {
+                sample = sample.saturating_add(1);
+                field = 0;
+            } else {
+                field = field.saturating_add(1);
+                if field >= n_keys {
+                    return ControlFlow::Break(too_many(sample, field, n_samples, n_keys));
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        if let ControlFlow::Break(e) = flow {
+            return Err(e);
+        }
+        let found = sample.saturating_add(1);
+        if found != n_samples {
+            return Err(RecordError::SampleCount {
+                found: u32::try_from(found).unwrap_or(u32::MAX),
+                expected: n_samples,
+            });
+        }
+        let (s, e) = span32(start..samples.len())?;
+        if let Some(slot) = self.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
+        {
+            *slot = s..e;
+        }
+        Ok(())
+    }
 }
 
-/// Indexes a section from a cursor on, stopping after the first entry of
-/// the key given, if any.
-pub(crate) trait Step<T>:
-    FnOnce(&mut T, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>
-{
+/// An index a [`LazyIndex`] builds in place and keeps the buffers of.
+pub(crate) trait Rebuild: Default {
+    /// Start indexing a new section ([`SectionIndex::reset`]).
+    fn restart(&mut self);
+    /// The scan's error, if it failed ([`SectionIndex::result`]).
+    fn outcome(&self) -> Result<(), RecordError>;
 }
-impl<T, F: FnOnce(&mut T, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>> Step<T> for F {}
+
+impl Rebuild for SectionIndex {
+    fn restart(&mut self) {
+        self.reset();
+    }
+    fn outcome(&self) -> Result<(), RecordError> {
+        self.result()
+    }
+}
+
+impl Rebuild for FormatIndex {
+    fn restart(&mut self) {
+        self.reset();
+    }
+    fn outcome(&self) -> Result<(), RecordError> {
+        self.keys.result()
+    }
+}
 
 // r[impl vcf_fields.lazy+3]
 // r[impl vcf_values.index+2]
 /// A section's index, built on first access, in place: its buffers stay
-/// for the next record's build. A lookup ([`find`](LazyIndex::find)) indexes
-/// no further than the key it asks for; [`get`](Self::get) indexes the rest.
-/// A failed build is kept and returned on every access that reaches it.
+/// for the next record's build.
 ///
 /// `partial` holds the index while lookups build it, and the spare buffers
-/// otherwise; each build takes it out and puts it back, so one that panics
-/// leaves nothing and the next access starts over. Once the section is
-/// indexed it moves into `done`, read in place until [`reset`](Self::reset).
+/// otherwise; each scan takes it out and puts it back, so one that panics
+/// leaves nothing and the next access starts over. Once the scan is over
+/// the index moves into `done`, read in place until [`reset`](Self::reset).
 /// Boxed, so these moves copy a pointer. Single-threaded cells: a record
 /// holding one is `Send`, not `Sync`.
-pub(crate) struct LazyIndex<T = FieldIndex> {
-    done: OnceCell<Box<Slot<T>>>,
-    partial: Cell<Option<Box<Slot<T>>>>,
-}
-
-/// An index, where a partial build of it stopped, and the build's outcome.
-#[derive(Debug, Clone, Default)]
-struct Slot<T> {
-    index: T,
-    /// `false`: the index is the last record's, to restart.
-    started: bool,
-    cursor: Cursor,
-    result: Option<RecordError>,
+pub(crate) struct LazyIndex<T = SectionIndex> {
+    done: OnceCell<Box<T>>,
+    partial: Cell<Option<Box<T>>>,
 }
 
 impl<T> Default for LazyIndex<T> {
@@ -268,7 +406,7 @@ impl<T> Default for LazyIndex<T> {
 }
 
 impl<T: Clone> Clone for LazyIndex<T> {
-    /// A built index is cloned; one not built (or partly) is not, and the
+    /// A settled index is cloned; one not (or partly) built is not, and the
     /// clone builds its own on first access.
     fn clone(&self) -> Self {
         Self { done: self.done.clone(), partial: Cell::new(None) }
@@ -277,9 +415,8 @@ impl<T: Clone> Clone for LazyIndex<T> {
 
 impl<T: std::fmt::Debug> std::fmt::Debug for LazyIndex<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.done.get().map(|slot| (&slot.index, &slot.result)) {
-            Some((index, None)) => f.debug_tuple("LazyIndex").field(index).finish(),
-            Some((_, Some(e))) => f.debug_tuple("LazyIndex").field(e).finish(),
+        match self.done.get() {
+            Some(index) => f.debug_tuple("LazyIndex").field(index).finish(),
             None => f.write_str("LazyIndex(<not built>)"),
         }
     }
@@ -289,66 +426,61 @@ impl<T: Rebuild> LazyIndex<T> {
     /// Forget the index of the last record, keeping its buffers.
     #[inline]
     pub(crate) fn reset(&mut self) {
-        if let Some(slot) = self.done.take() {
-            *self.partial.get_mut() = Some(slot);
+        if let Some(index) = self.done.take() {
+            *self.partial.get_mut() = Some(index);
         }
-        if let Some(slot) = self.partial.get_mut() {
-            slot.started = false;
+        if let Some(index) = self.partial.get_mut() {
+            index.restart();
         }
     }
 
-    /// The whole index, built by `step` on first access.
+    /// The whole index, `finish` scanning what is left on first access.
     #[inline]
-    pub(crate) fn get(&self, step: impl Step<T>) -> Result<&T, &RecordError> {
-        let slot = match self.done.get() {
-            Some(slot) => slot,
-            None => self.build(step),
-        };
-        slot.result.as_ref().map_or(Ok(&slot.index), Err)
+    pub(crate) fn whole(
+        &self,
+        finish: impl FnOnce(&mut T) -> Result<(), RecordError>,
+    ) -> Result<&T, RecordError> {
+        match self.done.get() {
+            Some(index) => index.outcome().map(|()| &**index),
+            None => self.finish_on(finish),
+        }
     }
 
     #[cold]
     #[inline(never)]
-    fn build(&self, step: impl Step<T>) -> &Slot<T> {
-        let mut slot = self.take();
-        slot.result = step(&mut slot.index, &mut slot.cursor, None).err();
-        self.done.get_or_init(|| slot)
-    }
-
-    /// The partial index, restarted if it is the last record's.
-    fn take(&self) -> Box<Slot<T>> {
-        let mut slot = self.partial.take().unwrap_or_default();
-        if !slot.started {
-            slot.index.restart();
-            slot.cursor = Cursor::default();
-            slot.started = true;
-        }
-        slot
-    }
-
-    /// Whether anything has been indexed (or failed), for tests.
-    #[cfg(test)]
-    pub(crate) fn is_built(&self) -> bool {
-        let partial = self.partial.take();
-        let started = partial.as_ref().is_some_and(|slot| slot.started);
-        self.partial.set(partial);
-        started || self.done.get().is_some()
+    fn finish_on(
+        &self,
+        finish: impl FnOnce(&mut T) -> Result<(), RecordError>,
+    ) -> Result<&T, RecordError> {
+        let mut index = self.partial.take().unwrap_or_default();
+        let result = finish(&mut index);
+        let index = self.done.get_or_init(|| index);
+        result.map(|()| &**index)
     }
 }
 
-impl LazyIndex<FieldIndex> {
-    /// The first entry of `id`, indexing the section no further than that
-    /// (`r[vcf_values.index+2]`). Malformed data fails the lookup only if the
-    /// index meets it before `id`.
+impl LazyIndex<SectionIndex> {
+    /// Whether anything has been indexed, for tests.
+    #[cfg(test)]
+    pub(crate) fn is_built(&self) -> bool {
+        let partial = self.partial.take();
+        let started = partial.as_ref().is_some_and(|index| !index.entries().is_empty());
+        self.partial.set(partial);
+        started || self.done.get().is_some()
+    }
+
+    /// The first entry of `id` in INFO section `info`, scanning no further
+    /// than that ([`SectionIndex::find`]).
     #[inline]
     pub(crate) fn find(
         &self,
         id: DictId,
-        step: impl Step<FieldIndex>,
-    ) -> Result<Option<Entry>, &RecordError> {
+        info: super::info::InfoSource<'_>,
+        file: &FileShared,
+    ) -> Result<Option<Entry>, RecordError> {
         match self.done.get() {
-            Some(slot) => found(&slot.index, slot.result.as_ref(), id),
-            None => self.find_on(id, step),
+            Some(index) => index.found(id),
+            None => self.find_on(id, info, file),
         }
     }
 
@@ -357,38 +489,17 @@ impl LazyIndex<FieldIndex> {
     fn find_on(
         &self,
         id: DictId,
-        step: impl Step<FieldIndex>,
-    ) -> Result<Option<Entry>, &RecordError> {
-        let mut slot = self.take();
-        let scan = match slot.index.get(id) {
-            Some(_) => Ok(Scan::Found),
-            None => step(&mut slot.index, &mut slot.cursor, Some(id)),
-        };
-        match scan {
-            Ok(Scan::Found) => {
-                let entry = slot.index.get(id);
-                self.partial.set(Some(slot));
-                return Ok(entry);
-            }
-            Ok(Scan::End) => {}
-            Err(e) => slot.result = Some(e),
+        info: super::info::InfoSource<'_>,
+        file: &FileShared,
+    ) -> Result<Option<Entry>, RecordError> {
+        let mut index = self.partial.take().unwrap_or_default();
+        let found = index.find(id, info, file);
+        if index.settled() {
+            self.done.get_or_init(|| index);
+        } else {
+            self.partial.set(Some(index));
         }
-        let slot = self.done.get_or_init(|| slot);
-        found(&slot.index, slot.result.as_ref(), id)
-    }
-}
-
-/// What a lookup of `id` in a whole index reads: its entry if it has one
-/// (indexed before any malformed data), else the build's error or absent.
-fn found<'a>(
-    index: &FieldIndex,
-    error: Option<&'a RecordError>,
-    id: DictId,
-) -> Result<Option<Entry>, &'a RecordError> {
-    match (index.get(id), error) {
-        (Some(entry), _) => Ok(Some(entry)),
-        (None, None) => Ok(None),
-        (None, Some(e)) => Err(e),
+        found
     }
 }
 
@@ -398,122 +509,6 @@ fn span32(r: Range<usize>) -> Result<(u32, u32), RecordError> {
         (Ok(s), Ok(e)) => Ok((s, e)),
         _ => Err(RecordError::TooLarge { size: r.end as u64, max: u64::from(u32::MAX) }),
     }
-}
-
-// r[impl vcf_reader.field_table]
-// r[impl vcf_values.duplicates+2]
-/// Index a VCF text INFO column: each key's span is what follows it (empty,
-/// or `=` and the value). A key the field table does not hold yet is
-/// added to it; `.` and empty entries hold nothing.
-pub(crate) fn index_text_info(
-    index: &mut FieldIndex,
-    info: &[u8],
-    cursor: &mut Cursor,
-    stop: Option<DictId>,
-    file: &FileShared,
-) -> Result<Scan, RecordError> {
-    let base = cursor.at;
-    let Some(rest) = info.get(base..).filter(|_| info != b".") else { return Ok(Scan::End) };
-    let flow = for_each_info_entry(rest, |entry| {
-        let (key_start, key_end) =
-            (base.saturating_add(entry.key.start), base.saturating_add(entry.key.end));
-        let key = info.get(key_start..key_end).unwrap_or_default();
-        if key.is_empty() {
-            return ControlFlow::Continue(());
-        }
-        let Some(id) = file.fields.text_id(KeyKind::Info, key) else {
-            return ControlFlow::Continue(());
-        };
-        let end = entry.value.map_or(key_end, |v| base.saturating_add(v.end));
-        match span32(key_end..end) {
-            Ok((start, span_end)) => {
-                if !index.push(Entry { id, start, end: span_end }) {
-                    file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
-                } else if stop == Some(id) {
-                    return ControlFlow::Break(Ok(end.saturating_add(1)));
-                }
-                ControlFlow::Continue(())
-            }
-            Err(e) => ControlFlow::Break(Err(e)),
-        }
-    });
-    match flow {
-        ControlFlow::Break(Ok(next)) => {
-            cursor.at = next;
-            Ok(Scan::Found)
-        }
-        ControlFlow::Break(Err(e)) => Err(e),
-        ControlFlow::Continue(()) => Ok(Scan::End),
-    }
-}
-
-// r[impl vcf_fields.samples]
-// r[impl vcf_reader.field_table]
-/// Index VCF text FORMAT data: `keys` (the FORMAT column) and `samples`
-/// (`n_samples` TAB-separated columns), in one pass over the samples. A
-/// sample may drop trailing fields; one with more fields than FORMAT has
-/// keys, or a column count other than `n_samples`, is malformed.
-pub(crate) fn index_text_format(
-    index: &mut FormatIndex,
-    keys: &[u8],
-    samples: &[u8],
-    n_samples: usize,
-    file: &FileShared,
-) -> Result<(), RecordError> {
-    if keys.is_empty() || keys == b"." {
-        return Ok(());
-    }
-    let mut n_keys = 0usize;
-    for (k, key) in keys.split(|&b| b == b':').enumerate() {
-        n_keys = k.saturating_add(1);
-        let Some(id) = file.fields.text_id(KeyKind::Format, key) else {
-            continue;
-        };
-        let (start, end) = span32(k..n_keys)?;
-        if !index.keys.push(Entry { id, start, end }) {
-            file.warn_duplicate(std::str::from_utf8(key).unwrap_or_default());
-        }
-    }
-    index.n_keys = n_keys;
-    let total = n_samples.saturating_mul(n_keys);
-    index.values.resize(total, 0..0);
-    let (mut sample, mut field, mut start) = (0usize, 0usize, 0usize);
-    let flow = for_each_of_two(samples, b'\t', b':', |pos, next_sample| {
-        let Some(slot) = index.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field))
-        else {
-            return ControlFlow::Break(too_many(sample, field, n_samples, n_keys));
-        };
-        match span32(start..pos) {
-            Ok((s, e)) => *slot = s..e,
-            Err(e) => return ControlFlow::Break(e),
-        }
-        start = pos.saturating_add(1);
-        if next_sample {
-            sample = sample.saturating_add(1);
-            field = 0;
-        } else {
-            field = field.saturating_add(1);
-            if field >= n_keys {
-                return ControlFlow::Break(too_many(sample, field, n_samples, n_keys));
-            }
-        }
-        ControlFlow::Continue(())
-    });
-    if let ControlFlow::Break(e) = flow {
-        return Err(e);
-    }
-    let found = sample.saturating_add(1);
-    if found != n_samples {
-        return Err(RecordError::SampleCount {
-            found: u32::try_from(found).unwrap_or(u32::MAX),
-            expected: n_samples,
-        });
-    }
-    let (s, e) = span32(start..samples.len())?;
-    if let Some(slot) = index.values.get_mut(sample.saturating_mul(n_keys).saturating_add(field)) {
-        *slot = s..e;
-    }
-    Ok(())
 }
 
 /// Sample `sample` holds a field past the last key, or there are more
@@ -541,7 +536,7 @@ mod tests {
     /// checked way too: both must agree on each span, and the walk on the
     /// first error.
     fn walk(bytes: &[u8], n: usize, samples: Option<usize>) -> (usize, usize) {
-        let mut entries = BcfEntries::new(bytes, n, samples, Cursor::default());
+        let mut entries = BcfEntries::new(bytes, n, samples, 0, 0);
         let mut quick = 0;
         for _ in 0..n {
             let mut checked = entries.clone();
@@ -591,62 +586,6 @@ mod tests {
         walk(bytes.get(..cut).unwrap_or_default(), n, samples);
     }
 
-    // r[verify vcf_fields.lazy+3]
-    /// Repeated accesses to a record's index see one build, its index or its
-    /// error, record after record on the same buffers; a clone of a built
-    /// index does not build again.
-    #[test]
-    fn repeated_accesses_build_once() {
-        use std::cell::Cell;
-        let mut lazy = LazyIndex::<FieldIndex>::default();
-        for round in 0..300 {
-            lazy.reset();
-            assert!(!lazy.is_built());
-            let builds = Cell::new(0);
-            let id = DictId::new(round % 50).unwrap();
-            let entry = Entry { id, start: round, end: round + 1 };
-            let fails = round % 3 == 0;
-            for _ in 0..3 {
-                let got = lazy.get(|index: &mut FieldIndex, _: &mut Cursor, _| {
-                    builds.set(builds.get() + 1);
-                    assert!(index.entries().is_empty(), "restarted");
-                    index.push(entry);
-                    if fails { Err(RecordError::Truncated) } else { Ok(Scan::End) }
-                });
-                match got {
-                    Ok(index) => {
-                        assert!(!fails);
-                        assert_eq!(index.get(id), Some(entry));
-                    }
-                    Err(e) => assert!(fails && matches!(e, RecordError::Truncated)),
-                }
-            }
-            assert_eq!(builds.get(), 1, "round {round}");
-            assert!(lazy.is_built());
-            if !fails {
-                assert_eq!(
-                    lazy.clone()
-                        .get(|_: &mut FieldIndex, _: &mut Cursor, _| unreachable!())
-                        .unwrap()
-                        .get(id),
-                    Some(entry)
-                );
-            }
-        }
-    }
-
-    /// A build that panics leaves the index unbuilt; the next access builds it.
-    #[test]
-    fn a_panicking_build_is_retried() {
-        let lazy = LazyIndex::<FieldIndex>::default();
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = lazy.get(|_: &mut FieldIndex, _: &mut Cursor, _| panic!("build"));
-        }));
-        assert!(panicked.is_err());
-        assert!(!lazy.is_built());
-        assert!(lazy.get(|_: &mut FieldIndex, _: &mut Cursor, _| Ok(Scan::End)).is_ok());
-    }
-
     /// The common entries take the quick path, a flag ending the section
     /// (three bytes, nothing after them) included.
     #[test]
@@ -674,6 +613,7 @@ mod incremental {
     use super::*;
     use crate::vcf::bcf_encoding::{BCF_BT_INT8, encode_type_byte, encode_typed_int_key};
     use crate::vcf::reader::VcfFile;
+    use crate::vcf::reader::info::InfoSource;
     use hegel::prelude::*;
 
     const KEYS: usize = 8;
@@ -699,31 +639,28 @@ mod incremental {
         tc.draw(gs::vecs(gs::optional(gs::integers::<usize>().max_value(KEYS + 1))).max_size(6))
     }
 
-    /// Lookups (and whole-index accesses) on one lazy index, against the
-    /// index built whole at once: a lookup reads what the whole index has
-    /// for its key, or its error if it has none.
-    fn check(
-        file: &FileShared,
-        accesses: &[Option<usize>],
-        step: impl Fn(&mut FieldIndex, &mut Cursor, Option<DictId>) -> Result<Scan, RecordError>,
-    ) {
-        let mut whole = FieldIndex::default();
-        whole.begin();
-        let result = step(&mut whole, &mut Cursor::default(), None).map(drop);
-        let mut lazy = LazyIndex::<FieldIndex>::default();
+    /// Lookups (and whole-index accesses) on one index, record after record,
+    /// against the index built whole at once: a lookup reads what the whole
+    /// index has for its key, or its error if it has none.
+    fn check(file: &FileShared, info: InfoSource<'_>, accesses: &[Option<usize>]) {
+        let mut whole = SectionIndex::default();
+        let result = whole.finish(info, file);
+        let mut index = SectionIndex::default();
         for _ in 0..2 {
-            lazy.reset();
+            index.reset();
             for &access in accesses {
                 match access {
                     Some(k) => {
                         let id = id(file, k);
-                        let expected =
-                            found(&whole, result.as_ref().err(), id).map_err(Clone::clone);
-                        assert_eq!(lazy.find(id, &step).map_err(Clone::clone), expected, "K{k}");
+                        let expected = match whole.get(id) {
+                            Some(entry) => Ok(Some(entry)),
+                            None => result.clone().map(|()| None),
+                        };
+                        assert_eq!(index.find(id, info, file), expected, "K{k}");
                     }
                     None => {
-                        let got = lazy.get(&step).map(|i| i.entries().to_vec());
-                        let expected = result.as_ref().map(|()| whole.entries().to_vec());
+                        let got = index.finish(info, file).map(|()| index.entries().to_vec());
+                        let expected = result.clone().map(|()| whole.entries().to_vec());
                         assert_eq!(got, expected);
                     }
                 }
@@ -754,16 +691,7 @@ mod incremental {
         bytes.truncate(cut);
         bytes.extend(tc.draw(gs::binary().max_size(2)));
         let n = (keys.len() + tc.draw(gs::integers::<usize>().max_value(2))).saturating_sub(1);
-        check(file, &accesses(&tc), |index, cursor, stop| {
-            index_bcf(
-                index,
-                BcfEntries::new(&bytes, n, None, *cursor),
-                cursor,
-                stop,
-                KeyKind::Info,
-                file,
-            )
-        });
+        check(file, InfoSource::Bcf { bytes: &bytes, n }, &accesses(&tc));
     }
 
     // r[verify vcf_values.index+2]
@@ -784,8 +712,6 @@ mod incremental {
             })
             .collect();
         let info = info.join(";");
-        check(file, &accesses(&tc), |index, cursor, stop| {
-            index_text_info(index, info.as_bytes(), cursor, stop, file)
-        });
+        check(file, InfoSource::Text(info.as_bytes()), &accesses(&tc));
     }
 }
