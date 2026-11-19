@@ -215,11 +215,24 @@ pub const MAX_SAMPLES: usize = 10_000_000;
 /// A parsed header may leave holes (`IDX=` values with gaps, as htslib writes
 /// after removing a field), so an index names at most one id, and some none.
 /// Hashed, not scanned: a header may declare up to [`MAX_DICT_ENTRIES`] ids.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Two maps are equal when they give every id the same index: a hole past
+/// the highest index, or one a removed id keeps, names nothing.
+#[derive(Debug, Clone, Default)]
 pub struct StringMap {
     ids: HashMap<SmolStr, u32>,
     slots: Vec<Option<SmolStr>>,
+    /// Removed ids and the slot each keeps for itself (`r[vcf_header.remove+2]`).
+    retired: HashMap<SmolStr, u32>,
 }
+
+impl PartialEq for StringMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.ids == other.ids
+    }
+}
+
+impl Eq for StringMap {}
 
 impl StringMap {
     /// Look up the BCF dictionary index for an ID.
@@ -252,10 +265,18 @@ impl StringMap {
     }
 
     /// The index of `id`, appending it past the highest index (as htslib does,
-    /// never filling a hole) if it is new. `None`, with the map unchanged, when
-    /// the new index would reach `max`.
+    /// never filling a hole) if it is new. A removed id gets its own slot back.
+    /// `None`, with the map unchanged, when the new index would reach `max`.
     pub(crate) fn push(&mut self, id: &SmolStr, max: usize) -> Option<u32> {
         if let Some(&idx) = self.ids.get(id) {
+            return Some(idx);
+        }
+        // r[impl vcf_header.remove+2]
+        if let Some(idx) = self.retired.remove(id) {
+            if let Some(slot) = self.slots.get_mut(idx as usize) {
+                *slot = Some(id.clone());
+            }
+            self.ids.insert(id.clone(), idx);
             return Some(idx);
         }
         let idx = self.slots.len();
@@ -268,14 +289,16 @@ impl StringMap {
         Some(idx32)
     }
 
-    // r[impl vcf_header.remove]
-    /// Make `id`'s slot a hole, as htslib's `bcf_hdr_remove` does: every other
-    /// id keeps its index, and the slot is never reused.
+    // r[impl vcf_header.remove+2]
+    /// Make `id`'s slot a hole that stays `id`'s, as htslib's `bcf_hdr_remove`
+    /// keeps the id in its dictionary: every other id keeps its index, and a
+    /// `push` of `id` takes the slot back.
     pub(crate) fn remove(&mut self, id: &str) {
-        if let Some(idx) = self.ids.remove(id)
-            && let Some(slot) = self.slots.get_mut(idx as usize)
-        {
-            *slot = None;
+        if let Some((id, idx)) = self.ids.remove_entry(id) {
+            if let Some(slot) = self.slots.get_mut(idx as usize) {
+                *slot = None;
+            }
+            self.retired.insert(id, idx);
         }
     }
 
@@ -406,7 +429,8 @@ impl VcfHeader {
     ///
     /// The builder starts in the [`Contigs`] phase, so every phase is
     /// reachable. A registration appends to the dictionary past every index
-    /// already taken (a new FILTER may land after the copied INFO ids);
+    /// already taken (a new FILTER may land after the copied INFO ids), but an
+    /// id removed and registered again gets its old index back;
     /// [`to_vcf_text`](Self::to_vcf_text) then writes `IDX=` so a reader
     /// assigns the indices the writer encodes with.
     ///
@@ -430,7 +454,8 @@ impl VcfHeader {
     /// let header = builder.build()?;
     /// assert_eq!(header.samples(), ["S1"]);
     /// assert_eq!(header.version(), input.version());
-    /// assert_ne!(header.string_map().get("PS"), input.string_map().get("PS"));
+    /// // As htslib: PS gets its index back.
+    /// assert_eq!(header.string_map().get("PS"), input.string_map().get("PS"));
     /// # let _ = ps;
     /// # Ok(())
     /// # }
@@ -918,7 +943,7 @@ impl<P> VcfHeaderBuilder<P> {
         self.header.other_lines.push(line.into());
     }
 
-    // r[impl vcf_header.remove]
+    // r[impl vcf_header.remove+2]
     /// Remove the INFO definition `id`; returns whether there was one. Its
     /// dictionary slot becomes a hole unless a FILTER or FORMAT `id` keeps it.
     pub fn remove_info(&mut self, id: &str) -> bool {
@@ -928,7 +953,7 @@ impl<P> VcfHeaderBuilder<P> {
         removed
     }
 
-    // r[impl vcf_header.remove]
+    // r[impl vcf_header.remove+2]
     /// Remove the FORMAT definition `id`; returns whether there was one. Its
     /// dictionary slot becomes a hole unless a FILTER or INFO `id` keeps it.
     pub fn remove_format(&mut self, id: &str) -> bool {
@@ -938,7 +963,7 @@ impl<P> VcfHeaderBuilder<P> {
         removed
     }
 
-    // r[impl vcf_header.remove]
+    // r[impl vcf_header.remove+2]
     /// Remove the FILTER definition `id`; returns whether there was one.
     /// `PASS` is index 0 in every header and is not removed: `false`.
     pub fn remove_filter(&mut self, id: &str) -> bool {

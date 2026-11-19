@@ -503,7 +503,7 @@ fn multi_sample_bcf_readable_by_bcftools() {
 
 // ── A dictionary with a hole ───────────────────────────────────────────
 
-// r[verify vcf_header.remove]
+// r[verify vcf_header.remove+2]
 // r[verify vcf_header.parse.preserve]
 /// A derived header with a removed INFO id leaves a hole in the dictionary,
 /// which the written header spells with `IDX=`. noodles honours it: the BCF

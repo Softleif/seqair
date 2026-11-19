@@ -326,12 +326,13 @@ fn a_derived_real_header_is_its_source_but_for_the_id() {
     }
 }
 
-// r[verify vcf_header.remove]
+// r[verify vcf_header.remove+2]
 // r[verify vcf_header.to_builder]
 /// Removing definitions leaves every other id at its index and the removed
 /// ones' slots empty unless another category still declares them; new ids
-/// go past every slot. bcftools, reading the written header, assigns the
-/// same dictionary.
+/// go past every slot, and a removed id registered again gets its slot back,
+/// as `bcftools annotate -x INFO/X -h` (with X's line) gives it. bcftools,
+/// reading the written header, assigns the same dictionary.
 #[hegel::test(test_cases = pinned::cases(40))]
 fn removing_definitions_keeps_every_other_index(tc: TestCase) {
     let header = tc.draw(builder_header());
@@ -370,12 +371,19 @@ fn removing_definitions_keeps_every_other_index(tc: TestCase) {
     builder.add_filter("zzNewFilter", FilterDef::new("new")).unwrap();
     let mut builder = builder.infos();
     let def = InfoDef::new(Number::Count(1), ValueType::Integer, "new");
-    builder.add_info("zzNewInfo", def).unwrap();
+    builder.add_info("zzNewInfo", def.clone()).unwrap();
+    let again = gone.iter().find(|(kind, _)| *kind == 1).map(|(_, id)| id.clone());
+    if let Some(id) = &again {
+        builder.add_info(id.as_str(), def).unwrap();
+    }
     let derived = builder.build().unwrap();
 
     let mut expected = expected;
     expected.insert("zzNewFilter".to_owned(), slots);
     expected.insert("zzNewInfo".to_owned(), slots + 1);
+    if let Some(id) = again {
+        expected.insert(id.to_string(), header.string_map().get(&id).unwrap());
+    }
     assert_eq!(dictionaries(&derived), (expected, contigs));
     let text = derived.to_vcf_text();
     assert_eq!(bcftools_dictionaries(&text), dictionaries(&derived), "{text}");
@@ -383,7 +391,7 @@ fn removing_definitions_keeps_every_other_index(tc: TestCase) {
     assert_eq!(snapshot(&again), snapshot(&derived), "{text}");
 }
 
-// r[verify vcf_header.remove]
+// r[verify vcf_header.remove+2]
 #[test]
 fn pass_stays_and_a_missing_id_is_reported() {
     let mut builder = VcfHeader::builder().build().unwrap().to_builder();
@@ -410,7 +418,7 @@ fn set_samples_replaces_them_or_leaves_them() {
 }
 
 // r[verify vcf_header.to_builder]
-// r[verify vcf_header.remove]
+// r[verify vcf_header.remove+2]
 /// `HiPhase`'s case: copy the input's header, swap its FORMAT PS for its own
 /// PS and PF, add its `##HiPhase_*` lines, and write records with keys of
 /// copied and new fields alike. bcftools reads them from VCF text and BCF.
