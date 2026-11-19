@@ -38,7 +38,15 @@ impl Genotype {
 
     /// Missing genotype (./.  ).
     pub fn missing_diploid() -> Self {
-        Self { alleles: SmallVec::from([None, None]), phased: SmallVec::from([false]) }
+        Self::missing(2)
+    }
+
+    /// A missing genotype of `ploidy` alleles, unphased: `.`, `./.`, `././.`.
+    pub fn missing(ploidy: usize) -> Self {
+        Self {
+            alleles: std::iter::repeat_n(None, ploidy).collect(),
+            phased: std::iter::repeat_n(false, ploidy.saturating_sub(1)).collect(),
+        }
     }
 }
 
@@ -62,5 +70,11 @@ mod tests {
 
         let gt_missing = Genotype::missing_diploid();
         assert_eq!(&gt_missing.alleles, &[None, None]);
+        assert_eq!(gt_missing.phased.len(), 1);
+        for ploidy in 0..4 {
+            let gt = Genotype::missing(ploidy);
+            assert!(gt.alleles.len() == ploidy && gt.alleles.iter().all(Option::is_none));
+            assert_eq!(gt.phased.len(), ploidy.saturating_sub(1), "one separator between alleles");
+        }
     }
 }
