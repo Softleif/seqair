@@ -123,10 +123,10 @@ fn ends(file: &VcfFile) -> Vec<Result<(VcfPos, VcfPos), String>> {
     }
 }
 
-// r[verify vcf_values.rlen+2]
+// r[verify vcf_values.rlen+3]
 // r[verify vcf_reader.oracles]
 /// Every generated record ends where the BCF bcftools writes from the same
-/// text says it ends.
+/// text says it ends, whatever the version the file declares.
 #[hegel::test(test_cases = pinned::cases(100))]
 fn text_ends_are_the_rlen_bcftools_writes(tc: TestCase) {
     let Some(bin) = bcftools() else {
@@ -135,7 +135,8 @@ fn text_ends_are_the_rlen_bcftools_writes(tc: TestCase) {
     };
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(20));
     let mut pos = 0u32;
-    let mut text = HEADER.to_owned();
+    let version = tc.draw(gs::sampled_from(vec!["4.2", "4.3", "4.4", "4.5"]));
+    let mut text = HEADER.replacen("4.5", version, 1);
     for _ in 0..n {
         pos += tc.draw(gs::integers::<u32>().min_value(1).max_value(5000));
         text.push_str(&line(&tc, pos));
@@ -163,7 +164,7 @@ fn text_ends_are_the_rlen_bcftools_writes(tc: TestCase) {
     }
 }
 
-// r[verify vcf_values.rlen+2]
+// r[verify vcf_values.rlen+3]
 /// htslib reads SVLEN's eighth element against ALT 0's bit (REF, never
 /// set), so an eighth-ALT `<DEL>` does not extend the record, a seventh
 /// does. Ends as `bcftools query -f '%END'` prints them.

@@ -49,7 +49,7 @@ pub enum Number {
 }
 
 impl Number {
-    // r[impl vcf_header.file_format.single_version+4]
+    // r[impl vcf_header.file_format.single_version+5]
     /// The first VCF version that defines this cardinality: 4.4 for `P`, 4.5
     /// for `M`, `LA`, `LR` and `LG`, 4.0 for the rest.
     pub const fn min_version(self) -> VcfVersion {
@@ -468,7 +468,7 @@ pub struct VcfHeader {
 }
 
 impl VcfHeader {
-    // r[impl vcf_header.file_format.single_version+4]
+    // r[impl vcf_header.file_format.single_version+5]
     /// The VCF version a built header declares. There is no setter: a
     /// cardinality is versioned (`Number=M` is 4.5 and nothing earlier), so a
     /// header that could declare an older version could promise a grammar it
@@ -1109,7 +1109,7 @@ impl<P> VcfHeaderBuilder<P> {
         }
     }
 
-    // r[impl vcf_header.file_format.single_version+4]
+    // r[impl vcf_header.file_format.single_version+5]
     /// Refuse a `Number` newer than the header's version, which a derived
     /// header keeps from its source.
     fn check_number_version(&self, id: &SmolStr, number: Number) -> Result<(), VcfHeaderError> {

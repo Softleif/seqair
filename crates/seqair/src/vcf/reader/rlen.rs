@@ -27,7 +27,7 @@ pub(crate) struct RlenKeys {
 }
 
 impl RlenKeys {
-    // r[impl vcf_values.rlen+2]
+    // r[impl vcf_values.rlen+3]
     /// Those the field table gives `Type=Integer`: declared so or, in VCF
     /// text, not declared at all (VCF reserves them as integers).
     pub(crate) fn new(fields: &FieldTable) -> Self {
@@ -80,7 +80,7 @@ pub(crate) struct RlenColumns<'a> {
     pub(crate) format: &'a [u8],
 }
 
-// r[impl vcf_values.rlen+2]
+// r[impl vcf_values.rlen+3]
 // r[impl vcf_values.rlen.end_before_pos]
 /// The reference length htslib gives a VCF text record on `contig` at
 /// 0-based `pos`; an END before POS is warned of, once per file.
@@ -99,7 +99,7 @@ pub(crate) fn text_rlen(
     rlen
 }
 
-// r[impl vcf_values.rlen+2]
+// r[impl vcf_values.rlen+3]
 // r[impl record_encoder.rlen]
 /// [`text_rlen`] for a header's `keys`: the writer's entry point, so that what
 /// it indexes a record under is what a reader computes for it.
@@ -223,7 +223,7 @@ fn format_len(format: &[u8]) -> Option<i64> {
 mod tests {
     use super::*;
 
-    // r[verify vcf_values.rlen+2]
+    // r[verify vcf_values.rlen+3]
     /// The writer's keys (declared fields only) are the reader's for every
     /// header that declares the field; only a VCF text file whose header
     /// leaves END/SVLEN/LEN out reads them where a writer cannot write them.

@@ -116,7 +116,7 @@ fn undeclared_keys_resolve_through_lenient_keys() {
     assert_eq!(samples.sample(s1).get(&gq).unwrap(), Some(30));
     assert_eq!(samples.sample(s2).get(&gq).unwrap(), None);
     assert_eq!(samples.sample(s1).get(&zz).unwrap(), Some("q"));
-    // r[verify vcf_values.rlen+2]
+    // r[verify vcf_values.rlen+3]
     // An undeclared END is VCF's Integer END, as tabix reads it.
     assert_eq!(rec.locus().end(), VcfPos::At(seqair_types::Pos1::new(20).unwrap()));
 

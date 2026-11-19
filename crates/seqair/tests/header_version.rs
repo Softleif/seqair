@@ -18,7 +18,7 @@ const fn format_def(name: &'static str, number: Number) -> FormatFieldDef<Arr<f3
 /// against the emitted text rather than against the constant alone, which is
 /// what a reader actually sees.
 // r[verify vcf_header.file_format+2]
-// r[verify vcf_header.file_format.single_version+4]
+// r[verify vcf_header.file_format.single_version+5]
 #[test]
 fn the_declared_version_defines_the_cardinalities_we_emit() {
     let mut builder = VcfHeader::builder().filters().infos().formats();

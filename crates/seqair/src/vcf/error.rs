@@ -43,7 +43,7 @@ pub enum VcfHeaderError {
     #[error("Flag INFO field {id} must have Number=0")]
     FlagNumberMismatch { id: SmolStr },
 
-    // r[impl vcf_header.file_format.single_version+4]
+    // r[impl vcf_header.file_format.single_version+5]
     #[error("field {id}: Number={number} needs {needs}, but the header declares {version}")]
     NumberNeedsNewerVersion { id: SmolStr, number: Number, version: VcfVersion, needs: VcfVersion },
 

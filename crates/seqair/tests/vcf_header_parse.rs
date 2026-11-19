@@ -175,7 +175,7 @@ fn real_headers_round_trip() {
 }
 
 // r[verify vcf_header.parse.version]
-// r[verify vcf_header.file_format.single_version+4]
+// r[verify vcf_header.file_format.single_version+5]
 #[test]
 fn a_parsed_header_keeps_its_version_and_attributes() {
     let rastair = VcfHeader::parse(&fixture("rastair_sv168.bcf.header")).unwrap();
@@ -516,7 +516,7 @@ fn a_phaser_rewrites_ps_in_a_copied_header() {
     }
 }
 
-// r[verify vcf_header.file_format.single_version+4]
+// r[verify vcf_header.file_format.single_version+5]
 /// A header derived from a VCF 4.2 or 4.3 file refuses a `Number` its
 /// version does not define, naming both versions, and keeps its own version;
 /// one from a 4.4 file takes `P` but not `M`; a built (4.5) header takes all.
