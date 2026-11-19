@@ -399,6 +399,10 @@ pub trait InfoEncoder {
     /// # Errors
     /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any concrete value is reserved.
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError>;
+    // r[impl vcf_passthrough.opt_arrays]
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if any concrete value is reserved.
+    fn info_float_opts(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError>;
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
 }
@@ -442,6 +446,14 @@ pub trait FormatEncoder {
         &mut self,
         id: &FieldId,
         per_sample: &[&[Option<f32>]],
+    ) -> Result<(), VcfError>;
+    // r[impl vcf_passthrough.opt_arrays]
+    /// Like [`format_ints`](Self::format_ints), but an element may be `None`:
+    /// the missing value of the column's integer type in BCF, `.` in VCF text.
+    fn format_int_opts(
+        &mut self,
+        id: &FieldId,
+        per_sample: &[&[Option<i32>]],
     ) -> Result<(), VcfError>;
     /// Encode a string FORMAT field — one string per sample (its length MUST
     /// equal the sample count). For BCF the stored width is the longest string,
@@ -556,6 +568,62 @@ impl InfoKey<OptArr<i32>> {
     ) -> Result<(), VcfError> {
         enc.info_int_opts(&self.0, values)
     }
+}
+
+// r[impl vcf_passthrough.opt_arrays]
+impl InfoKey<OptArr<f32>> {
+    /// Encode a float array INFO value with per-element missing markers.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if any concrete
+    /// element is a reserved BCF float pattern; `None` elements are always accepted.
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        values: &[Option<f32>],
+    ) -> Result<(), VcfError> {
+        enc.info_float_opts(&self.0, values)
+    }
+}
+
+// r[impl vcf_passthrough.opt_arrays]
+impl FormatKey<OptArr<i32>> {
+    /// Encode a multi-valued integer FORMAT field with per-element missing
+    /// markers, one inner slice per sample.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `per_sample.len() != n_samples`,
+    /// and [`crate::vcf::VcfEncodeError::ReservedIntValue`] for a reserved concrete element.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        per_sample: &[&[Option<i32>]],
+    ) -> Result<(), VcfError> {
+        check_samples(enc.n_samples(), per_sample.len())?;
+        enc.format_int_opts(&self.0, per_sample)
+    }
+}
+
+// r[impl vcf_passthrough.opt_arrays]
+impl FormatKey<OptArr<f32>> {
+    /// Encode a multi-valued float FORMAT field with per-element missing
+    /// markers, one inner slice per sample.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `per_sample.len() != n_samples`,
+    /// and [`crate::vcf::VcfEncodeError::ReservedFloatValue`] for a reserved concrete element.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        per_sample: &[&[Option<f32>]],
+    ) -> Result<(), VcfError> {
+        check_samples(enc.n_samples(), per_sample.len())?;
+        enc.format_float_opts(&self.0, per_sample)
+    }
+}
+
+fn check_samples(expected: usize, got: usize) -> Result<(), VcfError> {
+    if expected == got { Ok(()) } else { Err(VcfError::SampleCountMismatch { expected, got }) }
 }
 
 impl FormatKey<Gt> {

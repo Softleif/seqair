@@ -1630,6 +1630,48 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
         }
         Ok(())
     }
+    // r[impl vcf_passthrough.opt_arrays]
+    // r[impl record_encoder.reserved_rejection]
+    fn info_float_opts(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        id.check_count(self.n_allele_count(), None, values.len())?;
+        reject_reserved_floats(id.name(), values.iter().filter_map(|v| *v))?;
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.shared_buf.len();
+                encode_typed_int_key(enc.shared_buf, id.dict_idx());
+                encode_type_byte(enc.shared_buf, values.len(), BCF_BT_FLOAT);
+                for v in values {
+                    // r[impl bcf_writer.missing_sentinels]
+                    match v {
+                        Some(v) => v.encode_bcf_as(enc.shared_buf, BCF_BT_FLOAT),
+                        None => f32::encode_missing(enc.shared_buf),
+                    }
+                }
+                // r[impl bcf_encoder.info_counting]
+                enc.commit_info_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                let start = vcf.begin_info_field();
+                vcf.buf.extend_from_slice(id.name().as_bytes());
+                vcf.buf.push(b'=');
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        vcf.buf.push(b',');
+                    }
+                    match v {
+                        // r[impl vcf_writer.float_precision]
+                        Some(v) => write_float_g(vcf.buf, *v)
+                            .map_err(|source| VcfError::FailedToWriteFormattedString { source })?,
+                        // r[impl vcf_writer.missing_dot]
+                        None => vcf.buf.push(b'.'),
+                    }
+                }
+                vcf.commit_info_field(id, start);
+            }
+        }
+        Ok(())
+    }
     // r[impl record_encoder.info_state_queries]
     fn n_allele(&self) -> usize {
         match &self.inner {
@@ -2119,6 +2161,71 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                             None => vcf.sample_bufs[i].push(b'.'),
                         }
                     }
+                }
+                vcf.commit_format_field(id);
+            }
+        }
+        Ok(())
+    }
+    // r[impl vcf_passthrough.opt_arrays]
+    // r[impl record_encoder.reserved_rejection]
+    fn format_int_opts(
+        &mut self,
+        id: &FieldId,
+        per_sample: &[&[Option<i32>]],
+    ) -> Result<(), VcfError> {
+        self.check_key(id)?;
+        self.inner.check_format_room(id)?;
+        debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        self.check_sample_counts(id, per_sample)?;
+        let concrete = || per_sample.iter().flat_map(|s| s.iter().filter_map(|v| *v));
+        reject_reserved_ints(id.name(), concrete())?;
+        let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
+        // r[impl record_encoder.rlen]
+        if let Some(buf) = self.record.rlen.format_target(id.dict_idx()) {
+            for s in per_sample {
+                buf.push(b'\t');
+                push_ints(buf, s.iter().copied());
+            }
+        }
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.indiv_buf.len();
+                // r[impl bcf_writer.smallest_int_type]
+                // r[impl bcf_writer.missing_sentinels]
+                let typ = smallest_int_type_iter(concrete());
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, typ);
+                for s in per_sample {
+                    if s.is_empty() {
+                        if width > 0 {
+                            encode_int_missing(enc.indiv_buf, typ);
+                            for _ in 1..width {
+                                encode_int_eov(enc.indiv_buf, typ);
+                            }
+                        }
+                        continue;
+                    }
+                    for &v in *s {
+                        encode_int_value_or_missing(enc.indiv_buf, v, typ);
+                    }
+                    // r[impl bcf_writer.end_of_vector]
+                    for _ in s.len()..width {
+                        encode_int_eov(enc.indiv_buf, typ);
+                    }
+                }
+                enc.commit_format_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.begin_format_field();
+                for (i, s) in per_sample.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                        continue;
+                    }
+                    push_ints(&mut vcf.sample_bufs[i], s.iter().copied());
                 }
                 vcf.commit_format_field(id);
             }
