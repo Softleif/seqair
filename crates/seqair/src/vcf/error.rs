@@ -305,6 +305,12 @@ pub enum VcfError {
     #[error("{name} was resolved from another header than the one being written")]
     ForeignKey { name: SmolStr },
 
+    // r[impl record_encoder.filters+3]
+    #[error(
+        "filter_fail needs at least one filter; a record without any is filter_pass or no_filter"
+    )]
+    EmptyFilterList,
+
     // r[impl record_encoder.count_check+3]
     #[error(
         "field {field} is declared Number={number}, so it takes {expected} values, not {found}"

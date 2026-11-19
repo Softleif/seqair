@@ -1305,7 +1305,7 @@ mod tests {
         assert!(!buf.is_empty());
     }
 
-    // r[verify record_encoder.filters+2]
+    // r[verify record_encoder.filters+3]
     #[test]
     fn filter_fail_bcf_and_vcf_text() {
         let mut builder = crate::vcf::header::VcfHeader::builder();
@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(cols.get(6), Some(&"PASS"), "FILTER");
     }
 
-    // r[verify record_encoder.filters+2]
+    // r[verify record_encoder.filters+3]
     #[test]
     fn typestate_filter_fail() {
         let mut hb = crate::vcf::header::VcfHeader::builder();
@@ -1426,6 +1426,14 @@ mod tests {
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let filter_col = data_line.split('\t').nth(6).unwrap();
         assert_eq!(filter_col, "lowDp");
+
+        for format in [OutputFormat::Vcf, OutputFormat::Bcf] {
+            let mut buf = Vec::new();
+            let mut writer = Writer::new(&mut buf, format).write_header(&header).unwrap();
+            let begun = writer.begin_record(&contig, Pos1::new(10).unwrap(), &alleles, None);
+            let err = begun.unwrap().filter_fail(std::iter::empty()).err().unwrap();
+            assert!(matches!(err, VcfError::EmptyFilterList), "{format:?}: {err:?}");
+        }
     }
 
     // r[verify record_encoder.vcf_encoding]

@@ -1211,7 +1211,7 @@ impl EncoderInner<'_> {
 // ── Begun → Filtered ───────────────────────────────────────────────────
 
 // r[impl record_encoder.typestate_transitions+3]
-// r[impl record_encoder.filters+2]
+// r[impl record_encoder.filters+3]
 impl<'a> RecordEncoder<'a, Begun> {
     pub fn filter_pass(mut self) -> RecordEncoder<'a, Filtered> {
         match &mut self.inner {
@@ -1229,11 +1229,18 @@ impl<'a> RecordEncoder<'a, Begun> {
     /// Mark the record as failing the given filters. Accepts any iterator of
     /// `&FilterId` (e.g. a slice's `.iter().copied()`, or a `map` over a
     /// caller's lookup table) so callers need not materialize a `&[&FilterId]`.
+    ///
+    /// # Errors
+    /// [`VcfError::EmptyFilterList`] for no filters, [`VcfError::ForeignKey`]
+    /// for a filter of another header.
     pub fn filter_fail<'f>(
         mut self,
         filters: impl IntoIterator<Item = &'f FilterId>,
     ) -> Result<RecordEncoder<'a, Filtered>, VcfError> {
         let filters: SmallVec<&FilterId, 3> = filters.into_iter().collect();
+        if filters.is_empty() {
+            return Err(VcfError::EmptyFilterList);
+        }
         // r[impl record_encoder.foreign_keys]
         // PASS (no header) is index 0 in every header.
         if let Some(f) = filters.iter().find(|f| f.header.is_some_and(|h| h != self.header)) {
