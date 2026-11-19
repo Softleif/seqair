@@ -1968,3 +1968,178 @@ fn one_sample_tells_absent_from_missing() {
         ]
     );
 }
+
+// ── A column reads as its samples ───────────────────────────────────────
+
+/// The FORMAT fields of the column test, one per marker shape, in
+/// dictionary order after `PASS`: `GT` is 1, `S` is 6.
+const COLUMN_FIELDS: [(&str, &str, &str); 6] = [
+    ("GT", "1", "String"),
+    ("I1", "1", "Integer"),
+    ("IN", ".", "Integer"),
+    ("F1", "1", "Float"),
+    ("FN", ".", "Float"),
+    ("S", "1", "String"),
+];
+
+fn column_header(version: &str, n_samples: usize) -> String {
+    use std::fmt::Write as _;
+    let mut h = format!(
+        "##fileformat=VCFv{version}\n##FILTER=<ID=PASS,Description=\"All filters passed\">\n"
+    );
+    for (id, number, typ) in COLUMN_FIELDS {
+        writeln!(h, "##FORMAT=<ID={id},Number={number},Type={typ},Description=\"x\">").unwrap();
+    }
+    h += "##contig=<ID=chr1,length=1000>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+    for s in 0..n_samples {
+        write!(h, "\tS{s}").unwrap();
+    }
+    h + "\n"
+}
+
+/// One BCF FORMAT column of `n` samples: any type, up to four elements a
+/// sample, each element one a reader treats specially at its width (the
+/// sentinels, the reserved band, GT values out of range, bad UTF-8).
+#[hegel::composite]
+fn bcf_column(tc: &TestCase, n: usize) -> Vec<u8> {
+    let code = tc.draw(gs::sampled_from(vec![0u8, 1, 2, 3, 5, 7]));
+    let per_sample = tc.draw(gs::integers::<usize>().max_value(4));
+    let elements: Vec<Vec<u8>> = match code {
+        1 => [0u8, 1, 2, 3, 4, 5, 0x7F, 0x80, 0x81, 0x82, 0xFB, 0xFF].map(|b| vec![b]).to_vec(),
+        2 => [0u16, 2, 3, 4, 0x7FFF, 0x8000, 0x8001, 0x8002, 0xFFFF]
+            .map(|v| v.to_le_bytes().to_vec())
+            .to_vec(),
+        3 => [0u32, 2, 3, 5, 131_074, 131_075, 131_076, 0x7FFF_FFFF, 0x8000_0000, 0x8000_0001]
+            .into_iter()
+            .chain([0x8000_0002, 0x8000_0007, 0x8000_0008, 0xFFFF_FFFF])
+            .map(|v| v.to_le_bytes().to_vec())
+            .collect(),
+        5 => [0f32.to_bits(), 1.5f32.to_bits(), f32::NAN.to_bits(), 0x7F80_0001, 0x7F80_0002]
+            .map(|v| v.to_le_bytes().to_vec())
+            .to_vec(),
+        7 => [b'a', b'.', b'0', b'/', 0, 0xC3, 0x28].map(|b| vec![b]).to_vec(),
+        _ => vec![vec![]],
+    };
+    let mut bytes = vec![((per_sample as u8) << 4) | code];
+    for _ in 0..per_sample * n {
+        bytes.extend(tc.draw(gs::sampled_from(elements.clone())));
+    }
+    bytes
+}
+
+/// One VCF text sample: up to every field's cell, each a few tokens a
+/// reader parses, or rejects, in some way.
+#[hegel::composite]
+fn text_sample(tc: &TestCase) -> String {
+    let tokens = ["0", "1", "12", ".", "", "-1", "x", "65536", "2147483648", "-2147483648"]
+        .into_iter()
+        .chain(["0.5", "nan", "Inf", "a%3A"])
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let n_cells = tc.draw(gs::integers::<usize>().min_value(1).max_value(COLUMN_FIELDS.len()));
+    let cells: Vec<String> = (0..n_cells)
+        .map(|_| {
+            let mut cell = String::new();
+            if tc.draw(gs::booleans()) {
+                cell += tc.draw(gs::sampled_from(vec!["/", "|"]));
+            }
+            let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+            for i in 0..n {
+                if i > 0 {
+                    cell += tc.draw(gs::sampled_from(vec!["/", "|", ","]));
+                }
+                cell += &tc.draw(gs::sampled_from(tokens.clone()));
+            }
+            cell
+        })
+        .collect();
+    cells.join(":")
+}
+
+/// `column(key)` reads what `sample(s).get(key)` reads for every sample,
+/// and fails with the first sample's error when any sample's value is
+/// malformed.
+fn column_reads_as_each_sample<V: seqair::vcf::ReadKind>(
+    samples: &Samples,
+    name: &str,
+    file: &VcfFile,
+) where
+    for<'a> V::Out<'a>: std::fmt::Debug,
+{
+    let key: seqair::vcf::FormatKey<V> = file.format_key(name).unwrap();
+    let ids: Vec<_> = file.header().sample_indices().collect();
+    let each: Result<Vec<String>, String> = ids
+        .iter()
+        .map(|&s| samples.sample(s).get(&key).map(|v| format!("{v:?}")).map_err(|e| e.to_string()))
+        .collect();
+    match (samples.column(&key), each) {
+        (Ok(None), Ok(each)) => {
+            assert!(!samples.has(&key).unwrap(), "{name}");
+            let absent = format!("{:?}", V::absent());
+            assert!(each.iter().all(|v| *v == absent), "{name}: {each:?}");
+        }
+        (Ok(Some(column)), Ok(each)) => {
+            let by_get: Vec<String> =
+                ids.iter().map(|&s| format!("{:?}", column.get(s).unwrap())).collect();
+            assert_eq!(column.len(), ids.len(), "{name}");
+            let read: Vec<String> = column.map(|v| format!("{v:?}")).collect();
+            assert_eq!(read, each, "{name}");
+            assert_eq!(by_get, each, "{name}");
+        }
+        (Err(e), Err(first)) => assert_eq!(e.to_string(), first, "{name}"),
+        (column, each) => panic!("{name}: column {:?}, each sample {each:?}", column.map(|_| ())),
+    }
+}
+
+// r[verify vcf_fields.samples]
+// r[verify vcf_values.access+2]
+/// A column reads, for every marker, what each sample's `get` reads, and
+/// fails with the first malformed sample's error: BCF columns of every type
+/// and integer width with sentinels and invalid values, and VCF text cells
+/// of valid and malformed tokens, trailing fields dropped.
+#[hegel::test]
+fn a_column_reads_what_each_sample_reads(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+    let version = tc.draw(gs::sampled_from(vec!["4.3", "4.4"]));
+    let header = column_header(version, n);
+    let file = if tc.draw(gs::booleans()) {
+        let mut indiv = Vec::new();
+        for id in 1..=COLUMN_FIELDS.len() as u8 {
+            indiv.extend([0x11, id]);
+            indiv.extend(tc.draw(bcf_column(n)));
+        }
+        let rec = Rec {
+            info: Vec::new(),
+            n_info: 0,
+            indiv,
+            n_fmt: COLUMN_FIELDS.len() as u8,
+            n_sample: n as u32,
+            ..Rec::default()
+        };
+        VcfFile::from_bytes(bcf_with(&header, &[rec]), None).unwrap()
+    } else {
+        let keys: Vec<&str> = COLUMN_FIELDS.iter().map(|f| f.0).collect();
+        let mut line = format!("chr1\t11\t.\tA\t.\t.\tPASS\t.\t{}", keys.join(":"));
+        for _ in 0..n {
+            line += "\t";
+            line += &tc.draw(text_sample());
+        }
+        VcfFile::from_bytes(format!("{header}{line}\n").into_bytes(), None).unwrap()
+    };
+    let mut reader = file.reader::<Samples>().open().unwrap();
+    let samples = reader.next_record().unwrap().unwrap();
+    use seqair::vcf::{Any, Arr, Gt, OptArr, Scalar, Str};
+    column_reads_as_each_sample::<Gt>(samples, "GT", &file);
+    column_reads_as_each_sample::<Scalar<i32>>(samples, "I1", &file);
+    column_reads_as_each_sample::<Arr<i32>>(samples, "IN", &file);
+    column_reads_as_each_sample::<OptArr<i32>>(samples, "IN", &file);
+    column_reads_as_each_sample::<OptArr<i32>>(samples, "I1", &file);
+    column_reads_as_each_sample::<Scalar<f32>>(samples, "F1", &file);
+    column_reads_as_each_sample::<Arr<f32>>(samples, "FN", &file);
+    column_reads_as_each_sample::<OptArr<f32>>(samples, "FN", &file);
+    column_reads_as_each_sample::<Str>(samples, "S", &file);
+    column_reads_as_each_sample::<Str>(samples, "GT", &file);
+    for (name, ..) in COLUMN_FIELDS {
+        column_reads_as_each_sample::<Any>(samples, name, &file);
+    }
+}
