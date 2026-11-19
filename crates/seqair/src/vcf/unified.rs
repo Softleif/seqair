@@ -849,8 +849,8 @@ impl CoordinateIndex {
         self.kind
     }
 
-    /// Conventional filename suffix appended to the data file path:
-    /// [`IndexKind::suffix`] of [`kind`](Self::kind).
+    /// The index file's suffix, without the dot: it lives at
+    /// `<data path>.<suffix>` ([`IndexKind::suffix`] of [`kind`](Self::kind)).
     pub fn suffix(&self) -> &'static str {
         self.kind.suffix()
     }
