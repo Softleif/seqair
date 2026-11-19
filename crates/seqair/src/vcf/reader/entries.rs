@@ -371,19 +371,28 @@ impl<T: Rebuild> LazyIndex<T> {
     /// `BUILDING`, taken from `EMPTY` (restarting the index) or `PARTIAL`;
     /// `None` once the index is `DONE`.
     fn lock(&self) -> Option<Building<'_>> {
-        let mut from = EMPTY;
+        // Swap from the state seen, so a lookup after one that stopped early
+        // (`PARTIAL`) takes one exchange, not a failed one first.
+        let mut from = self.state.load(Ordering::Relaxed);
         loop {
+            match from {
+                DONE => return None,
+                BUILDING => {
+                    // Another thread indexes.
+                    std::thread::yield_now();
+                    from = self.state.load(Ordering::Relaxed);
+                    continue;
+                }
+                _ => {}
+            }
             match self.state.compare_exchange_weak(
                 from,
                 BUILDING,
                 Ordering::Acquire,
-                Ordering::Acquire,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
-                Err(DONE) => return None,
-                Err(now @ (EMPTY | PARTIAL)) => from = now,
-                // Another thread indexes.
-                Err(_) => std::thread::yield_now(),
+                Err(now) => from = now,
             }
         }
         if from == EMPTY {
