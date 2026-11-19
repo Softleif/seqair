@@ -378,6 +378,10 @@ pub struct VcfHeader {
     other_lines: Vec<SmolStr>,
     string_map: StringMap,
     contig_map: StringMap,
+    /// The header `to_builder` derived this one from (`r[vcf_header.lineage]`).
+    parent: Option<HeaderId>,
+    /// Names removed from the builder since, by section.
+    removed: Vec<(KeyKind, SmolStr)>,
 }
 
 impl VcfHeader {
@@ -434,10 +438,26 @@ impl VcfHeader {
     pub fn to_builder(&self) -> VcfHeaderBuilder<Contigs> {
         let mut header = self.clone();
         header.id = HeaderId::next();
+        // r[impl vcf_header.lineage]
+        header.parent = Some(self.id);
+        header.removed.clear();
         VcfHeaderBuilder { header, _phase: PhantomData }
     }
 
     // r[impl vcf_header.file_format+2]
+    // r[impl vcf_header.lineage]
+    /// The header this one was derived from with [`to_builder`](Self::to_builder).
+    pub fn parent(&self) -> Option<HeaderId> {
+        self.parent
+    }
+
+    // r[impl vcf_header.lineage]
+    /// Whether `name` was removed from `kind`'s definitions since this
+    /// header was derived, whether or not it was declared again.
+    pub(crate) fn was_removed(&self, kind: KeyKind, name: &str) -> bool {
+        self.removed.iter().any(|(k, n)| *k == kind && n == name)
+    }
+
     /// The VCF version this header declares: [`Self::WRITE_VERSION`] for a
     /// built header, the file's own for a parsed one.
     pub fn version(&self) -> VcfVersion {
@@ -588,6 +608,8 @@ impl VcfHeader {
             contigs: IndexMap::new(),
             samples: Vec::new(),
             other_lines: Vec::new(),
+            parent: None,
+            removed: Vec::new(),
             string_map: StringMap::default(),
             contig_map: StringMap::default(),
         };
@@ -902,6 +924,7 @@ impl<P> VcfHeaderBuilder<P> {
     pub fn remove_info(&mut self, id: &str) -> bool {
         let removed = self.header.infos.shift_remove(id).is_some();
         self.release(id);
+        self.note_removed(KeyKind::Info, id, removed);
         removed
     }
 
@@ -911,6 +934,7 @@ impl<P> VcfHeaderBuilder<P> {
     pub fn remove_format(&mut self, id: &str) -> bool {
         let removed = self.header.formats.shift_remove(id).is_some();
         self.release(id);
+        self.note_removed(KeyKind::Format, id, removed);
         removed
     }
 
@@ -923,7 +947,15 @@ impl<P> VcfHeaderBuilder<P> {
         }
         let removed = self.header.filters.shift_remove(id).is_some();
         self.release(id);
+        self.note_removed(KeyKind::Filter, id, removed);
         removed
+    }
+
+    // r[impl vcf_header.lineage]
+    fn note_removed(&mut self, kind: KeyKind, id: &str, removed: bool) {
+        if removed && self.header.parent.is_some() && !self.header.was_removed(kind, id) {
+            self.header.removed.push((kind, SmolStr::from(id)));
+        }
     }
 
     // r[impl vcf_header.file_format.single_version+4]
