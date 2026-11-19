@@ -56,8 +56,8 @@ r[record_encoder.register_contig]
 
 ## Field Identifiers and Keys
 
-r[record_encoder.field_id]
-`FieldId` MUST carry both a BCF dictionary index (`u32`) and a string name (`SmolStr`). The BCF encoder uses the dictionary index; the VCF text encoder uses the name. Both are resolved at registration time, not per-record.
+r[record_encoder.field_id+2]
+`FieldId` MUST carry the field's BCF dictionary id (a `DictId`, 16 bits: the dictionary holds at most `MAX_DICT_ENTRIES` = 2^16 ids, `r[vcf_header.dict_capacity+2]`, so the index is narrowed once, where the key is resolved), its name (`SmolStr`), its declared `Type` (`String` for a field no header declares) and `Number`, whether it is the FORMAT `GT` field, and its header's `HeaderId`. The BCF encoder uses the dictionary id; the VCF text encoder uses the name; a reader decodes an `Any` value by the declared `Type` and the `GT` flag (`r[vcf_values.dynamic+2]`). All of it is resolved at registration or key resolution, not per record: an access never looks the field up again.
 
 r[record_encoder.contig_id]
 `ContigId` MUST carry both the integer tid (`u32`) and the contig name (`SmolStr`).
