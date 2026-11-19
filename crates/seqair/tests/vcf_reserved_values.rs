@@ -52,11 +52,14 @@ struct Setup {
     info_int_opts: InfoIntOpts,
     info_float: InfoFloat,
     info_floats: InfoFloats,
+    info_float_opts: seqair::vcf::InfoFloatOpts,
     gt: FormatGt,
     fmt_int: FormatInt,
     fmt_ints: FormatInts,
+    fmt_int_opts: seqair::vcf::FormatIntOpts,
     fmt_float: seqair::vcf::FormatFloat,
     fmt_floats: FormatFloats,
+    fmt_float_opts: seqair::vcf::FormatFloatOpts,
 }
 
 fn setup() -> Setup {
@@ -84,6 +87,13 @@ fn setup() -> Setup {
     let info_floats = builder
         .register_info(&InfoFieldDef::<Arr<f32>>::with_number("AF", Number::Unknown, "Float list"))
         .unwrap();
+    let info_float_opts = builder
+        .register_info(&InfoFieldDef::<OptArr<f32>>::with_number(
+            "OF",
+            Number::Unknown,
+            "Float list with missing elements",
+        ))
+        .unwrap();
     let mut builder = builder.formats();
     let gt = builder.register_format(&FormatFieldDef::<Gt>::new("GT", "GT")).unwrap();
     let fmt_int = builder
@@ -106,6 +116,20 @@ fn setup() -> Setup {
             "Per-sample float list",
         ))
         .unwrap();
+    let fmt_int_opts = builder
+        .register_format(&FormatFieldDef::<OptArr<i32>>::with_number(
+            "FO",
+            Number::Unknown,
+            "Per-sample integer list with missing elements",
+        ))
+        .unwrap();
+    let fmt_float_opts = builder
+        .register_format(&FormatFieldDef::<OptArr<f32>>::with_number(
+            "FP",
+            Number::Unknown,
+            "Per-sample float list with missing elements",
+        ))
+        .unwrap();
     let mut builder = builder.samples();
     builder.add_sample("s0").unwrap();
     Setup {
@@ -116,11 +140,14 @@ fn setup() -> Setup {
         info_int_opts,
         info_float,
         info_floats,
+        info_float_opts,
         gt,
         fmt_int,
         fmt_ints,
+        fmt_int_opts,
         fmt_float,
         fmt_floats,
+        fmt_float_opts,
     }
 }
 
@@ -132,18 +159,38 @@ enum Entry {
     InfoInts,
     InfoIntOpts,
     FormatInt,
+    FormatIntOpt,
     FormatInts,
+    FormatIntOpts,
     InfoFloat,
     InfoFloats,
+    InfoFloatOpts,
     FormatFloat,
+    FormatFloatOpt,
     FormatFloats,
+    FormatFloatOpts,
     Qual,
 }
 
-const INT_ENTRIES: [Entry; 5] =
-    [Entry::InfoInt, Entry::InfoInts, Entry::InfoIntOpts, Entry::FormatInt, Entry::FormatInts];
-const FLOAT_ENTRIES: [Entry; 5] =
-    [Entry::InfoFloat, Entry::InfoFloats, Entry::FormatFloat, Entry::FormatFloats, Entry::Qual];
+const INT_ENTRIES: [Entry; 7] = [
+    Entry::InfoInt,
+    Entry::InfoInts,
+    Entry::InfoIntOpts,
+    Entry::FormatInt,
+    Entry::FormatIntOpt,
+    Entry::FormatInts,
+    Entry::FormatIntOpts,
+];
+const FLOAT_ENTRIES: [Entry; 8] = [
+    Entry::InfoFloat,
+    Entry::InfoFloats,
+    Entry::InfoFloatOpts,
+    Entry::FormatFloat,
+    Entry::FormatFloatOpt,
+    Entry::FormatFloats,
+    Entry::FormatFloatOpts,
+    Entry::Qual,
+];
 
 impl Entry {
     fn is_info(self) -> bool {
@@ -154,13 +201,21 @@ impl Entry {
                 | Entry::InfoIntOpts
                 | Entry::InfoFloat
                 | Entry::InfoFloats
+                | Entry::InfoFloatOpts
         )
     }
 
     fn is_format(self) -> bool {
         matches!(
             self,
-            Entry::FormatInt | Entry::FormatInts | Entry::FormatFloat | Entry::FormatFloats
+            Entry::FormatInt
+                | Entry::FormatIntOpt
+                | Entry::FormatInts
+                | Entry::FormatIntOpts
+                | Entry::FormatFloat
+                | Entry::FormatFloatOpt
+                | Entry::FormatFloats
+                | Entry::FormatFloatOpts
         )
     }
 }
@@ -179,6 +234,7 @@ fn encode_info(
         Entry::InfoIntOpts => s.info_int_opts.encode(enc, &[Some(int), None]),
         Entry::InfoFloat => s.info_float.encode(enc, float),
         Entry::InfoFloats => s.info_floats.encode(enc, &[float]),
+        Entry::InfoFloatOpts => s.info_float_opts.encode(enc, &[Some(float), None]),
         _ => Ok(()),
     }
 }
@@ -196,6 +252,10 @@ fn encode_format(
         Entry::FormatInts => s.fmt_ints.encode(enc, &[&[int][..]]),
         Entry::FormatFloat => s.fmt_float.encode(enc, &[float]),
         Entry::FormatFloats => s.fmt_floats.encode(enc, &[&[float][..]]),
+        Entry::FormatIntOpt => s.fmt_int.encode_opt(enc, &[Some(int)]),
+        Entry::FormatFloatOpt => s.fmt_float.encode_opt(enc, &[Some(float)]),
+        Entry::FormatIntOpts => s.fmt_int_opts.encode(enc, &[&[Some(int), None][..]]),
+        Entry::FormatFloatOpts => s.fmt_float_opts.encode(enc, &[&[Some(float), None][..]]),
         _ => Ok(()),
     }
 }
@@ -267,12 +327,15 @@ fn query_format(entry: Entry) -> &'static str {
         Entry::InfoInt => "%INFO/DP\n",
         Entry::InfoInts => "%INFO/AD\n",
         Entry::InfoIntOpts => "%INFO/OD\n",
-        Entry::FormatInt => "[%FD\n]",
+        Entry::FormatInt | Entry::FormatIntOpt => "[%FD\n]",
         Entry::FormatInts => "[%FA\n]",
+        Entry::FormatIntOpts => "[%FO\n]",
         Entry::InfoFloat => "%INFO/MQ\n",
         Entry::InfoFloats => "%INFO/AF\n",
-        Entry::FormatFloat => "[%FQ\n]",
+        Entry::InfoFloatOpts => "%INFO/OF\n",
+        Entry::FormatFloat | Entry::FormatFloatOpt => "[%FQ\n]",
         Entry::FormatFloats => "[%FL\n]",
+        Entry::FormatFloatOpts => "[%FP\n]",
         Entry::Qual => "%QUAL\n",
     }
 }
@@ -316,7 +379,7 @@ fn accepted_integers_round_trip_through_bcftools(tc: TestCase) {
 
     let want = match entry {
         // The trailing `None` is the missing marker, which bcftools prints `.`.
-        Entry::InfoIntOpts => format!("{value},."),
+        Entry::InfoIntOpts | Entry::FormatIntOpts => format!("{value},."),
         _ => value.to_string(),
     };
     assert_eq!(lines, vec![want], "{entry:?} value {value}");
@@ -347,7 +410,7 @@ fn the_int8_and_int16_reserved_bands_are_ordinary_integers(tc: TestCase) {
         .unwrap_or_else(|e| panic!("{value} must be ordinary data at its emitted width: {e}"));
     let lines = bcftools_query(&bcf, query_format(entry));
     let want = match entry {
-        Entry::InfoIntOpts => format!("{value},."),
+        Entry::InfoIntOpts | Entry::FormatIntOpts => format!("{value},."),
         _ => value.to_string(),
     };
     assert_eq!(lines, vec![want], "{entry:?} value {value}");
@@ -372,7 +435,7 @@ fn quiet_nan_and_the_infinities_are_ordinary_floats() {
 // ── Reject direction ───────────────────────────────────────────────────
 
 // r[verify bcf_encoder.reserved_rejected]
-// r[verify record_encoder.reserved_rejection]
+// r[verify record_encoder.reserved_rejection+2]
 /// Every value of the int32 reserved band, through every integer entry point,
 /// in every output format, must come back as `ReservedIntValue` naming that
 /// band member — not as a panic, not as a silently written record.
@@ -405,7 +468,7 @@ fn every_reserved_integer_is_rejected_at_every_entry_point(tc: TestCase) {
 }
 
 // r[verify bcf_encoder.reserved_rejected]
-// r[verify record_encoder.reserved_rejection]
+// r[verify record_encoder.reserved_rejection+2]
 /// The float twin: every bit pattern of `0x7F800001..=0x7F800007`, through
 /// every float entry point including QUAL.
 #[hegel::test]
@@ -436,7 +499,7 @@ fn every_reserved_float_is_rejected_at_every_entry_point(tc: TestCase) {
     }
 }
 
-// r[verify record_encoder.reserved_rejection]
+// r[verify record_encoder.reserved_rejection+2]
 /// A rejected call writes nothing. A caller that handles the error and
 /// finishes the record without that field gets exactly the bytes it would have
 /// got had it never made the call — in every format and at every entry point.
@@ -445,7 +508,8 @@ fn every_reserved_float_is_rejected_at_every_entry_point(tc: TestCase) {
 /// record is begun again with a valid QUAL.
 #[hegel::test]
 fn a_rejected_value_leaves_no_trace_in_the_output(tc: TestCase) {
-    let entry = tc.draw(gs::sampled_from([INT_ENTRIES, FLOAT_ENTRIES].concat()).print_as_debug());
+    let entry =
+        tc.draw(gs::sampled_from([&INT_ENTRIES[..], &FLOAT_ENTRIES[..]].concat()).print_as_debug());
     let format = tc.draw(
         gs::sampled_from(&[OutputFormat::Vcf, OutputFormat::VcfGz, OutputFormat::Bcf])
             .print_as_debug(),
