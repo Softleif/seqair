@@ -6,8 +6,9 @@ use super::error::{KeyKind, RecordError, RecordPart};
 use super::file::FileShared;
 use super::index::{DictId, Entry, FieldIndex};
 use crate::io::text_scan::{for_each_info_entry, for_each_of_two};
+use std::cell::UnsafeCell;
 use std::ops::{ControlFlow, Range};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The entries of a BCF INFO section (`samples: None`) or FORMAT section
 /// (`Some(n)` samples): each key and the byte span of its value.
@@ -199,61 +200,160 @@ impl Rebuild for FormatIndex {
     }
 }
 
-// r[impl vcf_fields.lazy]
-/// A section's index, built on first access. Filling a record takes the
-/// last one out and keeps its buffers for the next build; a failed build is
-/// kept and returned on every access.
-#[derive(Debug)]
+/// [`LazyIndex`] states.
+const EMPTY: u8 = 0;
+const BUILDING: u8 = 1;
+const DONE: u8 = 2;
+
+// r[impl vcf_fields.lazy+2]
+/// A section's index, built on first access, in place: its buffers stay
+/// for the next record's build. A failed build is kept and returned on
+/// every access.
+///
+/// One atomic byte guards the cells: `EMPTY`, then `BUILDING` while the one
+/// thread that won the swap from `EMPTY` builds, then `DONE` until
+/// [`reset`](Self::reset). A `std::sync::OnceLock` plus a mutex for the
+/// buffers cost four locked atomics per record; this costs one swap.
 pub(crate) struct LazyIndex<T = FieldIndex> {
-    built: OnceLock<Result<T, RecordError>>,
-    spare: Mutex<Option<T>>,
+    state: AtomicU8,
+    index: UnsafeCell<T>,
+    /// The build's outcome, written by the builder before `DONE`.
+    result: UnsafeCell<Result<(), RecordError>>,
 }
 
-impl<T> Default for LazyIndex<T> {
+// SAFETY: the cells are written only by the thread that moved `state` from
+// `EMPTY` to `BUILDING` (or through `&mut self`), and read only after an
+// `Acquire` load saw the `Release` store of `DONE`, after which nothing
+// writes them until `reset` takes `&mut self`. So `&LazyIndex` hands out
+// `&T` and `&RecordError` across threads, which needs `T: Sync`, and the
+// builder may be another thread than the owner, which needs `T: Send`.
+unsafe impl<T: Send + Sync> Sync for LazyIndex<T> {}
+
+impl<T: Default> Default for LazyIndex<T> {
     fn default() -> Self {
-        Self { built: OnceLock::new(), spare: Mutex::new(None) }
+        Self {
+            state: AtomicU8::new(EMPTY),
+            index: UnsafeCell::new(T::default()),
+            result: UnsafeCell::new(Ok(())),
+        }
     }
 }
 
-impl<T: Clone> Clone for LazyIndex<T> {
+impl<T: Clone + Default> Clone for LazyIndex<T> {
+    /// A built index is cloned; one not built (or being built) is not, and
+    /// the clone builds its own on first access.
     fn clone(&self) -> Self {
-        Self { built: self.built.clone(), spare: Mutex::default() }
+        match self.done() {
+            Some((index, result)) => Self {
+                state: AtomicU8::new(DONE),
+                index: UnsafeCell::new(index.clone()),
+                result: UnsafeCell::new(result.clone()),
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for LazyIndex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.done() {
+            Some((index, Ok(()))) => f.debug_tuple("LazyIndex").field(index).finish(),
+            Some((_, Err(e))) => f.debug_tuple("LazyIndex").field(e).finish(),
+            None => f.write_str("LazyIndex(<not built>)"),
+        }
+    }
+}
+
+impl<T> LazyIndex<T> {
+    /// The index and the build's outcome, once built.
+    #[inline]
+    fn done(&self) -> Option<(&T, &Result<(), RecordError>)> {
+        if self.state.load(Ordering::Acquire) != DONE {
+            return None;
+        }
+        // SAFETY: `DONE` was stored (Release) after the last write to the
+        // cells, and nothing writes them again before `reset(&mut self)`.
+        Some(unsafe { (&*self.index.get(), &*self.result.get()) })
+    }
+}
+
+/// Ends a build: stores `DONE` once it finished, or puts `state` back to
+/// `EMPTY` if it panicked, so another access builds again instead of
+/// waiting for ever.
+struct Building<'a> {
+    state: &'a AtomicU8,
+    finished: bool,
+}
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        self.state.store(if self.finished { DONE } else { EMPTY }, Ordering::Release);
     }
 }
 
 impl<T: Rebuild> LazyIndex<T> {
     /// Forget the index of the last record, keeping its buffers.
+    #[inline]
     pub(crate) fn reset(&mut self) {
-        if let Some(Ok(index)) = self.built.take() {
-            *self.spare.get_mut().unwrap_or_else(PoisonError::into_inner) = Some(index);
-        }
+        *self.state.get_mut() = EMPTY;
     }
 
     /// The index, built by `build` on first access.
+    #[inline]
     pub(crate) fn get(
         &self,
         build: impl FnOnce(&mut T) -> Result<(), RecordError>,
     ) -> Result<&T, &RecordError> {
-        self.built
-            .get_or_init(|| {
-                let spare = self.spare.lock().unwrap_or_else(PoisonError::into_inner).take();
-                let mut index = spare.unwrap_or_default();
-                index.restart();
-                match build(&mut index) {
-                    Ok(()) => Ok(index),
-                    Err(e) => {
-                        *self.spare.lock().unwrap_or_else(PoisonError::into_inner) = Some(index);
-                        Err(e)
+        let (index, result) = match self.done() {
+            Some(done) => done,
+            None => self.build(build),
+        };
+        result.as_ref().map(|()| index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn build(
+        &self,
+        build: impl FnOnce(&mut T) -> Result<(), RecordError>,
+    ) -> (&T, &Result<(), RecordError>) {
+        loop {
+            match self.state.compare_exchange_weak(
+                EMPTY,
+                BUILDING,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(DONE) => {
+                    if let Some(done) = self.done() {
+                        return done;
                     }
                 }
-            })
-            .as_ref()
+                // Another thread builds, or a weak exchange failed spuriously.
+                Err(_) => std::thread::yield_now(),
+            }
+        }
+        let mut building = Building { state: &self.state, finished: false };
+        // SAFETY: this thread moved `state` from `EMPTY` to `BUILDING`, so it
+        // is the only one touching the cells until it stores `DONE`: readers
+        // wait for `DONE`, and no reference from an earlier `DONE` outlives
+        // the `reset(&mut self)` that made it `EMPTY`.
+        unsafe {
+            let index = &mut *self.index.get();
+            index.restart();
+            *self.result.get() = build(index);
+        }
+        building.finished = true;
+        drop(building);
+        // SAFETY: as in `done`; the exclusive borrows above have ended.
+        unsafe { (&*self.index.get(), &*self.result.get()) }
     }
 
     /// Whether the index has been built (or failed), for tests.
     #[cfg(test)]
     pub(crate) fn is_built(&self) -> bool {
-        self.built.get().is_some()
+        self.done().is_some()
     }
 }
 
@@ -445,6 +545,60 @@ mod tests {
         }
         let cut = tc.draw(gs::integers::<usize>().max_value(bytes.len()));
         walk(bytes.get(..cut).unwrap_or_default(), n, samples);
+    }
+
+    // r[verify vcf_fields.lazy+2]
+    /// Threads racing for a fresh record's index see one build, its index or
+    /// its error, record after record on the same buffers.
+    #[test]
+    fn racing_first_accesses_build_once() {
+        use std::sync::atomic::AtomicUsize;
+        let rounds: u32 = if cfg!(miri) { 4 } else { 300 };
+        let threads = if cfg!(miri) { 3 } else { 8 };
+        let mut lazy = LazyIndex::<FieldIndex>::default();
+        for round in 0..rounds {
+            lazy.reset();
+            let builds = AtomicUsize::new(0);
+            let id = DictId::new(round % 50).unwrap();
+            let entry = Entry { id, start: round, end: round + 1 };
+            let fails = round % 3 == 0;
+            std::thread::scope(|s| {
+                for _ in 0..threads {
+                    s.spawn(|| {
+                        let got = lazy.get(|index| {
+                            builds.fetch_add(1, Ordering::Relaxed);
+                            assert!(index.entries().is_empty(), "restarted");
+                            index.push(entry);
+                            if fails { Err(RecordError::Truncated) } else { Ok(()) }
+                        });
+                        match got {
+                            Ok(index) => {
+                                assert!(!fails);
+                                assert_eq!(index.get(id), Some(entry));
+                            }
+                            Err(e) => assert!(fails && matches!(e, RecordError::Truncated)),
+                        }
+                    });
+                }
+            });
+            assert_eq!(builds.load(Ordering::Relaxed), 1, "round {round}");
+            assert!(lazy.is_built());
+            if !fails {
+                assert_eq!(lazy.clone().get(|_| unreachable!()).unwrap().get(id), Some(entry));
+            }
+        }
+    }
+
+    /// A build that panics leaves the index unbuilt; the next access builds it.
+    #[test]
+    fn a_panicking_build_is_retried() {
+        let lazy = LazyIndex::<FieldIndex>::default();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lazy.get(|_| panic!("build"));
+        }));
+        assert!(panicked.is_err());
+        assert!(!lazy.is_built());
+        assert!(lazy.get(|_| Ok(())).is_ok());
     }
 
     /// The common entries take the quick path, a flag ending the section

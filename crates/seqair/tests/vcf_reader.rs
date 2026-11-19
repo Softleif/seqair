@@ -937,7 +937,7 @@ fn malformed_records_are_typed_errors_with_their_place() {
     ));
 }
 
-// r[verify vcf_fields.lazy]
+// r[verify vcf_fields.lazy+2]
 // r[verify vcf_reader.field_table]
 /// An INFO key the dictionary does not declare fails the lazily built index,
 /// and every access returns the same error; the record's other parts read.

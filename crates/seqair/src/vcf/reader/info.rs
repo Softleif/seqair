@@ -314,7 +314,7 @@ mod tests {
     use crate::vcf::reader::{Locus, VcfFile};
     use crate::vcf::record_encoder::InfoInt;
 
-    // r[verify vcf_fields.lazy]
+    // r[verify vcf_fields.lazy+2]
     /// Filling a record does not index its INFO; the first access does, and
     /// the next fill drops that index (keeping its buffers).
     #[test]
