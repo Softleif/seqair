@@ -336,9 +336,10 @@ impl Framed {
     }
 
     /// The virtual offset of the next byte; `None` for plain text.
-    fn virtual_offset(&self) -> Option<VirtualOffset> {
+    #[inline]
+    fn virtual_offset(&mut self) -> Option<VirtualOffset> {
         match self {
-            Self::Bgzf(s) => s.virtual_offset(),
+            Self::Bgzf(s) => s.next_virtual_offset(),
             Self::Plain(_) => None,
             Self::Region(r) => Some(r.virtual_offset()),
         }

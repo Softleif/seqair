@@ -333,6 +333,8 @@ pub struct BgzfStream<R> {
     pos: usize,
     /// Where the blocks of `current` start (`BlockStart`'s list).
     starts: Vec<BlockStart>,
+    /// The block of `starts` the last [`Self::next_virtual_offset`] found.
+    block: usize,
     /// Bytes of compressed input read so far, plus the builder's start offset.
     consumed: u64,
     /// Batches read from the input but not yet returned, in stream order.
@@ -387,6 +389,7 @@ impl<R: Read> BgzfStream<R> {
             current: Vec::new(),
             pos: 0,
             starts: Vec::new(),
+            block: 0,
             consumed: 0,
             pending: VecDeque::new(),
             depth,
@@ -474,6 +477,29 @@ impl<R: Read> BgzfStream<R> {
         Some(VirtualOffset::new(start.input, within))
     }
 
+    /// [`Self::virtual_offset`] for a reader that only moves forward: the
+    /// block is found by stepping on from the last one found, not by a
+    /// binary search over the batch's blocks.
+    #[inline]
+    pub(crate) fn next_virtual_offset(&mut self) -> Option<VirtualOffset> {
+        let pos = self.pos;
+        let mut i = self.block;
+        while self.starts.get(i.saturating_add(1)).is_some_and(|s| s.output <= pos) {
+            i = i.saturating_add(1);
+        }
+        let found = match self.starts.get(i) {
+            Some(start) if start.output <= pos => {
+                self.block = i;
+                u16::try_from(pos.saturating_sub(start.output))
+                    .ok()
+                    .map(|within| VirtualOffset::new(start.input, within))
+            }
+            _ => self.virtual_offset(),
+        };
+        debug_assert_eq!(found, self.virtual_offset());
+        found
+    }
+
     /// Whether the stream has ended cleanly: everything was read and the
     /// input's end was accepted. Does not read.
     pub fn is_finished(&self) -> bool {
@@ -496,6 +522,7 @@ impl<R: Read> BgzfStream<R> {
             self.pending.clear();
             self.current.clear();
             self.starts.clear();
+            self.block = 0;
             self.pos = 0;
         }
         result
@@ -524,6 +551,7 @@ impl<R: Read> BgzfStream<R> {
             self.recycle(done);
             self.pos = 0;
             self.starts = starts;
+            self.block = 0;
             if !self.current.is_empty() {
                 return Ok(true);
             }
