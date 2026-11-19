@@ -86,8 +86,8 @@ The records of all partitions of a file, concatenated in partition order, MUST e
 
 ## Streams
 
-r[vcf_reader.stream]
-`VcfStream::new(input)` (any `Read + Send + 'static`; `VcfStream::stdin()` for standard input) MUST read VCF, BGZF VCF or BCF from input that cannot seek — a pipe, standard input — detecting the format and parsing the header as `VcfFile` does without seeking or reading the input twice. `stream.reader::<F>()` MUST return a builder that ends in `open()` only — a stream has no index, so no query method exists on it — and yields the same `Reader<F>` a file gives; the stream is consumed by it.
+r[vcf_reader.stream+2]
+`VcfStream::new(input)` (any `Read + Send + 'static`; `VcfStream::stdin()` for standard input) MUST read VCF, BGZF VCF or BCF from input that cannot seek — a pipe, standard input — detecting the format and parsing the header as `VcfFile` does without seeking or reading the input twice. `stream.reader::<F>()` MUST return a builder that ends in `open()` only — a stream has no index, so no query method exists on it — and yields the same `Reader<F>` a file gives; the stream is consumed by it. The builder MUST NOT offer `with_plan` (`r[vcf_fields.with_plan]`): the stream's header is read by `open()`, so every key or `SampleIdx` a plan could hold before it belongs to another header and would fail with `ForeignKey`. A caller that needs runtime context in its plan reads `Reader::header()` or `Reader::keys()` after opening.
 
 ## Undeclared fields
 

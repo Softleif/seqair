@@ -1,5 +1,5 @@
 //! [`VcfStream`]: VCF or BCF from input that cannot seek — a pipe, standard
-//! input (`r[vcf_reader.stream]`).
+//! input (`r[vcf_reader.stream+2]`).
 
 use super::error::{OpenError, VcfFormat, VcfReadError};
 use super::fields::{Fields, SampleSel};
@@ -11,10 +11,11 @@ use super::stream::{Framed, Reader, ReaderBuilder, Start, batches};
 use crate::bam::bgzf::{BgzfStream, Workers};
 use rayon_core::ThreadPool;
 use std::io::{BufReader, Cursor, Read};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-// r[impl vcf_reader.stream]
+// r[impl vcf_reader.stream+2]
 /// VCF, BGZF VCF or BCF read once, front to back, from input that cannot
 /// seek. Its one [`reader`](Self::reader) yields the same [`Reader`] a
 /// [`VcfFile`] does; a stream has no index, so it has no queries.
@@ -57,18 +58,30 @@ impl VcfStream {
     /// The stream's reader of records into `F`, to configure and
     /// [`open`](StreamReaderBuilder::open).
     pub fn reader<F: Fields>(self) -> StreamReaderBuilder<F> {
-        StreamReaderBuilder { input: self.input, workers: None, sample: None, plan: None }
+        StreamReaderBuilder { input: self.input, workers: None, sample: None, _fields: PhantomData }
     }
 }
 
+// r[impl vcf_reader.stream+2]
+// r[verify vcf_reader.stream+2]
 /// Configures a [`VcfStream`]'s reader: as a [`ReaderBuilder`], without
-/// queries.
+/// queries and without `with_plan`: the stream's header is read by
+/// [`open`](Self::open), so no key of it exists before.
+///
+/// ```compile_fail,E0599
+/// use seqair::vcf::{Locus, VcfStream};
+///
+/// fn plan_first(stream: VcfStream, plan: seqair::vcf::HeaderId) {
+///     // ERROR: no `with_plan` on a stream's builder
+///     let _ = stream.reader::<Locus>().with_plan(plan);
+/// }
+/// ```
 #[must_use]
 pub struct StreamReaderBuilder<F: Fields> {
     input: Box<dyn Read + Send>,
     workers: Option<(NonZeroUsize, Option<Arc<ThreadPool>>)>,
     sample: Option<SampleSel>,
-    plan: Option<F::Plan>,
+    _fields: PhantomData<fn() -> F>,
 }
 
 impl<F: Fields> std::fmt::Debug for StreamReaderBuilder<F> {
@@ -96,12 +109,6 @@ impl<F: Fields> StreamReaderBuilder<F> {
         self
     }
 
-    /// As [`ReaderBuilder::with_plan`].
-    pub fn with_plan(mut self, plan: F::Plan) -> Self {
-        self.plan = Some(plan);
-        self
-    }
-
     /// Detect the format, read the header and plan `F` against it.
     ///
     /// # Errors
@@ -117,9 +124,6 @@ impl<F: Fields> StreamReaderBuilder<F> {
         let mut builder = ReaderBuilder::<F>::new(&file);
         if let Some(sample) = self.sample {
             builder = builder.sample(sample);
-        }
-        if let Some(plan) = self.plan {
-            builder = builder.with_plan(plan);
         }
         builder.start(Start::Stream(input))
     }

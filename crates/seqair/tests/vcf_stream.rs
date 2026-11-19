@@ -1,4 +1,4 @@
-//! `VcfStream` (`r[vcf_reader.stream]`): VCF, BGZF VCF and BCF from input
+//! `VcfStream` (`r[vcf_reader.stream+2]`): VCF, BGZF VCF and BCF from input
 //! that cannot seek read as the same file read through `VcfFile`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
 
@@ -27,7 +27,7 @@ fn records(reader: seqair::vcf::Reader<FullRecord>) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
-// r[verify vcf_reader.stream]
+// r[verify vcf_reader.stream+2]
 /// Each fixture through a `VcfStream` (on and off a thread pool) reads as
 /// through `VcfFile`.
 #[test]
@@ -48,7 +48,7 @@ fn a_stream_reads_as_the_file() {
     }
 }
 
-// r[verify vcf_reader.stream]
+// r[verify vcf_reader.stream+2]
 /// `bcftools view` piped into a `VcfStream`, as BCF, BGZF VCF and plain
 /// VCF, reads as the file it printed.
 #[test]
