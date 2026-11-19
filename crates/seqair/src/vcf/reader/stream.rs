@@ -24,11 +24,11 @@ use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
 
 /// Most bytes a BCF record's `l_shared + l_indiv` may claim
-/// (`r[vcf_reader.limits]`).
+/// (`r[vcf_reader.limits+2]`).
 pub const MAX_RECORD_BYTES: u64 = 256 << 20;
 
 /// Most bytes a VCF text line may hold, its newline not counted
-/// (`r[vcf_reader.limits]`).
+/// (`r[vcf_reader.limits+2]`).
 pub const MAX_LINE_BYTES: u64 = 256 << 20;
 
 /// Configures a [`Reader`]; [`open`](Self::open) plans `F` and opens it.
@@ -198,6 +198,7 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             text: TextState::default(),
             ordinal: 0,
             line,
+            poisoned: None,
         };
         Ok(Reader { core, current: None })
     }
@@ -425,6 +426,10 @@ struct Core<P> {
     ordinal: u64,
     /// The line last framed, for VCF text read from its start.
     line: Option<u64>,
+    /// A record that could not be framed, where it was: the input is not at
+    /// a record's start, so every later read fails with it
+    /// (`r[vcf_reader.limits+2]`).
+    poisoned: Option<(RecordAt, RecordError)>,
 }
 
 /// What reading one record came to.
@@ -483,6 +488,9 @@ impl<P> Core<P> {
         &mut self,
         with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
     ) -> Result<Option<R>, VcfReadError> {
+        if let Some((at, e)) = &self.poisoned {
+            return Err(at.error(&self.file, e.clone()));
+        }
         let mut with = Some(with);
         loop {
             self.info_index.reset();
@@ -503,6 +511,14 @@ impl<P> Core<P> {
                 }
             }
         }
+    }
+
+    // r[impl vcf_reader.limits+2]
+    /// Fail with `e` now and on every later read: framing stopped short of
+    /// the record's end.
+    fn poison(&mut self, at: RecordAt, e: RecordError) -> VcfReadError {
+        self.poisoned = Some((at, e.clone()));
+        at.error(&self.file, e)
     }
 
     // r[impl vcf_reader.errors+3]
@@ -548,7 +564,7 @@ impl<P> Core<P> {
         }
     }
 
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     /// Copy a line that runs past the current batch into `scratch`, up to
     /// [`MAX_LINE_BYTES`]; the input's end ends a last line too.
     fn copy_line(&mut self, at: RecordAt) -> Result<(), VcfReadError> {
@@ -564,8 +580,7 @@ impl<P> Core<P> {
             };
             let len = self.scratch.len().saturating_add(take) as u64;
             if len > MAX_LINE_BYTES {
-                let e = RecordError::LineTooLong { len, max: MAX_LINE_BYTES };
-                return Err(at.error(&self.file, e));
+                return Err(self.poison(at, RecordError::LineTooLong { len, max: MAX_LINE_BYTES }));
             }
             self.scratch.extend_from_slice(buf.get(..take).unwrap_or_default());
             self.input.advance(if done { take.saturating_add(1) } else { take });
@@ -666,6 +681,34 @@ impl<P> Core<P> {
         };
         self.ordinal = self.ordinal.saturating_add(1);
         let group = self.input.group();
+
+        // The record header straight from the batch, or, cut by the batch's
+        // end, read (and kept) here.
+        let (head, head_read) = match self.input.fill()?.first_chunk::<8>() {
+            Some(head) => (*head, false),
+            None => {
+                let mut head = [0u8; 8];
+                match self.input.read_exact_into(&mut head).map_err(Framing::from) {
+                    Ok(()) => (head, true),
+                    Err(Framing::Truncated) => {
+                        return Err(self.poison(at, RecordError::Truncated));
+                    }
+                    Err(Framing::Bgzf(e)) => return Err(e.into()),
+                }
+            }
+        };
+        let [s0, s1, s2, s3, i0, i1, i2, i3] = head;
+        let l_shared = u32::from_le_bytes([s0, s1, s2, s3]);
+        let l_indiv = u32::from_le_bytes([i0, i1, i2, i3]);
+        // r[impl vcf_reader.limits+2]
+        let size = u64::from(l_shared).saturating_add(u64::from(l_indiv));
+        if size > MAX_RECORD_BYTES {
+            return Err(self.poison(at, RecordError::TooLarge { size, max: MAX_RECORD_BYTES }));
+        }
+        if l_shared < 24 {
+            return Err(self.poison(at, RecordError::SharedTooShort { len: l_shared }));
+        }
+
         let Self {
             file,
             plan,
@@ -676,6 +719,7 @@ impl<P> Core<P> {
             site,
             info_index,
             format_index,
+            poisoned,
             ..
         } = self;
         let parts = Parts {
@@ -688,30 +732,6 @@ impl<P> Core<P> {
             query: query.as_ref(),
             group,
         };
-
-        // The record header straight from the batch, or, cut by the batch's
-        // end, read (and kept) here.
-        let (head, head_read) = match input.fill()?.first_chunk::<8>() {
-            Some(head) => (*head, false),
-            None => {
-                let mut head = [0u8; 8];
-                input
-                    .read_exact_into(&mut head)
-                    .map_err(|e| Framing::from(e).into_read_error(at, file))?;
-                (head, true)
-            }
-        };
-        let [s0, s1, s2, s3, i0, i1, i2, i3] = head;
-        let l_shared = u32::from_le_bytes([s0, s1, s2, s3]);
-        let l_indiv = u32::from_le_bytes([i0, i1, i2, i3]);
-        // r[impl vcf_reader.limits]
-        let size = u64::from(l_shared).saturating_add(u64::from(l_indiv));
-        if size > MAX_RECORD_BYTES {
-            return Err(at.error(file, RecordError::TooLarge { size, max: MAX_RECORD_BYTES }));
-        }
-        if l_shared < 24 {
-            return Err(at.error(file, RecordError::SharedTooShort { len: l_shared }));
-        }
         let shared_end = 8usize.saturating_add(l_shared as usize);
         let end = shared_end.saturating_add(l_indiv as usize);
         let wants_indiv = sections.samples() != SampleSelection::None;
@@ -723,7 +743,12 @@ impl<P> Core<P> {
             return result;
         }
         // Otherwise copy it together, skipping samples nobody reads.
-        let framing = |e: Framing| e.into_read_error(at, file);
+        let mut framing = |e: Framing| {
+            if matches!(e, Framing::Truncated) {
+                *poisoned = Some((at, RecordError::Truncated));
+            }
+            e.into_read_error(at, file)
+        };
         scratch.clear();
         let mut copied = 0;
         if head_read {
@@ -879,6 +904,8 @@ impl<F: Fields> Reader<F> {
         }
         core.query = Some(query);
         core.line = None;
+        // r[impl vcf_reader.limits+2]
+        core.poisoned = None;
         Ok(())
     }
 

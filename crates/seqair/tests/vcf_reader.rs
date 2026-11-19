@@ -15,8 +15,8 @@
 
 use seqair::io::BgzfWriter;
 use seqair::vcf::reader::{
-    BcfValueError, FieldError, FilterStatus, KeyKind, MAX_RECORD_BYTES, ReadOption, RecordPart,
-    RecordSection,
+    BcfValueError, FieldError, FilterStatus, KeyKind, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadOption,
+    RecordPart, RecordSection,
 };
 use seqair::vcf::{
     Allele, DynValue, Fields, FormatGt, FullRecord, Info, InfoFlag, InfoInt, KeyError, Locus,
@@ -900,7 +900,7 @@ fn a_bcf_alt_dot_is_no_alt() {
     assert_eq!(text[1].site().alleles().get(3), None);
 }
 
-// r[verify vcf_reader.limits]
+// r[verify vcf_reader.limits+2]
 // r[verify vcf_reader.errors+3]
 // r[verify vcf_reader.field_table]
 #[test]
@@ -942,6 +942,75 @@ fn malformed_records_are_typed_errors_with_their_place() {
         e,
         RecordError::Field { source: FieldError::Ploidy { ploidy: 300, max: 256 }, .. }
     ));
+}
+
+// r[verify vcf_reader.limits+2]
+/// A BCF record that cannot be framed fails every later read with the same
+/// error, never the end of input; a framed malformed record does not.
+#[test]
+fn a_record_that_cannot_be_framed_fails_every_later_read() {
+    let ok = Rec::default();
+    let huge = Rec { lengths: Some((u32::MAX, 16)), ..ok.clone() };
+    let short = Rec { lengths: Some((20, 0)), ..ok.clone() };
+    let cut = Rec { lengths: Some((1000, 0)), ..ok.clone() };
+    for bad in [huge, short, cut] {
+        let file = VcfFile::from_bytes(bcf(&[ok.clone(), bad, ok.clone()]), None).unwrap();
+        let mut reader = file.reader::<Locus>().open().unwrap();
+        assert!(reader.next_record().unwrap().is_some());
+        let first = record_error(reader.next_record().unwrap_err());
+        for _ in 0..3 {
+            assert_eq!(record_error(reader.next_record().unwrap_err()), first);
+        }
+    }
+    // A framed record with a contig the header lacks: the next one reads.
+    let file = VcfFile::from_bytes(bcf(&[Rec { rid: 3, ..ok.clone() }, ok]), None).unwrap();
+    let mut reader = file.reader::<Locus>().open().unwrap();
+    assert!(reader.next_record().is_err());
+    assert!(reader.next_record().unwrap().is_some());
+}
+
+// r[verify vcf_reader.limits+2]
+/// A text line over the limit, read from a stream that never holds it, fails
+/// every later read with the same error instead of reading the line's tail
+/// as a record.
+#[test]
+fn a_text_line_over_the_limit_fails_every_later_read() {
+    /// The header, a record whose INFO runs past the limit, and a record.
+    struct Long(u64);
+    impl std::io::Read for Long {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let head = format!("{TEXT_HEADER}chr1\t5\t.\tA\tC\t.\t.\tS=");
+            let tail = "\nchr1\t6\t.\tA\tC\t.\t.\t.\n";
+            let (head_len, body) = (head.len() as u64, MAX_LINE_BYTES + 1);
+            let at = self.0;
+            let n = if at < head_len {
+                let rest = &head.as_bytes()[at as usize..];
+                let n = rest.len().min(buf.len());
+                buf[..n].copy_from_slice(&rest[..n]);
+                n
+            } else if at < head_len + body {
+                let n = ((head_len + body - at) as usize).min(buf.len());
+                buf[..n].fill(b'x');
+                n
+            } else {
+                let rest =
+                    tail.as_bytes().get((at - head_len - body) as usize..).unwrap_or_default();
+                let n = rest.len().min(buf.len());
+                buf[..n].copy_from_slice(&rest[..n]);
+                n
+            };
+            self.0 += n as u64;
+            Ok(n)
+        }
+    }
+    let mut reader = seqair::vcf::VcfStream::new(Long(0)).reader::<Locus>().open().unwrap();
+    let text_error = |e: VcfReadError| match e {
+        VcfReadError::Record { source, .. } => source,
+        e => panic!("{e:?}"),
+    };
+    let first = text_error(reader.next_record().unwrap_err());
+    assert!(matches!(first, RecordError::LineTooLong { .. }), "{first:?}");
+    assert_eq!(text_error(reader.next_record().unwrap_err()), first);
 }
 
 // r[verify vcf_fields.only_sample]
@@ -1550,7 +1619,7 @@ fn one_text_sample_scans_only_up_to_its_column() {
 }
 
 // r[verify vcf_reader.errors+3]
-// r[verify vcf_reader.limits]
+// r[verify vcf_reader.limits+2]
 /// Malformed lines are typed errors with the record's ordinal; in a BGZF
 /// file, its virtual offset too. Blank lines are not records.
 #[test]
