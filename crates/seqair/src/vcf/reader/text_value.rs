@@ -8,7 +8,7 @@ use std::str::Utf8Error;
 use super::values::GtAllele;
 use crate::io::text_scan::find_byte;
 
-// r[impl vcf_reader.errors+2]
+// r[impl vcf_reader.errors+3]
 /// The bytes of a malformed value, for its error message: at most the first
 /// [`Offending::MAX`], escaped when shown.
 #[derive(Clone, PartialEq, Eq)]

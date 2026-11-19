@@ -377,19 +377,31 @@ impl TextState {
         file: &FileShared,
         at: &mut RecordAt,
     ) -> Result<(), RecordError> {
-        self.cols.find(line)?;
-        let chrom = self.cols.col(line, Col::Chrom);
+        // r[impl vcf_reader.errors+3]
+        // A line with too few columns still says where it is, if it can.
+        let found = self.cols.find(line);
+        let (chrom, pos) = match found {
+            Ok(()) => (self.cols.col(line, Col::Chrom), self.cols.col(line, Col::Pos)),
+            Err(_) => {
+                let mut cols = line.splitn(3, |&b| b == b'\t');
+                match (cols.next(), cols.next()) {
+                    (Some(chrom), Some(pos)) => (chrom, pos),
+                    _ => return found,
+                }
+            }
+        };
         if self.contig.is_none() || self.chrom != chrom {
             let name = std::str::from_utf8(chrom)
-                .map_err(|source| RecordError::Utf8 { part: RecordPart::Chrom, source })?;
+                .map_err(|source| RecordError::Utf8 { part: RecordPart::Chrom, source });
+            let name = found.clone().and(name)?;
             // r[impl vcf_reader.contigs]
             self.contig = Some(file.contigs.by_name(&file.header, name));
             self.chrom.clear();
             self.chrom.extend_from_slice(chrom);
         }
         at.contig = self.contig.as_ref().map(ContigId::tid);
-        at.pos = parse_pos(self.cols.col(line, Col::Pos)).map(|pos1| pos1.saturating_sub(1));
-        Ok(())
+        at.pos = parse_pos(pos).map(|pos1| pos1.saturating_sub(1));
+        found
     }
 }
 
@@ -492,6 +504,13 @@ impl<P> Core<P> {
         }
     }
 
+    // r[impl vcf_reader.errors+3]
+    /// The ordinal of the next record, unless a query reads: it starts
+    /// where its index chunks do, so a count would point nowhere.
+    fn counted(&self) -> Option<u64> {
+        self.query.is_none().then_some(self.ordinal)
+    }
+
     /// Frame the next non-empty line; `None` at the end.
     fn frame_line(&mut self) -> Result<Option<(Line, RecordAt)>, VcfReadError> {
         loop {
@@ -500,7 +519,7 @@ impl<P> Core<P> {
             }
             self.line = self.line.map(|l| l.saturating_add(1));
             let at = RecordAt {
-                ordinal: self.ordinal,
+                ordinal: self.counted(),
                 line: self.line,
                 offset: self.input.virtual_offset(),
                 ..RecordAt::default()
@@ -640,7 +659,7 @@ impl<P> Core<P> {
             return Ok(Step::End);
         }
         let at = RecordAt {
-            ordinal: self.ordinal,
+            ordinal: self.counted(),
             offset: self.input.virtual_offset(),
             ..RecordAt::default()
         };

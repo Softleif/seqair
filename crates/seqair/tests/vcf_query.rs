@@ -562,3 +562,61 @@ fn concurrent_queries_equal_a_single_thread() {
         }
     });
 }
+
+/// `tabix` next to bcftools, if installed.
+fn tabix_bin(bcftools: &str) -> Option<PathBuf> {
+    let bin = Path::new(bcftools).with_file_name("tabix");
+    let bin = if bin.exists() { bin } else { PathBuf::from("tabix") };
+    Command::new(&bin).arg("--version").output().ok().map(|_| bin)
+}
+
+// r[verify vcf_reader.errors+3]
+/// A malformed record inside a query names its CHROM:POS (though it has too
+/// few columns), its file and its virtual offset, and no number: the query
+/// starts reading where its index chunk does.
+#[test]
+fn a_record_error_in_a_query_says_where_it_is() {
+    let Some(tabix) = bcftools_bin().and_then(tabix_bin) else { return };
+    let mut text = String::from(
+        "##fileformat=VCFv4.3\n##contig=<ID=chr0>\n##contig=<ID=chr1>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    );
+    for pos in 1..=7 {
+        std::fmt::Write::write_fmt(&mut text, format_args!("chr0\t{pos}\t.\tA\tC\t.\t.\t.\n"))
+            .unwrap();
+    }
+    text.push_str("chr1\t15\t.\tA\tC\t.\t.\t.\nchr1\t20\t.\tA\n");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.vcf.gz");
+    let mut w = seqair::io::BgzfWriter::new(Vec::new());
+    w.write_all(text.as_bytes()).unwrap();
+    std::fs::write(&path, w.finish().unwrap()).unwrap();
+    let out = Command::new(tabix).args(["-p", "vcf"]).arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let file = VcfFile::open(&path).unwrap();
+    let mut q = file.reader::<Locus>().query(Region::contig("chr1")).unwrap();
+    assert!(q.next_record().unwrap().is_some());
+    let e = q.next_record().unwrap_err();
+    let VcfReadError::Record { at, source } = &e else { panic!("{e:?}") };
+    assert_eq!(*source, seqair::vcf::reader::RecordError::TooFewColumns { found: 4 });
+    assert_eq!(at.number, None);
+    let offset = at.offset.unwrap();
+    let want = format!(
+        "malformed record at chr1:20 in {} (virtual offset {}:{})",
+        path.display(),
+        offset.block_offset(),
+        offset.within_block()
+    );
+    assert_eq!(e.to_string(), want);
+    // Read from the start, the same record has its number and line.
+    let mut r = file.reader::<Locus>().open().unwrap();
+    let e = loop {
+        if let Err(e) = r.next_record() {
+            break e;
+        }
+    };
+    let VcfReadError::Record { at, .. } = &e else { panic!("{e:?}") };
+    assert_eq!((at.number, at.line), (Some(9), Some(13)));
+    assert!(e.to_string().starts_with("malformed record 9 (line 13) at chr1:20 in "), "{e}");
+}

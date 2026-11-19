@@ -841,7 +841,7 @@ fn record_error(e: VcfReadError) -> (u64, RecordError) {
         VcfReadError::Record { at, source } => {
             assert!(at.offset.is_some(), "a BGZF record error names its offset");
             assert_eq!(at.line, None, "BCF has no lines");
-            (at.number, source)
+            (at.number.unwrap(), source)
         }
         e => panic!("expected a record error, got {e:?}"),
     }
@@ -895,7 +895,7 @@ fn a_bcf_alt_dot_is_no_alt() {
 }
 
 // r[verify vcf_reader.limits]
-// r[verify vcf_reader.errors+2]
+// r[verify vcf_reader.errors+3]
 // r[verify vcf_reader.field_table]
 #[test]
 fn malformed_records_are_typed_errors_with_their_place() {
@@ -1101,7 +1101,7 @@ fn text_error(lines: &[&str]) -> (u64, Option<seqair::io::VirtualOffset>, Record
             Ok(Some(_)) => {}
             Ok(None) => panic!("no error"),
             Err(VcfReadError::Record { at, source }) => {
-                return (at.number, at.offset, source);
+                return (at.number.unwrap(), at.offset, source);
             }
             Err(e) => panic!("expected a record error, got {e:?}"),
         }
@@ -1332,7 +1332,7 @@ fn one_text_sample_scans_only_up_to_its_column() {
     assert!(rec.column(&gt).is_err());
 }
 
-// r[verify vcf_reader.errors+2]
+// r[verify vcf_reader.errors+3]
 // r[verify vcf_reader.limits]
 /// Malformed lines are typed errors with the record's ordinal; in a BGZF
 /// file, its virtual offset too. Blank lines are not records.
@@ -1360,7 +1360,7 @@ fn malformed_text_lines_are_typed_errors_with_their_place() {
             VcfReadError::Record {
                 ref at,
                 source: RecordError::Field { source: FieldError::Text(_), .. },
-            } if at.number == 2
+            } if at.number == Some(2)
         ),
         "{e:?}"
     );
@@ -1407,7 +1407,9 @@ fn malformed_text_lines_are_typed_errors_with_their_place() {
     assert!(reader.next_record().unwrap().is_some());
     let e = reader.next_record().unwrap_err();
     let VcfReadError::Record { at, .. } = e else { panic!("{e:?}") };
-    assert_eq!((at.number, at.line, at.locus), (3, Some(16), None));
+    // Too few columns, but CHROM and POS parse: the place names them.
+    let locus = at.locus.as_ref().map(|(c, p)| format!("{c}:{p}"));
+    assert_eq!((at.number, at.line, locus.as_deref()), (Some(3), Some(16), Some("chr1:1")));
     let offset = at.offset.unwrap();
     let header_len = TEXT_HEADER.len() + 2 * (ok.len() + 1);
     assert_eq!(usize::from(offset.within_block()), header_len);

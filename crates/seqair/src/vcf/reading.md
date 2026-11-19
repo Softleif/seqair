@@ -419,7 +419,7 @@ let info = file.reader::<seqair::vcf::Info>().open()?.read()?.ok_or("empty")?;
 let err = info.get(&dp).unwrap_err();
 assert_eq!(err.to_string(), "malformed record 1 (line 5) at chr1:5");
 let VcfReadError::Record { at, source } = &err else { unreachable!() };
-assert_eq!((at.number, at.line), (1, Some(5)));
+assert_eq!((at.number, at.line), (Some(1), Some(5)));
 assert!(std::error::Error::source(source).is_some_and(|e| e.to_string().contains("\"lots\"")));
 # Ok(()) }
 ```

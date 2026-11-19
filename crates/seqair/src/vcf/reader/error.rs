@@ -1,4 +1,4 @@
-//! What reading a VCF or BCF file can fail with (`r[vcf_reader.errors+2]`).
+//! What reading a VCF or BCF file can fail with (`r[vcf_reader.errors+3]`).
 
 use super::bcf_value::BcfValueError;
 use super::fields::PlanError;
@@ -15,7 +15,7 @@ use seqair_types::SmolStr;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
-// r[impl vcf_reader.errors+2]
+// r[impl vcf_reader.errors+3]
 /// Why opening or reading a VCF/BCF file failed.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +51,7 @@ pub enum VcfReadError {
     #[error("the input is neither VCF nor BCF")]
     UnknownFormat,
 
-    // r[impl vcf_reader.errors+2]
+    // r[impl vcf_reader.errors+3]
     /// A record is malformed: `at` says where it is, `source` what is wrong.
     #[error("malformed record {at}")]
     Record { at: Box<RecordPlace>, source: RecordError },
@@ -86,8 +86,9 @@ pub enum VcfReadError {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPlace {
-    /// The record's number in the stream, from 1.
-    pub number: u64,
+    /// The record's number in the stream, from 1; `None` inside a query or
+    /// partition, which starts reading wherever its index chunks start.
+    pub number: Option<u64>,
     /// VCF text read from its start: the record's line, from 1.
     pub line: Option<u64>,
     /// BGZF input: where the record starts.
@@ -100,18 +101,27 @@ pub struct RecordPlace {
 
 impl std::fmt::Display for RecordPlace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.number)?;
+        // Each part is separated from the one before by a space.
+        let mut sep = "";
+        let mut part = |f: &mut std::fmt::Formatter<'_>, args: std::fmt::Arguments<'_>| {
+            let r = write!(f, "{sep}{args}");
+            sep = " ";
+            r
+        };
+        if let Some(number) = self.number {
+            part(f, format_args!("{number}"))?;
+        }
         if let Some(line) = self.line {
-            write!(f, " (line {line})")?;
+            part(f, format_args!("(line {line})"))?;
         }
         if let Some((chrom, pos)) = &self.locus {
-            write!(f, " at {chrom}:{pos}")?;
+            part(f, format_args!("at {chrom}:{pos}"))?;
         }
         if let Some(path) = &self.path {
-            write!(f, " in {}", path.display())?;
+            part(f, format_args!("in {}", path.display()))?;
         }
         if let Some(o) = self.offset {
-            write!(f, " (virtual offset {}:{})", o.block_offset(), o.within_block())?;
+            part(f, format_args!("(virtual offset {}:{})", o.block_offset(), o.within_block()))?;
         }
         Ok(())
     }
@@ -273,12 +283,12 @@ pub enum FieldError {
 }
 
 /// Where a record is, as cheaply as a reader can say it per record: its
-/// ordinal, its line (VCF text from the start), its virtual offset (BGZF),
+/// ordinal (reading from the first record), its line (VCF text from the start), its virtual offset (BGZF),
 /// and its contig and 0-based position once they decoded. The names are
 /// looked up only for an error ([`Self::error`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RecordAt {
-    pub(crate) ordinal: u64,
+    pub(crate) ordinal: Option<u64>,
     pub(crate) line: Option<u64>,
     pub(crate) offset: Option<VirtualOffset>,
     pub(crate) contig: Option<u32>,
@@ -293,7 +303,7 @@ impl RecordAt {
             Some((chrom, pos))
         });
         let at = RecordPlace {
-            number: self.ordinal.saturating_add(1),
+            number: self.ordinal.map(|o| o.saturating_add(1)),
             line: self.line,
             offset: self.offset,
             path: file.path().map(Path::to_path_buf),

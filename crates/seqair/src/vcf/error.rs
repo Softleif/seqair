@@ -163,7 +163,7 @@ impl std::fmt::Display for KeyKind {
 }
 
 // r[impl vcf_values.keys+2]
-// r[impl vcf_reader.errors+2]
+// r[impl vcf_reader.errors+3]
 /// Why a key could not be resolved from a header.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
