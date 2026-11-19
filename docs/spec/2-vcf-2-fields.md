@@ -59,8 +59,8 @@ The builder's options are consumed through the `PlanContext` (the sample selecti
 r[vcf_fields.owned]
 Every component MUST be an owned value — `Clone + Send + Sync`, no lifetimes — holding its own reusable buffers. `fill` MUST reuse them, so `read_into` allocates nothing per record once the buffers have grown. A record read through one reader stays valid after the reader moves on or is dropped.
 
-r[vcf_fields.lazy]
-A component that indexes its bytes (`Info`, the sample components) MUST build the index on first access, not in `fill`, so a record the caller rejects on its position, FILTER or alleles never pays for it. The index MUST live in a `std::sync::OnceLock` so the component stays `Sync`; `fill` MUST take the previous index out (`OnceLock::take`) and keep its buffers for the next build. A failed build (malformed data) MUST be stored and returned as the same typed error on every access.
+r[vcf_fields.lazy+2]
+A component that indexes its bytes (`Info`, the sample components) MUST build the index on first access, not in `fill`, so a record the caller rejects on its position, FILTER or alleles never pays for it. The component MUST stay `Sync`: concurrent first accesses MUST build once, the others waiting for that build. `fill` MUST keep the previous index's buffers for the next build. A failed build (malformed data) MUST be stored and returned as the same typed error on every access. The index lives in place behind one atomic state byte (empty, building, done), so a record costs one atomic exchange; a `std::sync::OnceLock` plus a lock for the spare buffers cost four locked atomics per record. The `unsafe` this takes MUST be covered by a multi-threaded test of racing first accesses.
 
 ## Components
 
