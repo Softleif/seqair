@@ -9,8 +9,8 @@ Fields are read through the same typed keys the writer uses (`InfoKey<V>`, `Form
 r[vcf_values.keys+2]
 `VcfHeader` MUST resolve keys by name: `info_key::<V>(name) -> Result<InfoKey<V>, KeyError>`, `format_key::<V>(name)`, `filter(name) -> Result<FilterId, _>`, `contig(name) -> Result<ContigId, _>`. A header resolves only what it declares: it is what a writer writes, and the keys it hands out are valid for writing. Resolution MUST check the marker against the declaration through a `FieldKind` trait on each marker: `UnknownField { name, kind }` for an undeclared name, naming the section (`KeyKind`), `TypeMismatch { name, declared, requested }` when the `ValueType` disagrees, `NumberMismatch { name, declared }` when the cardinality cannot hold (a `Scalar` needs `Number=1`, a `Flag` needs `Type=Flag`, `Gt` needs the FORMAT `GT` field).
 
-r[vcf_values.file_keys+2]
-Readers resolve keys through their file: `file.info_key::<V>(name)` and `file.format_key::<V>(name)` (and the same on `PlanContext`) MUST resolve exactly what the header declares, as `r[vcf_values.keys+2]` does, for VCF text and BCF alike. The same file in both formats then resolves the same keys: HiPhase decided whether a file carries tandem-repeat annotations by whether `TRID` resolved, and with an undeclared `TRID` resolving in text but not in BCF it classified every text record as a tandem repeat. A key a header leaves out needs a lenient key (`r[vcf_values.lenient_keys]`); a record that uses one is still reported (`r[vcf_reader.undeclared+5]`).
+r[vcf_values.file_keys+3]
+Readers resolve keys through their file: `file.info_key::<V>(name)`, `file.format_key::<V>(name)` and `file.filter(name)` (and the same on `PlanContext`) MUST resolve exactly what the header declares, as `r[vcf_values.keys+2]` does, for VCF text and BCF alike. The same file in both formats then resolves the same keys: HiPhase decided whether a file carries tandem-repeat annotations by whether `TRID` resolved, and with an undeclared `TRID` resolving in text but not in BCF it classified every text record as a tandem repeat. A key a header leaves out needs a lenient key (`r[vcf_values.lenient_keys]`); a record that uses one is still reported (`r[vcf_reader.undeclared+5]`).
 
 r[vcf_values.lenient_keys]
 `file.lenient()` (and `PlanContext::lenient()`) MUST return a `LenientKeys` view with the same four methods, resolving against the file's field table (`r[vcf_reader.field_table]`):
@@ -33,8 +33,8 @@ r[vcf_values.field_kind]
 r[vcf_values.header_brand+2]
 Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand+3]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. A key of a file's field table that its header does not declare carries a second id, the file's own, which that file's records accept as well. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
 
-r[vcf_values.reader_keys]
-`Reader::keys()` MUST return a `Keys` view resolving as `file.info_key`, `format_key`, their `_opt` forms and `lenient()` do, for the reader's file: a `VcfStream` reader has no `VcfFile` at hand, and without it a caller re-implements `_opt` by matching `UnknownField`.
+r[vcf_values.reader_keys+2]
+`Reader::keys()` MUST return a `Keys` view resolving as `file.info_key`, `format_key`, their `_opt` forms, `lenient()` and `filter` do, for the reader's file: a `VcfStream` reader has no `VcfFile` at hand, and without it a caller re-implements `_opt` by matching `UnknownField`.
 
 ## Access
 
