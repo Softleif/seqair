@@ -275,15 +275,22 @@ pub(crate) struct TextGt<'a> {
 }
 
 impl<'a> TextGt<'a> {
-    /// Check every allele of `gt`: digits up to 65535, or `.`.
-    pub(crate) fn check(gt: &[u8]) -> Result<(), TextValueError> {
+    /// How many alleles `gt` has, and whether each is digits up to 65535
+    /// or `.`: the first that is not, in one walk that still counts them
+    /// all (a ploidy over the limit is the error a caller reports first).
+    pub(crate) fn check(gt: &[u8]) -> (usize, Result<(), TextValueError>) {
+        let mut ploidy = 0usize;
+        let mut alleles = Ok(());
         let mut rest = Some(split_prefix(gt).1);
         while let Some(r) = rest {
             let (token, sep) = split_allele(r);
-            parse_allele(token).map_err(|e| e.naming(gt))?;
+            if alleles.is_ok() {
+                alleles = parse_allele(token).map(drop).map_err(|e| e.naming(gt));
+            }
+            ploidy = ploidy.saturating_add(1);
             rest = sep.map(|(_, tail)| tail);
         }
-        Ok(())
+        (ploidy, alleles)
     }
 
     // r[impl vcf_record.gt_first_phase+3]
@@ -508,18 +515,18 @@ mod tests {
         {
             assert!(
                 matches!(
-                    TextGt::check(bad.as_bytes()),
+                    TextGt::check(bad.as_bytes()).1,
                     Err(TextValueError::InvalidGenotype { .. })
                 ),
                 "{bad:?}"
             );
         }
         assert!(matches!(
-            TextGt::check(b"0/65536"),
+            TextGt::check(b"0/65536").1,
             Err(TextValueError::GenotypeAlleleOutOfRange { .. })
         ));
         assert_eq!(
-            TextGt::check(b"0/x1").unwrap_err().to_string(),
+            TextGt::check(b"0/x1").1.unwrap_err().to_string(),
             "\"0/x1\" is not a genotype (alleles as digits or `.`, separated by `/` or `|`)"
         );
         let long = vec![b'\xff'; 100];
@@ -527,7 +534,7 @@ mod tests {
         let TextValueError::InvalidFloat { value } = &e else { panic!("{e:?}") };
         assert_eq!((value.as_bytes().len(), value.is_truncated()), (Offending::MAX, true));
         assert!(e.to_string().starts_with("\"\\xff"), "{e}");
-        TextGt::check(b"65535|00").unwrap();
+        assert_eq!(TextGt::check(b"65535|00"), (2, Ok(())));
         let gt: Vec<_> = TextGt::new(b"65535|00", true).map(|a| a.allele).collect();
         assert_eq!(gt, [Some(65535), Some(0)]);
     }

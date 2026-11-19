@@ -339,7 +339,7 @@ impl ReadKind for Gt {
 
     // r[impl vcf_values.gt+2]
     /// The ploidy before the alleles: a BCF column's declared count, a text
-    /// genotype's separators.
+    /// genotype's alleles.
     fn check(values: Stored<'_>, _: DecodeCx<'_>) -> Result<(), FieldError> {
         match values.0 {
             StoredRepr::Bcf(v) => {
@@ -347,12 +347,9 @@ impl ReadKind for Gt {
                 Ok(v.check_gt()?)
             }
             StoredRepr::Text(t) => {
-                let t = text_value(t.unwrap_or_default());
-                // Every allele but the first follows a separator; so may the first.
-                let sep = |b: &u8| *b == b'/' || *b == b'|';
-                let seps = t.iter().filter(|b| sep(b)).count();
-                check_ploidy(seps.saturating_add(usize::from(!t.first().is_some_and(sep))))?;
-                Ok(TextGt::check(t)?)
+                let (ploidy, alleles) = TextGt::check(text_value(t.unwrap_or_default()));
+                check_ploidy(ploidy)?;
+                Ok(alleles?)
             }
         }
     }
