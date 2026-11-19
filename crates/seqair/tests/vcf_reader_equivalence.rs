@@ -288,10 +288,7 @@ fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
     let mut w = Writer::new(&mut out, format).write_header(&s.header).unwrap();
     let k = &s.keys;
     for r in records {
-        let alleles = Alleles::complex(
-            SmolStr::from(&r.reference),
-            r.alts.iter().map(SmolStr::from).collect(),
-        );
+        let alleles = Alleles::complex(r.reference.as_str(), r.alts.iter().map(String::as_str));
         let enc = w
             .begin_record(&s.contigs[r.contig], Pos1::new(r.pos).unwrap(), &alleles, r.qual)
             .unwrap();

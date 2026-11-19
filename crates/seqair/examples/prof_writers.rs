@@ -369,7 +369,7 @@ fn alleles_of(r: &str, alts: &[String]) -> Alleles {
             return Alleles::deletion(base(rb[0]), &del).unwrap();
         }
     }
-    Alleles::complex(SmolStr::new(r), alts.iter().map(SmolStr::new).collect())
+    Alleles::complex(SmolStr::new(r), alts.iter().map(SmolStr::new))
 }
 
 fn load_bcf(path: &Path) -> (Vec<(String, u64)>, Vec<Rec>) {

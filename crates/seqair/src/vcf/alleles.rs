@@ -120,8 +120,14 @@ impl Alleles {
     }
 
     /// Complex / symbolic / MNV (no structural validation).
-    pub fn complex(ref_allele: SmolStr, alt_alleles: SmallVec<SmolStr, 2>) -> Self {
-        Self::Complex { ref_allele, alt_alleles }
+    pub fn complex(
+        ref_allele: impl Into<SmolStr>,
+        alt_alleles: impl IntoIterator<Item = impl Into<SmolStr>>,
+    ) -> Self {
+        Self::Complex {
+            ref_allele: ref_allele.into(),
+            alt_alleles: alt_alleles.into_iter().map(Into::into).collect(),
+        }
     }
 
     // r[impl vcf_record.alleles_serialization]
@@ -339,10 +345,7 @@ mod tests {
     // r[verify vcf_record.alleles_serialization]
     #[test]
     fn complex_alleles() {
-        let a = Alleles::complex(
-            SmolStr::from("ACG"),
-            SmallVec::from([SmolStr::from("TCC"), SmolStr::from("A")]),
-        );
+        let a = Alleles::complex("ACG", ["TCC", "A"]);
         assert_eq!(a.ref_text(), "ACG");
         assert_eq!(a.alt_texts().len(), 2);
         assert_eq!(a.rlen(), 3);
@@ -356,7 +359,7 @@ mod tests {
         assert_eq!(Alleles::snv(Base::A, Base::T).unwrap().rlen(), 1);
         assert_eq!(Alleles::insertion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 1);
         assert_eq!(Alleles::deletion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 3);
-        assert_eq!(Alleles::complex(SmolStr::from("ACGT"), SmallVec::new()).rlen(), 4);
+        assert_eq!(Alleles::complex("ACGT", [""; 0]).rlen(), 4);
     }
 
     // r[verify vcf_record.alleles_serialization]
@@ -369,10 +372,7 @@ mod tests {
             Alleles::snv_multi(Base::G, &[Base::A, Base::T]).unwrap(),
             Alleles::insertion(Base::A, &[Base::C, Base::G, Base::T]).unwrap(),
             Alleles::deletion(Base::T, &[Base::A, Base::C]).unwrap(),
-            Alleles::complex(
-                SmolStr::from("ACG"),
-                SmallVec::from([SmolStr::from("T"), SmolStr::from("GG")]),
-            ),
+            Alleles::complex("ACG", ["T", "GG"]),
         ];
         for alleles in &cases {
             let mut ref_buf = Vec::new();

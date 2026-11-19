@@ -125,7 +125,7 @@ fn generate(recs: &[Rec], format: OutputFormat, indexer: Indexer, bin: &str) -> 
         let reference: String = "ACGTAC"[..r.ref_len].to_owned();
         let alt = if r.end.is_some() { "<DEL>" } else { "T" };
         let alleles =
-            Alleles::complex(SmolStr::from(reference), [SmolStr::from(alt)].into_iter().collect());
+            Alleles::complex(reference, [alt]);
         let enc =
             w.begin_record(&contigs[r.contig], Pos1::new(r.pos).unwrap(), &alleles, None).unwrap();
         let mut enc = enc.filter_pass();

@@ -51,7 +51,7 @@ fn write(setup: &Setup, format: OutputFormat, records: &[Vec<Vec<String>>]) -> V
     let mut out = Vec::new();
     let mut writer = Writer::new(&mut out, format).write_header(&setup.header).unwrap();
     for (i, lists) in records.iter().enumerate() {
-        let alleles = Alleles::complex("ACG".into(), ["A".into()].into_iter().collect());
+        let alleles = Alleles::complex("ACG", ["A"]);
         let pos = Pos1::new(u32::try_from(i).unwrap() + 1).unwrap();
         let mut enc = writer.begin_record(&setup.chr1, pos, &alleles, Some(5.0)).unwrap();
         for ids in lists {

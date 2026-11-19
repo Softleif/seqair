@@ -11,7 +11,7 @@ use crate::vcf::alleles::Alleles;
 use crate::vcf::bcf_encoding::FLOAT_MISSING;
 use crate::vcf::error::AllelesError;
 use crate::vcf::record_encoder::FilterId;
-use seqair_types::{Base, SmallVec, SmolStr};
+use seqair_types::{Base, SmallVec};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -341,10 +341,7 @@ impl<'a> AllelesRef<'a> {
         let bases = |s: &[u8]| s.iter().map(|&b| base(b)).collect::<Option<SmallVec<Base, 4>>>();
         let complex = || {
             let reference = std::str::from_utf8(reference).unwrap_or_default();
-            Alleles::complex(
-                SmolStr::from(reference),
-                alts.iter().map(|&a| SmolStr::from(a)).collect(),
-            )
+            Alleles::complex(reference, alts.iter().copied())
         };
         let Some(r) = bases(reference) else { return Ok(complex()) };
         let Some(&anchor) = r.first() else { return Ok(complex()) };
@@ -650,7 +647,7 @@ mod tests {
         assert_eq!(typed(&["A", "ACG"]), Alleles::insertion(Base::A, &[Base::C, Base::G]).unwrap());
         assert_eq!(typed(&["ACG", "A"]), Alleles::deletion(Base::A, &[Base::C, Base::G]).unwrap());
         let complex = |r: &str, alts: &[&str]| {
-            Alleles::complex(r.into(), alts.iter().map(|&a| SmolStr::from(a)).collect())
+            Alleles::complex(r, alts.iter().copied())
         };
         assert_eq!(typed(&["AC", "GT"]), complex("AC", &["GT"]));
         assert_eq!(typed(&["A", "<DEL>"]), complex("A", &["<DEL>"]));

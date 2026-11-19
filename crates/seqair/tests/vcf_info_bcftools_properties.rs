@@ -127,10 +127,7 @@ impl AlleleSpec {
             Self::Snv(r, alts) => Alleles::snv_multi(*r, alts).unwrap(),
             Self::Insertion(a, ins) => Alleles::insertion(*a, ins).unwrap(),
             Self::Deletion(a, del) => Alleles::deletion(*a, del).unwrap(),
-            Self::Complex(r, alts) => Alleles::complex(
-                r.as_str().into(),
-                alts.iter().map(|a| a.as_str().into()).collect(),
-            ),
+            Self::Complex(r, alts) => Alleles::complex(r.as_str(), alts.iter().map(String::as_str)),
         }
     }
 

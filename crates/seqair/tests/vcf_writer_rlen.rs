@@ -27,7 +27,6 @@ use seqair::vcf::{
     Alleles, ContigDef, ContigId, FormatGt, FormatInts, Genotype, IndexKind, InfoInt, InfoIntOpts,
     Locus, Number, OutputFormat, VcfFile, VcfHeader, Writer,
 };
-use seqair_types::SmolStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -111,8 +110,7 @@ fn write(dir: &Path, setup: &Setup, records: &[Rec], format: OutputFormat) -> Pa
         .write_header(&setup.header)
         .unwrap();
     for r in records {
-        let alts = r.alts.iter().map(|a| SmolStr::from(*a)).collect();
-        let alleles = Alleles::complex(r.reference.into(), alts);
+        let alleles = Alleles::complex(r.reference, r.alts.iter().copied());
         let pos = seqair_types::Pos1::new(r.pos).unwrap();
         let mut enc = writer.begin_record(&setup.chr1, pos, &alleles, None).unwrap().filter_pass();
         for &end in &r.ends {
