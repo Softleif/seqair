@@ -622,7 +622,7 @@ impl<P> Core<P> {
                         info: cols.col(line, Col::Info),
                         format: cols.rest(line),
                     };
-                    text_rlen(&columns, file, pos0)
+                    text_rlen(&columns, file, contig, pos0)
                 };
                 if let Some(step) = query_step(Some(q), group, contig.tid(), pos0, rlen) {
                     return Ok(step);

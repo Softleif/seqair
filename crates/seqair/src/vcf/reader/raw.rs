@@ -260,7 +260,7 @@ impl<'a> RawRecord<'a> {
                     info: cols.col(line, Col::Info),
                     format: cols.rest(line),
                 };
-                span_of(pos0, text_rlen(&rlen, self.file, pos0))
+                span_of(pos0, text_rlen(&rlen, self.file, self.contig, pos0))
             })
             .map_err(|e| self.error(e))
     }

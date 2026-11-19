@@ -13,6 +13,7 @@ use super::keys::FieldTable;
 use super::text_value::parse_i32;
 use crate::io::text_scan::{for_each_byte, for_each_info_entry};
 use crate::vcf::error::KeyKind;
+use crate::vcf::record_encoder::ContigId;
 use seqair_types::SmallVec;
 use std::ops::ControlFlow;
 
@@ -61,8 +62,13 @@ fn svlen_on_ref(alt: &[u8]) -> bool {
 /// not parse, and anything outside `i32` or in BCF's reserved band below
 /// `i32::MIN + 8` (htslib stores those as missing) count as 0.
 fn int_or_zero(token: &[u8]) -> i64 {
+    int(token).unwrap_or(0)
+}
+
+/// [`int_or_zero`], with `None` for what counts as 0 there.
+fn int(token: &[u8]) -> Option<i64> {
     let reserved = i32::MIN.saturating_add(8);
-    parse_i32(token).ok().flatten().filter(|&v| v >= reserved).map_or(0, i64::from)
+    parse_i32(token).ok().flatten().filter(|&v| v >= reserved).map(i64::from)
 }
 
 /// The columns [`text_rlen`] reads.
@@ -75,9 +81,22 @@ pub(crate) struct RlenColumns<'a> {
 }
 
 // r[impl vcf_values.rlen+2]
-/// The reference length htslib gives a VCF text record at 0-based `pos`.
-pub(crate) fn text_rlen(cols: &RlenColumns<'_>, file: &FileShared, pos: i64) -> i64 {
-    rlen(cols, file.rlen_keys, pos)
+// r[impl vcf_values.rlen.end_before_pos]
+/// The reference length htslib gives a VCF text record on `contig` at
+/// 0-based `pos`; an END before POS is warned of, once per file.
+pub(crate) fn text_rlen(
+    cols: &RlenColumns<'_>,
+    file: &FileShared,
+    contig: &ContigId,
+    pos: i64,
+) -> i64 {
+    let (rlen, end) = rlen_and_end(cols, file.rlen_keys, pos);
+    if let Some(end) = end
+        && end <= pos
+    {
+        file.warn_end_before_pos(contig, pos, end);
+    }
+    rlen
 }
 
 // r[impl vcf_values.rlen+2]
@@ -85,6 +104,12 @@ pub(crate) fn text_rlen(cols: &RlenColumns<'_>, file: &FileShared, pos: i64) -> 
 /// [`text_rlen`] for a header's `keys`: the writer's entry point, so that what
 /// it indexes a record under is what a reader computes for it.
 pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
+    rlen_and_end(cols, keys, pos).0
+}
+
+/// [`rlen`], and the first END as read (`None` if absent, missing or not
+/// one integer).
+fn rlen_and_end(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> (i64, Option<i64>) {
     let len_ref = i64::try_from(cols.reference.len()).unwrap_or(i64::MAX);
     // Bit `a` for ALT `a` (REF is 0), as htslib's `svlenals`.
     let mut sv_alts: SmallVec<u64, 2> = SmallVec::new();
@@ -118,7 +143,7 @@ pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
         sv_alts.get(bit / 64).is_some_and(|w| w & (1 << (bit % 64)) != 0)
     };
     let use_svlen = keys.svlen && sv_alts.iter().any(|&w| w != 0);
-    let (mut end, mut svlen) = (0i64, None::<i64>);
+    let (mut end_read, mut svlen) = (None::<i64>, None::<i64>);
     if (keys.end || use_svlen) && cols.info != b"." {
         let (mut seen_end, mut seen_svlen) = (false, false);
         let _ = for_each_info_entry(cols.info, |e| -> ControlFlow<()> {
@@ -127,7 +152,7 @@ pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
             if keys.end && !seen_end && key == b"END" {
                 seen_end = true;
                 // A vector, or no value, holds no single END.
-                end = value.filter(|v| !v.contains(&b',')).map_or(0, int_or_zero);
+                end_read = value.filter(|v| !v.contains(&b',')).and_then(int);
             } else if use_svlen && !seen_svlen && key == b"SVLEN" {
                 seen_svlen = true;
                 let mut longest = 0i64;
@@ -149,6 +174,7 @@ pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
             }
         });
     }
+    let end = end_read.unwrap_or(0);
     let after = |e: i64, d: i64| if e > pos { e.saturating_sub(pos).saturating_sub(d) } else { 0 };
     let len = match svlen {
         Some(l) if l != 0 => l,
@@ -164,7 +190,7 @@ pub(crate) fn rlen(cols: &RlenColumns<'_>, keys: RlenKeys, pos: i64) -> i64 {
     };
     let end_fmtlen = pos.saturating_add(len);
     let hpos = end.max(end_svlen).max(end_fmtlen);
-    hpos.saturating_sub(pos).max(len_ref)
+    (hpos.saturating_sub(pos).max(len_ref), end_read)
 }
 
 /// The largest FORMAT LEN value of any sample (0 if none is positive);
@@ -224,6 +250,86 @@ mod tests {
         assert_eq!(keys(RlenKeys::from_header(&silent)), (false, false, false));
         assert_eq!(keys(RlenKeys::new(&FieldTable::new(&silent, false))), (false, false, false));
         assert_eq!(keys(RlenKeys::new(&FieldTable::new(&silent, true))), (true, true, true));
+    }
+
+    /// Each `warn!`'s fields, `name=value` joined by spaces.
+    #[derive(Default)]
+    struct Warnings(std::sync::Mutex<Vec<String>>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    use std::fmt::Write;
+                    write!(self.0, "{}={v:?} ", f.name()).unwrap();
+                }
+            }
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    // r[verify vcf_values.rlen.end_before_pos]
+    /// An END before POS leaves the span at REF's length and is warned of
+    /// once per file, with the path; an END at POS is a one-base span, and
+    /// of two ENDs the first counts.
+    #[test]
+    fn an_end_before_pos_is_ignored_and_warned_of_once() {
+        use crate::vcf::{Locus, VcfFile, VcfPos};
+        use std::io::Write;
+        let header = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n\
+            ##INFO=<ID=END,Number=1,Type=Integer,Description=\"e\">\n\
+            #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+        let spans = |records: &[&str]| {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            write!(tmp, "{header}{}", records.join("")).unwrap();
+            let warnings = std::sync::Arc::new(Warnings::default());
+            let file = VcfFile::open(tmp.path()).unwrap();
+            let spans: Vec<(VcfPos, VcfPos)> =
+                tracing::subscriber::with_default(std::sync::Arc::clone(&warnings), || {
+                    let reader = file.reader::<Locus>().open().unwrap();
+                    reader.into_iter().map(|l| l.map(|l| (l.start(), l.end())).unwrap()).collect()
+                });
+            let at = |p: VcfPos| match p {
+                VcfPos::At(p) => p.as_u32(),
+                VcfPos::Telomere => 0,
+            };
+            let spans: Vec<(u32, u32)> = spans.into_iter().map(|(s, e)| (at(s), at(e))).collect();
+            let warnings = warnings.0.lock().unwrap().clone();
+            (spans, warnings, tmp)
+        };
+        let (got, warnings, tmp) = spans(&[
+            "chr1\t20\t.\tA\t<DEL>\t.\t.\tEND=5\n",
+            "chr1\t30\t.\tAC\t<DEL>\t.\t.\tEND=29\n",
+            "chr1\t40\t.\tA\t<DEL>\t.\t.\tEND=40\n",
+        ]);
+        assert_eq!(got, [(20, 20), (30, 31), (40, 40)]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("chrom=chr1 pos=20 end=5 "), "{w}");
+        assert!(w.contains(&format!("{:?}", Some(tmp.path()))), "{w}");
+
+        let (got, warnings, _) = spans(&[
+            "chr1\t20\t.\tA\t<DEL>\t.\t.\tEND=50;END=5\n",
+            "chr1\t30\t.\tA\t<DEL>\t.\t.\tEND=5;END=50\n",
+        ]);
+        assert_eq!(got, [(20, 50), (30, 30)]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("pos=30 end=5 "), "{warnings:?}");
     }
 
     #[test]

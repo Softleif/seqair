@@ -144,6 +144,7 @@ pub(crate) struct FileShared {
     pub(crate) rlen_keys: RlenKeys,
     warned_duplicate: AtomicBool,
     warned_undeclared: AtomicBool,
+    warned_end_before_pos: AtomicBool,
 }
 
 // r[impl vcf_reader.debug]
@@ -219,6 +220,22 @@ impl FileShared {
             );
         }
     }
+
+    // r[impl vcf_values.rlen.end_before_pos]
+    /// Log, once per file, that a record at 0-based `pos` has an INFO `end`
+    /// (1-based) before its POS, which its span ignores.
+    pub(crate) fn warn_end_before_pos(&self, contig: &ContigId, pos: i64, end: i64) {
+        if !self.warned_end_before_pos.swap(true, Ordering::Relaxed) {
+            warn!(
+                chrom = %contig.name(),
+                pos = pos.saturating_add(1),
+                end,
+                path = ?self.path(),
+                "a record's INFO/END is before its POS; its span ignores END \
+                 (further such records in this file are not reported)"
+            );
+        }
+    }
 }
 
 impl VcfFile {
@@ -281,6 +298,7 @@ impl VcfFile {
             header_lines,
             warned_duplicate: AtomicBool::new(false),
             warned_undeclared: AtomicBool::new(false),
+            warned_end_before_pos: AtomicBool::new(false),
             format,
             source,
             header,
