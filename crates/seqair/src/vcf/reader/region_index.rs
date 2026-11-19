@@ -5,7 +5,7 @@ use super::error::VcfReadError;
 use super::file::ContigTable;
 use crate::bam::bgzf::VirtualOffset;
 use crate::bam::csi_index::CsiIndex;
-use crate::bam::index::{AlignmentIndex, BamIndex, Chunk, decompress_bgzf_file};
+use crate::bam::index::{AlignmentIndex, BamIndex, Chunk, decompress_bgzf_file, tabix_names};
 use crate::vcf::header::VcfHeader;
 use seqair_types::Pos0;
 use tracing::warn;
@@ -24,7 +24,7 @@ pub(crate) struct VcfIndex {
 fn tabix_aux_names(aux: &[u8]) -> Option<Vec<Vec<u8>>> {
     let l_nm = aux.get(24..28)?.first_chunk::<4>().map(|b| i32::from_le_bytes(*b))?;
     let names = aux.get(28..28usize.checked_add(usize::try_from(l_nm).ok()?)?)?;
-    Some(names.split(|&b| b == 0).filter(|n| !n.is_empty()).map(<[u8]>::to_vec).collect())
+    Some(tabix_names(names))
 }
 
 impl VcfIndex {
@@ -136,6 +136,12 @@ mod tests {
         aux.extend_from_slice(b"c1\0chr2\0");
         assert_eq!(tabix_aux_names(&aux), Some(vec![b"c1".to_vec(), b"chr2".to_vec()]));
         assert_eq!(tabix_aux_names(&[]), None);
+        // r[verify tabix.names]
+        // An empty name numbers a reference too.
+        let mut aux = vec![0u8; 24];
+        aux.extend_from_slice(&9i32.to_le_bytes());
+        aux.extend_from_slice(b"c1\0\0chr2\0");
+        assert_eq!(tabix_aux_names(&aux), Some(vec![b"c1".to_vec(), vec![], b"chr2".to_vec()]));
         assert_eq!(tabix_aux_names(aux.get(..30).unwrap_or_default()), None);
     }
 }

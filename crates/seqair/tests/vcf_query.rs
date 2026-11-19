@@ -620,3 +620,96 @@ fn a_record_error_in_a_query_says_where_it_is() {
     assert_eq!((at.number, at.line), (Some(9), Some(13)));
     assert!(e.to_string().starts_with("malformed record 9 (line 13) at chr1:20 in "), "{e}");
 }
+
+/// `(CHROM, POS)` of each record a query of `contig` yields.
+fn query_positions(file: &VcfFile, contig: &str) -> Vec<String> {
+    let mut q = file.reader::<Locus>().query(Region::contig(contig)).unwrap();
+    let mut out = Vec::new();
+    while let Some(locus) = q.next_record().unwrap() {
+        let VcfPos::At(pos) = locus.start() else { panic!("telomere") };
+        out.push(format!("{}\t{pos}", locus.contig().name()));
+    }
+    out
+}
+
+// r[verify tabix.names]
+/// htslib's `tabix` names a line with an empty CHROM by an empty name; the
+/// sequences after it keep their reference numbers (TBI and CSI), and a
+/// query of each equals `tabix`'s.
+#[test]
+fn an_empty_tabix_name_numbers_a_reference() {
+    let Some(tabix) = bcftools_bin().and_then(tabix_bin) else { return };
+    let text = "##fileformat=VCFv4.3\n##contig=<ID=chr1>\n##contig=<ID=chr2>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\t.\tA\tT\t.\t.\t.\n\t15\t.\tA\tT\t.\t.\t.\n\
+                chr2\t20\t.\tA\tT\t.\t.\t.\nchr2\t30\t.\tA\tT\t.\t.\t.\n";
+    let dir = tempfile::tempdir().unwrap();
+    for csi in [false, true] {
+        let path = dir.path().join(format!("x{csi}.vcf.gz"));
+        let mut w = seqair::io::BgzfWriter::new(Vec::new());
+        w.write_all(text.as_bytes()).unwrap();
+        std::fs::write(&path, w.finish().unwrap()).unwrap();
+        let mut index = Command::new(&tabix);
+        index.args(["-p", "vcf"]);
+        if csi {
+            index.arg("-C");
+        }
+        assert!(index.arg(&path).status().unwrap().success());
+        let file = VcfFile::open(&path).unwrap();
+        for contig in ["chr1", "chr2"] {
+            let out = Command::new(&tabix).arg(&path).arg(contig).output().unwrap();
+            let want: Vec<String> = String::from_utf8(out.stdout)
+                .unwrap()
+                .lines()
+                .map(|l| l.split('\t').take(2).collect::<Vec<_>>().join("\t"))
+                .collect();
+            assert!(!want.is_empty());
+            assert_eq!(query_positions(&file, contig), want, "csi={csi} {contig}");
+        }
+    }
+}
+
+// r[verify tabix.names]
+/// A header whose contig dictionary has holes (`IDX` gaps): seqair's TBI
+/// and CSI (VCF.gz) and CSI (BCF) number the contigs after a hole as
+/// bcftools reads them, and queries equal `bcftools view -r`.
+#[test]
+fn contig_dictionary_holes_keep_the_index_numbering() {
+    let Some(bin) = bcftools_bin() else { return };
+    let header = VcfHeader::parse(
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=1000,IDX=0>\n\
+         ##contig=<ID=chr3,length=1000,IDX=2>\n##contig=<ID=chr4,length=1000,IDX=5>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for (format, kind) in [
+        (OutputFormat::VcfGz, IndexKind::Tbi),
+        (OutputFormat::VcfGz, IndexKind::Csi),
+        (OutputFormat::Bcf, IndexKind::Csi),
+    ] {
+        let mut out = Vec::new();
+        let mut w = Writer::new(&mut out, format).index_kind(kind).write_header(&header).unwrap();
+        // chr1 has no records: the first indexed contig comes after it.
+        for (contig, pos) in [("chr3", 10), ("chr3", 20), ("chr4", 30)] {
+            let id = header.contig(contig).unwrap();
+            let alleles = Alleles::complex("A", ["T"]);
+            let enc = w.begin_record(&id, Pos1::new(pos).unwrap(), &alleles, None).unwrap();
+            enc.filter_pass().emit().unwrap();
+        }
+        let (_, index) = w.finish().unwrap();
+        let index = index.unwrap();
+        let ext = if format == OutputFormat::Bcf { "bcf" } else { "vcf.gz" };
+        let path = dir.path().join(format!("x{kind:?}.{ext}"));
+        std::fs::write(&path, &out).unwrap();
+        index.write_to_path(format!("{}.{}", path.display(), index.suffix())).unwrap();
+        let file = VcfFile::open(&path).unwrap();
+        for contig in ["chr1", "chr3", "chr4"] {
+            let want: Vec<String> = bcftools_keys(bin, "-r", contig, &path)
+                .iter()
+                .map(|k| k.split('\t').take(2).collect::<Vec<_>>().join("\t"))
+                .collect();
+            assert_eq!(query_positions(&file, contig), want, "{format:?} {kind:?} {contig}");
+        }
+    }
+}

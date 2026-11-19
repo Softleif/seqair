@@ -198,6 +198,18 @@ pub struct QueryChunks {
 /// are classified as "distant" by `query_split`.
 const CACHE_LEVEL_THRESHOLD: u8 = 2;
 
+// r[impl tabix.names]
+/// The names of a tabix `names` block (TBI header or CSI tabix aux), in
+/// reference order: an empty name numbers a reference like any other.
+pub(crate) fn tabix_names(block: &[u8]) -> Vec<Vec<u8>> {
+    let mut names: Vec<Vec<u8>> = block.split(|&b| b == 0).map(<[u8]>::to_vec).collect();
+    // The rest after the final NUL.
+    if names.last().is_some_and(Vec::is_empty) {
+        names.pop();
+    }
+    names
+}
+
 impl BamIndex {
     // r[impl bam.index.bai_magic]
     // r[impl bam.index.bai_parse]
@@ -298,8 +310,7 @@ impl BamIndex {
             .get(pos..pos.wrapping_add(l_nm))
             .ok_or(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" })?;
         pos = pos.wrapping_add(l_nm);
-        let names: Vec<Vec<u8>> =
-            names.split(|&b| b == 0).filter(|n| !n.is_empty()).map(<[u8]>::to_vec).collect();
+        let names = tabix_names(names);
         if names.len() != n_ref {
             return Err(BaiError::TabixNameCount { names: names.len(), n_ref });
         }
