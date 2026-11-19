@@ -8,8 +8,10 @@
 //!
 //! Patterns (seqair): `count` `locus` `site` `info0` (INFO copied, never
 //! indexed) `info1` `site_info1` `filter_info2` (two INFO keys on PASS
-//! records) `sample` (`.sample(SAMPLE)`) `only_sample` `column` (GT of every
-//! sample) `full` `all` (every value, decoded dynamically).
+//! records) `convert` (locus, FILTER, two INFO keys, GT and `FMT` of the
+//! only sample: rastair's `convert --bed`) `sample` (`.sample(SAMPLE)`)
+//! `only_sample` `column` (GT of every sample) `full` `all` (every value,
+//! decoded dynamically).
 #![allow(
     clippy::unwrap_used,
     clippy::unwrap_in_result,
@@ -172,6 +174,19 @@ fn seqair(pattern: &str, path: &str, threads: usize) -> (u64, u64) {
             }
             Ok(x)
         }),
+        "convert" => {
+            seqair_run::<(Locus, Site, Info, OnlySample)>(&file, t, None, |(l, si, i, s)| {
+                let mut x = start(l.start()) + start(l.end()) + u64::from(pass(si));
+                x += touch_info(i, i1.as_ref().unwrap())? + touch_info(i, i2.as_ref().unwrap())?;
+                if let Some(gt) = &gt {
+                    x += gt_sum(s.get(gt)?);
+                }
+                if let Some(f) = &fmt {
+                    x += s.get(f)?.map_or(0, |v| v as u64);
+                }
+                Ok(x)
+            })
+        }
         "only_sample" => seqair_run::<(Locus, OnlySample)>(&file, t, None, |(l, s)| {
             let mut x = start(l.start());
             if let Some(gt) = &gt {
@@ -274,6 +289,19 @@ fn htslib(pattern: &str, path: &str, threads: usize) -> (u64, u64) {
                     if let Ok(v) = rec.format_shared_buffer(f.as_bytes(), &mut buf).integer() {
                         x += v.get(s).and_then(|v| v.first()).map_or(0, |&v| v as u64);
                     }
+                }
+                x
+            }
+            "convert" => {
+                let mut x = rec.pos() as u64 + 1 + rec.end() as u64;
+                x += u64::from(rec.has_filter(&pass));
+                x += hts_info(&rec, i1.as_ref().unwrap(), &mut buf);
+                x += hts_info(&rec, i2.as_ref().unwrap(), &mut buf);
+                x += hts_gt_sum(&rec.genotypes_shared_buffer(&mut buf).unwrap().get(0));
+                if let Some(f) = &fmt
+                    && let Ok(v) = rec.format_shared_buffer(f.as_bytes(), &mut buf).integer()
+                {
+                    x += v.first().and_then(|v| v.first()).map_or(0, |&v| v as u64);
                 }
                 x
             }
