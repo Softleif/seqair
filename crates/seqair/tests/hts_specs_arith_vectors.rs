@@ -3,6 +3,7 @@
 //! the arithmetic coder), checked against the gzip originals as the vectors'
 //! README describes. Every file in both directories is decoded, so a vector
 //! added upstream cannot be missed.
+#![cfg(feature = "cram")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
 
 use std::io::Read;

@@ -3,12 +3,9 @@
 //! [`Readers::fetch_base_seq`] for reference sequence. [`IndexedReader`] is the bare alignment
 //! handle when no FASTA is needed. Both types are forkable for multi-threaded use.
 
-use crate::{
-    bam::BamError,
-    cram::{reader::CramError, stream::CramStreamError},
-    fasta::FastaError,
-    sam::reader::SamError,
-};
+#[cfg(feature = "cram")]
+use crate::cram::{reader::CramError, stream::CramStreamError};
+use crate::{bam::BamError, fasta::FastaError, sam::reader::SamError};
 use seqair_types::SmolStr;
 use std::path::PathBuf;
 
@@ -39,8 +36,10 @@ pub use indexed::{
 pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
+#[cfg(feature = "cram")]
+pub use stream::CramInput;
 pub use stream::{
-    AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, CramInput, Records, StreamFormat,
+    AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, Records, StreamFormat,
 };
 pub use stream_pileup::{
     DEFAULT_WINDOW_LEN, StreamColumn, StreamPileup, StreamPileupError, WindowBudget,
@@ -65,6 +64,7 @@ pub enum ReaderError {
         source: SamError,
     },
 
+    #[cfg(feature = "cram")]
     #[error("CRAM reader error")]
     Cram {
         #[from]
@@ -72,6 +72,7 @@ pub enum ReaderError {
     },
 
     /// A CRAM raw region query failed (`r[cram.query_raw.errors]`).
+    #[cfg(feature = "cram")]
     #[error("CRAM region query error")]
     CramStream {
         #[from]

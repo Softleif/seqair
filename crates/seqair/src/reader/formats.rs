@@ -79,6 +79,12 @@ pub enum FormatDetectionError {
     )]
     CramRequiresFasta,
 
+    #[error(
+        "{path} is CRAM, but seqair was built without its `cram` feature; \
+         enable it or convert to BAM with `samtools view -b`"
+    )]
+    CramDisabled { path: PathBuf },
+
     #[error("file too short to determine format ({len} bytes)")]
     FileTooShort { path: PathBuf, len: u64 },
 

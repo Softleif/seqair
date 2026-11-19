@@ -514,6 +514,7 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
     let _: FetchCounts = counts_none;
 }
 
+#[cfg(feature = "cram")]
 // r[verify cram.fetch_into_customized.push_time+2]
 #[test]
 fn cram_fetch_into_customized_applies_filter_at_push_time() {

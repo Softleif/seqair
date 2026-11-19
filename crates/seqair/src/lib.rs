@@ -8,6 +8,14 @@
 //! single-pass index co-production (see [`vcf`] for examples), a BAM writer
 //! ([`bam::BamWriter`]) and a CRAM 3.0/3.1 writer ([`cram::writer`]), both
 //! of which co-produce their index.
+//!
+//! # Cargo features
+//!
+//! - `cram` (default): the CRAM reader and its codecs' dependencies. Without
+//!   it the unified readers refuse CRAM input with a typed error.
+//! - `log`: forwards `tracing` events to the `log` crate, for applications
+//!   that install a `log` logger and no `tracing` subscriber.
+//! - `serde`: `serde` for the `seqair-types` values.
 
 // BAM, CRAM and BCF are little-endian on disk, and the readers and writers
 // view CIGARs, qualities and integer arrays in place as their native types.
@@ -15,6 +23,7 @@
 compile_error!("seqair supports little-endian targets only");
 
 pub mod bam;
+#[cfg(feature = "cram")]
 pub mod cram;
 pub mod fasta;
 pub mod io;

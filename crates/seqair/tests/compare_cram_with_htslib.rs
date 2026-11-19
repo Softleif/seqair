@@ -1,6 +1,7 @@
 //! Full record-level comparison of CRAM decoding against htslib.
 //! Fetches the same regions from BAM (via htslib) and CRAM (via seqair),
 //! CRAM v3.0 and v3.1 to ensure codec correctness across versions.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

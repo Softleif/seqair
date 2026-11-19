@@ -3,14 +3,15 @@ use super::fields::{Complete, Partial, PartialRecord, RecordFields, RecordKind};
 use super::formats::{self, Format, FormatDetectionError};
 use super::readers::Readers;
 use super::resolve::Tid;
+#[cfg(feature = "cram")]
+use crate::cram::{
+    reader::{CramRawQuery, IndexedCramReader},
+    slice::Plan,
+};
 use crate::{
     bam::{
         BamHeader, IndexedBamReader, RawBamRecord, RawQuery, ReferenceStats,
         record_store::{CustomizeRecordStore, RecordStore},
-    },
-    cram::{
-        reader::{CramRawQuery, IndexedCramReader},
-        slice::Plan,
     },
     fasta::IndexedFastaReader,
     sam::reader::{IndexedSamReader, SamRawQuery},
@@ -105,6 +106,7 @@ impl AsRef<Path> for IndexPath {
 pub enum IndexedReader<R: Read + Seek = std::fs::File> {
     Bam(IndexedBamReader<R>),
     Sam(IndexedSamReader<R>),
+    #[cfg(feature = "cram")]
     Cram(Box<IndexedCramReader<R>>),
 }
 
@@ -117,6 +119,7 @@ impl<R: Read + Seek> std::fmt::Debug for IndexedReader<R> {
         match self {
             Self::Bam(r) => r.fmt(f),
             Self::Sam(r) => r.fmt(f),
+            #[cfg(feature = "cram")]
             Self::Cram(r) => r.fmt(f),
         }
     }
@@ -127,6 +130,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => r.header(),
             Self::Sam(r) => r.header(),
+            #[cfg(feature = "cram")]
             Self::Cram(r) => r.header(),
         }
     }
@@ -139,6 +143,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => Some(r.shared().index().reference_stats()),
             Self::Sam(r) => Some(r.shared().index().reference_stats()),
+            #[cfg(feature = "cram")]
             Self::Cram(_) => None,
         }
     }
@@ -150,6 +155,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => r.shared().index().unplaced_unmapped(),
             Self::Sam(r) => r.shared().index().unplaced_unmapped(),
+            #[cfg(feature = "cram")]
             Self::Cram(_) => None,
         }
     }
@@ -161,6 +167,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => r.estimate_region_bytes(tid, span),
             Self::Sam(r) => r.estimate_region_bytes(tid, span),
+            #[cfg(feature = "cram")]
             Self::Cram(r) => r.estimate_region_bytes(tid, span),
         }
     }
@@ -198,6 +205,7 @@ impl<R: Read + Seek> IndexedReader<R> {
             Self::Sam(r) => {
                 r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
             }
+            #[cfg(feature = "cram")]
             Self::Cram(r) => {
                 r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
             }
@@ -220,6 +228,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => Ok(RawRegionQuery::Bam(r.query_raw(tid, span)?)),
             Self::Sam(r) => Ok(RawRegionQuery::Sam(r.query_raw(tid, span)?)),
+            #[cfg(feature = "cram")]
             Self::Cram(r) => Ok(RawRegionQuery::Cram(r.query_raw(tid, span))),
         }
     }
@@ -232,6 +241,7 @@ impl<R: Read + Seek> IndexedReader<R> {
 pub enum RawRegionQuery<'r, R: Read + Seek = std::fs::File> {
     Bam(RawQuery<'r, R>),
     Sam(SamRawQuery<'r, R>),
+    #[cfg(feature = "cram")]
     Cram(CramRawQuery<'r, R>),
 }
 
@@ -240,6 +250,7 @@ impl<R: Read + Seek> RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => q.header(),
             Self::Sam(q) => q.header(),
+            #[cfg(feature = "cram")]
             Self::Cram(q) => q.header(),
         }
     }
@@ -254,6 +265,7 @@ impl<R: Read + Seek> RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => Ok(q.read_record(record)?),
             Self::Sam(q) => Ok(q.read_record(record)?),
+            #[cfg(feature = "cram")]
             Self::Cram(q) => Ok(q.read_record(record)?),
         }
     }
@@ -266,6 +278,7 @@ impl<R: Read + Seek> Iterator for RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
             Self::Sam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
+            #[cfg(feature = "cram")]
             Self::Cram(q) => q.next().map(|r| r.map_err(ReaderError::from)),
         }
     }
@@ -390,6 +403,7 @@ impl IndexedReader<std::fs::File> {
         match self {
             Self::Bam(r) => Ok(Self::Bam(r.fork()?)),
             Self::Sam(r) => Ok(Self::Sam(r.fork()?)),
+            #[cfg(feature = "cram")]
             Self::Cram(r) => Ok(Self::Cram(Box::new(r.fork()?))),
         }
     }
@@ -425,6 +439,10 @@ impl<K: RecordKind> IndexedReaderBuilder<K> {
         self
     }
 
+    #[cfg_attr(
+        not(feature = "cram"),
+        expect(unused_variables, reason = "only CRAM reads the reference")
+    )]
     fn open_reader(self) -> Result<(IndexedReader, RecordFields), ReaderError> {
         let Self { path, reference, index, fields, .. } = self;
         let reader = match formats::detect(&path)? {
@@ -444,6 +462,7 @@ impl<K: RecordKind> IndexedReaderBuilder<K> {
                 reader.set_aux_tags(fields.aux().clone());
                 IndexedReader::Sam(reader)
             }
+            #[cfg(feature = "cram")]
             Format::Cram => {
                 // r[impl cram.stream.fields.reference_optional]
                 // `query_raw` generates MD/NM as htslib does, which reads the
@@ -461,6 +480,9 @@ impl<K: RecordKind> IndexedReaderBuilder<K> {
                 )?;
                 IndexedReader::Cram(Box::new(reader))
             }
+            // r[impl vcf_reader.features]
+            #[cfg(not(feature = "cram"))]
+            Format::Cram => return Err(FormatDetectionError::CramDisabled { path }.into()),
         };
         Ok((reader, fields))
     }
@@ -592,7 +614,9 @@ impl PartialIndexedReader<std::fs::File> {
         fasta: IndexedFastaReader,
         customize: E,
     ) -> Result<Readers<E>, ReaderError> {
+        #[cfg_attr(not(feature = "cram"), expect(unused_mut, reason = "only CRAM takes the FASTA"))]
         let mut inner = self.inner;
+        #[cfg(feature = "cram")]
         if let IndexedReader::Cram(cram) = &mut inner {
             cram.ensure_reference(&fasta)?;
         }

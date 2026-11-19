@@ -4,6 +4,7 @@
 //! The originals are ASCII phred+33; htscodecs' `fqzcomp_qual` test tool,
 //! which made the vectors, subtracts 33 before compressing (as CRAM stores
 //! qualities), so the decoded bytes are the originals minus 33.
+#![cfg(feature = "cram")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
 
 use std::{fs, io::Read, path::PathBuf};

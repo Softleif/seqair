@@ -347,12 +347,32 @@ fn readers_open_sam() {
 // r[verify unified.readers_open]
 // r[verify unified.detect_format]
 // r[verify unified.fork_cram]
+#[cfg(feature = "cram")]
 #[test]
 fn readers_open_cram() {
     let readers =
         Readers::open_customized(test_cram_path(), test_fasta_path(), RejectUnmapped).unwrap();
     assert!(matches!(readers.alignment(), &IndexedReader::Cram(_)));
     assert!(readers.header().target_count() > 0);
+}
+
+// r[verify vcf_reader.features]
+/// Without the `cram` feature a CRAM is still recognised, and refused by
+/// name, from a path and from a stream.
+#[cfg(not(feature = "cram"))]
+#[test]
+fn cram_is_refused_without_its_feature() {
+    use seqair::reader::{
+        AlignmentStream, AlignmentStreamError, FormatDetectionError, ReaderError,
+    };
+    let err = IndexedReader::open(test_cram_path()).unwrap_err();
+    assert!(
+        matches!(err, ReaderError::Format { source: FormatDetectionError::CramDisabled { .. } }),
+        "{err:?}"
+    );
+    let bytes = std::fs::read(test_cram_path()).unwrap();
+    let err = AlignmentStream::from_reader(std::io::Cursor::new(bytes)).unwrap_err();
+    assert!(matches!(err, AlignmentStreamError::CramDisabled), "{err:?}");
 }
 
 // r[verify unified.readers_fork]

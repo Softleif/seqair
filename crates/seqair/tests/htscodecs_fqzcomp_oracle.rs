@@ -5,6 +5,7 @@
 //! built-in strategies, and with generated parameter sets that reach what the
 //! strategies never pick (several parameter blocks, custom tables, qtab,
 //! selector tables) — and our decoder must give back the input.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

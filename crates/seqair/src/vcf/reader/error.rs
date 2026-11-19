@@ -8,6 +8,7 @@ use super::text_value::TextValueError;
 use super::values::MissingElement;
 use crate::bam::bgzf::{BgzfError, VirtualOffset};
 use crate::bam::csi_index::CsiError;
+use crate::bam::index::BaiError;
 pub use crate::vcf::error::KeyKind;
 use crate::vcf::error::VcfHeaderError;
 use seqair_types::SmolStr;
@@ -61,6 +62,24 @@ pub enum VcfReadError {
 
     #[error("Fields::needs did not ask for the {section} of records")]
     NotRequested { section: RecordSection },
+
+    // Region queries (`docs/spec/2-vcf-1-reader.md`, "Region queries").
+    #[error(transparent)]
+    Tabix(#[from] BaiError),
+
+    #[error("the index is neither TBI nor CSI")]
+    UnknownIndexFormat,
+
+    // r[impl vcf_reader.file+2]
+    #[error("the file has no index; queries and partitions need a .csi or .tbi next to it")]
+    NoIndex,
+
+    // r[impl vcf_reader.query.contigs+2]
+    #[error("contig {name} is neither declared by the header nor listed by the index")]
+    UnknownContig { name: SmolStr },
+
+    #[error(transparent)]
+    Region(#[from] super::region::RegionError),
 }
 
 /// Where a malformed record is, as far as the reader knows.

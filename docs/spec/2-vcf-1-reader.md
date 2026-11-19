@@ -11,8 +11,8 @@ What a reader decodes is chosen by a `Fields` type ([VCF/BCF Fields](./2-vcf-2-f
 r[vcf_reader.formats]
 The reader MUST read plain-text VCF, BGZF-compressed VCF and BCF 2.2 (BGZF-framed, at any compression level including 0). The format MUST be detected from the content — BGZF magic, then the decompressed `BCF\x02\x02` magic or `##fileformat=` — never from the file extension. A gzip stream that is not BGZF MUST be rejected with a typed error that suggests `bgzip`. BCF 2.1 (`BCF\x02\x01`) MUST be rejected with a typed error.
 
-r[vcf_reader.file]
-`VcfFile::open(path)` MUST parse the header (`r[vcf_header.parse]`) and locate an index by the names of `r[index.locate]` (VCF: `csi`, then `tbi`; BCF: `csi`). A missing index MUST NOT fail the open: sequential reading works without one, and only a query fails, with `VcfReadError::NoIndex`. An index that exists but does not parse MUST fail the open.
+r[vcf_reader.file+2]
+`VcfFile::open(path)` MUST parse the header (`r[vcf_header.parse]`) and locate an index by the names of `r[index.locate]` (VCF: `csi`, then `tbi`; BCF: `csi`). `VcfFile::from_bytes(data, index)` takes the index's bytes and MUST tell TBI from CSI by content (BGZF-compressed or not). A missing index MUST NOT fail the open: sequential reading works without one, `has_index()` is `false`, and only a query or `partitions` fails, with `VcfReadError::NoIndex`. An index that exists but does not parse MUST fail the open.
 
 r[vcf_reader.file.shared+2]
 `VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the field table (`r[vcf_reader.field_table]`) and its text-key lookup (`r[vcf_values.text_resolution+2]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared+2]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
@@ -22,8 +22,8 @@ r[vcf_reader.file.shared+2]
 r[vcf_reader.reader]
 `file.reader::<F: Fields>()` MUST return a builder whose `open()` (or `?` on the builder's terminal method) plans `F` against the header (`r[vcf_fields.plan]`) and yields a `Reader<F>` positioned at the first record. A `Reader<F>` owns its I/O state — its own file handle, BGZF state and block cache — and shares everything else with its `VcfFile`. `Reader<F>` MUST be `Send`; it need not be `Sync`. Opening a reader MUST cost one file open and no header or index parse.
 
-r[vcf_reader.reader.threads]
-The builder MUST offer `threads(n)` and `threads_in(n, pool)` for sequential reading, passed to the existing `BgzfStream` (`r[bgzf.stream.threads]`, `r[bgzf.stream.shared_pool]`), so a caller can bound total decompression threads across many readers. Region queries decompress on the calling thread.
+r[vcf_reader.reader.threads+2]
+The builder MUST offer `threads(n)` and `threads_in(n, pool)` with `n: NonZeroUsize`, passed to the existing `BgzfStream` (`r[bgzf.stream.threads]`, `r[bgzf.stream.shared_pool]`) for sequential reading, so a caller can bound total decompression threads across many readers; `n` above 255 is capped at 255. Queries and partitions accept the setting and decompress on the calling thread.
 
 r[vcf_reader.read_into+2]
 `Reader::read_into(&mut self, rec: &mut F) -> Result<bool, VcfReadError>` MUST be the primitive: it overwrites `rec` with the next record (`Fields::fill`) and returns `false` at end of input, leaving `rec` as it was. It MUST reuse `rec`'s allocations, so steady-state reading allocates nothing per record. The first record a caller owns comes from `Reader::read(&mut self) -> Result<Option<F>, VcfReadError>` (`Fields::new`); there is no empty record to read into, since a value of `F` always holds a record.
@@ -42,30 +42,43 @@ Any number of readers opened from one `VcfFile`, on any threads, MUST yield the 
 r[vcf_reader.contigs]
 Records name their contig with a `ContigId` from the file's contig table. The table MUST start as the header's contigs in dictionary order, followed by contigs only the index names (a tabix index lists its own sequence names). A VCF text record whose CHROM is in neither MUST be added to the table at the end, with a single `warn!` per file naming the first such contig. ClinVar ships without `##contig` lines, so rejecting them would refuse a common file. The table is append-only and shared by all readers of the file; a reader MUST look a CHROM up only when it differs from the previous record's, since sorted files change contig rarely. A BCF record whose contig index is not in the header's contig dictionary MUST fail with a typed error.
 
+## Regions
+
+r[vcf_reader.region]
+A `Region` MUST be a contig (`RegionContig::Name` or `RegionContig::Id`, from `&str`, `SmolStr` or `&ContigId`), a 0-based start, and an end that is either the contig's end (`RegionEnd::ContigEnd`) or an exclusive 0-based position (`RegionEnd::Before`). Its fields are private: `Region::contig(c)` names a whole contig, and `Region::new(c, range)` takes any `RangeBounds<P>` over a sealed `Coordinate` — `Pos0` ranges are 0-based (`a..b` half-open), `Pos1` ranges 1-based (`a..=b` inclusive, as VCF and region strings count). An unbounded start is the contig's first base, an unbounded end its last. `a..a` is an empty region; a start after the end MUST fail at construction with `RegionError::Reversed`. `Region` MUST convert from `&RegionString` (`chr1:100-200`, `chr1:100`, `chr1`) and parse from a string through `FromStr`.
+
 ## Region queries
 
-r[vcf_reader.query]
-`file.query::<F>(region)` MUST open a reader (`r[vcf_reader.reader]`) and position it on the region; `reader.query(region)` MUST do the same on an existing reader, reusing its file handle and block cache, for callers that issue many small queries on one thread. A region is a contig (`ContigId` or name) and an optional inclusive `Pos1` range. The query MUST stream through the existing `RegionBuf` ([RegionBuf](./3-region_buf.md)) with TBI or CSI chunks, and MUST yield records in file order.
+r[vcf_reader.query+2]
+The builder's `query(region)` (anything `Into<Region>`) MUST plan `F` like `open()` and yield a `Reader<F>` — the same type sequential reading returns — that reads only the region's records. `Reader::requery(region)` MUST point an existing reader at a new region, reusing its file handle and block cache, for callers that issue many small queries on one thread. The query MUST stream through the existing `RegionBuf` ([RegionBuf](./3-region_buf.md)) with the TBI or CSI chunks of the region, and MUST yield records in file order. A query on a file without an index MUST fail with `VcfReadError::NoIndex`.
 
-r[vcf_reader.query.overlap]
-A record MUST be yielded iff its reference span `[start, end]` (`r[vcf_values.rlen]`) overlaps the queried range. Since every record that starts inside the range overlaps it, the reader MUST compute the end only for records that start before the range — for VCF text that is the only case that needs an INFO/FORMAT scan.
+r[vcf_reader.query.overlap+2]
+Under `Match::Overlapping` (the default) a record MUST be yielded iff its reference span `[start, end]` (`r[vcf_values.rlen]`) overlaps the queried range; under `Match::StartsIn`, set with the builder's `matching(..)`, iff its start lies in the range. Since every record that starts inside the range overlaps it, the reader MUST compute the end only for records that start before the range — for VCF text that is the only case that needs an INFO/FORMAT scan. As tabix does, a record at POS 0 (the telomere) counts as starting at the first base, and a span MUST cover at least that base. The first record that starts at or past the last range of its contig ends the reading of that contig. `bcftools view -r` selects the same records as `Overlapping`, `-t` as `StartsIn`.
 
-r[vcf_reader.query.contigs]
-A contig the file declares but the index does not list (it has no records) MUST give an empty query, not an error. A contig the file does not know MUST fail with `VcfReadError::UnknownContig { name }`, a variant the caller can match to skip it. rastair and aardvark both carry workarounds for the first case today.
+r[vcf_reader.query.contigs+2]
+A contig the file declares but the index does not list (it has no records) MUST give an empty query, not an error. A contig name the file does not know MUST fail with `VcfReadError::UnknownContig { name }`, a variant the caller can match to skip it; a `ContigId` of another file's header MUST fail with `VcfReadError::ForeignKey`. rastair and aardvark both carry workarounds for the first case today.
 
-r[vcf_reader.query.many]
-`query_many(regions)` MUST sort the regions, merge overlapping and adjacent ones per contig, and yield every record at most once, in file order. Visiting regions one by one returns a record that spans two adjacent regions twice; `query_many` is the way to avoid that.
+r[vcf_reader.query.many+2]
+`query_many(regions)` and `Reader::requery_many(regions)` MUST sort the regions, merge overlapping and adjacent ones per contig, and yield every record at most once, in file order; under `StartsIn` a record is yielded iff it starts in the union. Visiting regions one by one returns a record that spans two adjacent regions twice; `query_many` is the way to avoid that.
+
+r[vcf_reader.query.options]
+`matching(..)` set on a builder that ends in `open()` or `partition(..)` MUST fail with `PlanError::UnusedOption`: sequential reading has no region, and a partition always reads `StartsIn`.
 
 ## Partitions
 
-r[vcf_reader.partitions]
-`file.partitions(n)` MUST tile every contig the index lists into about `n` disjoint `Partition`s with boundaries taken from the index, roughly equal in compressed bytes. Partitions are `Send + Sync + Clone` and carry their file's identity.
+r[vcf_reader.partitions+2]
+`file.partitions(n)` with `n: NonZeroUsize` MUST tile every contig the index lists into disjoint `Partition`s — whole regions from the contig's first base to its end, so a contig gets at least one — about `n` in all, with boundaries at the index's leaf-bin positions chosen so that partitions hold roughly equal compressed bytes. Partitions MUST come in file order, be `Send + Sync + Clone`, and name their contig by `ContigId`, so a partition carries its file's identity. `Partition::region()` returns its region.
 
-r[vcf_reader.partitions.ownership]
-`file.query_partition::<F>(&partition)` MUST yield exactly the records whose start lies inside the partition — not those that merely overlap it — so a record spanning a boundary belongs to one partition only. HiPhase guards against the double visit by hand ("we have already written though, so don't write it again"); partition reads make that guard unnecessary.
+r[vcf_reader.partitions.ownership+2]
+The builder's `partition(&partition)` MUST yield exactly the records whose start lies inside the partition (`Match::StartsIn`) — not those that merely overlap it — so a record spanning a boundary belongs to one partition only. HiPhase guards against the double visit by hand ("we have already written though, so don't write it again"); partition reads make that guard unnecessary.
 
-r[vcf_reader.partitions.complete]
-The records of all partitions of a file, concatenated in partition order, MUST equal one sequential read of the file's records on indexed contigs. A property test MUST check this — no record missing, none duplicated, order preserved — against a sequential read as the oracle, for random files and random `n`.
+r[vcf_reader.partitions.complete+2]
+The records of all partitions of a file, concatenated in partition order, MUST equal one sequential read of the file's records on indexed contigs. A property test MUST check this — no record missing, none duplicated, order preserved — against a sequential read as the oracle, for random files (VCF.gz with CSI and with TBI, BCF with CSI) and random `n`.
+
+## Streams
+
+r[vcf_reader.stream]
+`VcfStream::new(input)` (any `Read + Send + 'static`; `VcfStream::stdin()` for standard input) MUST read VCF, BGZF VCF or BCF from input that cannot seek — a pipe, standard input — detecting the format and parsing the header as `VcfFile` does without seeking or reading the input twice. `stream.reader::<F>()` MUST return a builder that ends in `open()` only — a stream has no index, so no query method exists on it — and yields the same `Reader<F>` a file gives; the stream is consumed by it.
 
 ## Undeclared fields
 
@@ -99,8 +112,11 @@ There MUST be fuzz targets for BCF records, VCF text records, header parsing, an
 
 ## Implementation
 
-r[vcf_reader.reuse_io]
-Decompression MUST go through the existing `BgzfStream` (sequential) and `RegionBuf` (queries); index parsing through `BamIndex::from_tabix_*` (generalised from a `BamHeader` to a contig-name lookup) and `CsiIndex`. The reader MUST NOT add a second BGZF or index implementation.
+r[vcf_reader.reuse_io+2]
+Decompression MUST go through the existing `BgzfStream` (sequential) and `RegionBuf` (queries); index parsing through `BamIndex`'s tabix parser and `CsiIndex`. A tabix index numbers only the sequences it lists, by name (the TBI header, or a CSI's tabix aux block), and those names MUST map to the file's contig table; a CSI without names (BCF) numbers the header's contig dictionary. The reader MUST NOT add a second BGZF or index implementation.
+
+r[vcf_reader.features]
+The `cram` cargo feature (default on) MUST gate the CRAM reader and its codec dependencies; without it the crate MUST build, the unified reader MUST refuse a CRAM file with a typed error, and every other format MUST behave as with it. The `log` feature MUST forward `tracing` events to the `log` crate (`tracing/log`), for applications that install a `log` logger and no `tracing` subscriber.
 
 r[vcf_reader.text_scan]
 Line, tab, `;`, `=`, `,` and `:` scanning in VCF text MUST be vectorised with `fearless_simd` (`r[io.simd_portable]`), building one bitmask of separators per vector and walking its set bits rather than calling `memchr` once per field: per-entry `memchr` measured 2–3× slower on real INFO columns, whose entries average 10–25 bytes. A scalar version MUST exist and property tests MUST check both produce identical splits (`r[io.platform_optimizations]`).

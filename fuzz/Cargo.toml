@@ -230,6 +230,12 @@ name = "fuzz_vcf_read"
 path = "fuzz_targets/fuzz_vcf_read.rs"
 doc = false
 
+# VCF/BCF + TBI/CSI from bytes → query, requery and partitions
+[[bin]]
+name = "fuzz_vcf_query"
+path = "fuzz_targets/fuzz_vcf_query.rs"
+doc = false
+
 # VCF header text → VcfHeader::parse → to_vcf_text → parse again
 [[bin]]
 name = "fuzz_vcf_header"

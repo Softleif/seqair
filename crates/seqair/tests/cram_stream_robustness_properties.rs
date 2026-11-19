@@ -1,6 +1,7 @@
 //! The CRAM stream on damaged input, a wrong reference, a pipe that
 //! delivers any number of bytes per read, and sizes past the allocation
 //! limit, on the `tests/data` fixtures.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

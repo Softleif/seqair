@@ -657,7 +657,7 @@ impl From<Pos1> for usize {
 // cannot itself invent a position: a value that does not fit `u32` is out of
 // range, and one that does is handed to that type's own check.
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<u32> for Pos0 {
     type Error = PosOverflow;
     /// Fails above `i32::MAX`.
@@ -667,7 +667,7 @@ impl TryFrom<u32> for Pos0 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<i32> for Pos0 {
     type Error = PosOverflow;
     /// Fails below the floor: negative values are not 0-based positions.
@@ -677,7 +677,7 @@ impl TryFrom<i32> for Pos0 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<i64> for Pos0 {
     type Error = PosOverflow;
     /// Fails below zero or above `i32::MAX`.
@@ -687,7 +687,7 @@ impl TryFrom<i64> for Pos0 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<u64> for Pos0 {
     type Error = PosOverflow;
     /// Fails above `i32::MAX`.
@@ -697,7 +697,7 @@ impl TryFrom<u64> for Pos0 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<u32> for Pos1 {
     type Error = PosOverflow;
     /// Fails at `0` and above `i32::MAX`.
@@ -707,7 +707,7 @@ impl TryFrom<u32> for Pos1 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<i32> for Pos1 {
     type Error = PosOverflow;
     /// Fails below the floor: `0` and every negative value.
@@ -717,7 +717,7 @@ impl TryFrom<i32> for Pos1 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<i64> for Pos1 {
     type Error = PosOverflow;
     /// Fails below `1` or above `i32::MAX`.
@@ -727,12 +727,32 @@ impl TryFrom<i64> for Pos1 {
     }
 }
 
-// r[impl pos.try_from]
+// r[impl pos.try_from+2]
 impl TryFrom<u64> for Pos1 {
     type Error = PosOverflow;
     /// Fails at `0` and above `i32::MAX`.
     #[inline]
     fn try_from(value: u64) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from+2]
+impl TryFrom<usize> for Pos0 {
+    type Error = PosOverflow;
+    /// Fails above `i32::MAX`.
+    #[inline]
+    fn try_from(value: usize) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from+2]
+impl TryFrom<usize> for Pos1 {
+    type Error = PosOverflow;
+    /// Fails at `0` and above `i32::MAX`.
+    #[inline]
+    fn try_from(value: usize) -> Result<Self, PosOverflow> {
         u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
     }
 }
@@ -1043,7 +1063,7 @@ mod tests {
         assert_eq!(q.as_u32(), 7);
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_i32_rejects_negative() {
         assert!(Pos0::try_from(-1i32).is_err());
@@ -1051,7 +1071,7 @@ mod tests {
         assert!(Pos1::try_from(-1i32).is_err());
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_i32_accepts_valid() {
         assert_eq!(Pos0::try_from(0i32).unwrap().as_u32(), 0);
@@ -1059,7 +1079,7 @@ mod tests {
         assert_eq!(Pos0::try_from(100i32).unwrap().as_u32(), 100);
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_i64_rejects_negative() {
         assert!(Pos0::try_from(-1i64).is_err());
@@ -1067,7 +1087,7 @@ mod tests {
         assert!(Pos1::try_from(-1i64).is_err());
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_i64_rejects_overflow() {
         assert!(Pos0::try_from(i64::from(i32::MAX) + 1).is_err());
@@ -1075,7 +1095,7 @@ mod tests {
         assert!(Pos0::try_from(i64::from(u32::MAX)).is_err());
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_i64_accepts_valid() {
         assert_eq!(Pos0::try_from(0i64).unwrap().as_u32(), 0);
@@ -1083,7 +1103,7 @@ mod tests {
         assert_eq!(Pos0::try_from(100i64).unwrap().as_u32(), 100);
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_u64_rejects_overflow() {
         assert!(Pos0::try_from(u64::from(u32::MAX) + 1).is_err());
@@ -1094,7 +1114,17 @@ mod tests {
         assert_eq!(Pos1::try_from(1u64).unwrap().as_u32(), 1);
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
+    #[test]
+    fn try_from_usize() {
+        assert_eq!(Pos0::try_from(0usize).unwrap().as_u32(), 0);
+        assert!(Pos0::try_from(i32::MAX as usize + 1).is_err());
+        assert!(Pos1::try_from(0usize).is_err(), "Pos1 rejects 0");
+        assert_eq!(Pos1::try_from(i32::MAX as usize).unwrap(), Pos1::MAX);
+        assert!(Pos1::try_from(usize::MAX).is_err());
+    }
+
+    // r[verify pos.try_from+2]
     #[test]
     fn try_from_u32() {
         assert_eq!(Pos0::try_from(0u32).unwrap().as_u32(), 0);
@@ -1232,7 +1262,7 @@ mod tests {
         assert!(p.checked_sub_offset(Offset::new(11)).is_none());
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     #[test]
     fn from_i32_infallible_roundtrip() {
         let p = Pos0::try_from(12345i32).unwrap();
@@ -1601,7 +1631,7 @@ mod tests {
         new_admits_exactly_the_types_range::<Pos1>(value);
     }
 
-    // r[verify pos.try_from]
+    // r[verify pos.try_from+2]
     /// Every integer entry point agrees with `new` on the same number.
     fn try_from_agrees_with_new<P: Position>(value: i64) {
         let expected = u32::try_from(value).ok().and_then(P::build);

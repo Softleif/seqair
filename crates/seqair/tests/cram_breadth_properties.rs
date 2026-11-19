@@ -18,6 +18,7 @@
 //! The awkward layouts are not hoped for: each property that exists to cover
 //! one asserts, per case, that the file it just wrote really has it, by
 //! parsing the container/slice headers back out of the bytes.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

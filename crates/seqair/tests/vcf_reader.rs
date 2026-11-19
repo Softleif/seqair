@@ -137,8 +137,8 @@ fn check_against_bcftools(name: &str) {
     let Some(text) = bcftools(&["view", "-H", path_str]) else { return };
     let Some(ends) = bcftools(&["query", "-f", "%END\n", path_str]) else { return };
     let file = VcfFile::open(&path).unwrap();
-    // A tabix index is not read yet (the region query phase reads it).
-    assert_eq!(file.has_index(), name.ends_with(".bcf"));
+    // Every fixture has an index: CSI for BCF, TBI for VCF.gz.
+    assert!(file.has_index());
     let header = file.header();
     let samples: Vec<_> = header.sample_indices().collect();
     let mut reader = file.reader::<FullRecord>().open().unwrap();
@@ -416,7 +416,7 @@ fn digest(rec: &FullRecord) -> (Locus, Vec<u8>) {
 
 // r[verify vcf_reader.fork_equivalence]
 // r[verify vcf_reader.file.shared+2]
-// r[verify vcf_reader.reader.threads]
+// r[verify vcf_reader.reader.threads+2]
 /// Readers of one `VcfFile` (and of clones of it) on several threads at
 /// once, some decompressing on a thread pool, read what one reader reads.
 #[test]
@@ -439,7 +439,7 @@ fn readers_on_many_threads_read_the_same_records() {
                     let file = file.clone();
                     let pool = std::sync::Arc::clone(&pool);
                     s.spawn(move || {
-                        let two = std::num::NonZeroU8::new(2).unwrap();
+                        let two = std::num::NonZeroUsize::new(2).unwrap();
                         let builder = file.reader::<FullRecord>();
                         let builder = match i % 3 {
                             0 => builder,
@@ -1000,7 +1000,7 @@ fn formats_are_detected_and_refused_by_content() {
     assert!(empty.reader::<FullRecord>().open().unwrap().next_record().unwrap().is_none());
 }
 
-// r[verify vcf_reader.file]
+// r[verify vcf_reader.file+2]
 #[test]
 fn a_missing_index_is_fine_and_a_broken_one_fails_open() {
     let dir = tempfile::tempdir().unwrap();
@@ -1010,7 +1010,7 @@ fn a_missing_index_is_fine_and_a_broken_one_fails_open() {
     assert!(!file.has_index());
     assert_eq!(file.reader::<Locus>().open().unwrap().into_iter().count(), 1);
     std::fs::write(dir.path().join("x.bcf.csi"), b"not an index").unwrap();
-    assert!(matches!(VcfFile::open(&path), Err(VcfReadError::Index(_))));
+    assert!(matches!(VcfFile::open(&path), Err(VcfReadError::UnknownIndexFormat)));
 }
 
 // ── Crafted VCF text ────────────────────────────────────────────────────

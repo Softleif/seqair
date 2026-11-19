@@ -73,13 +73,14 @@ r[pos.one_new]
 
 Both MUST be `const fn`, since `MIN`, `MAX` and `Pos0::ZERO` are built from them.
 
-r[pos.try_from]
+r[pos.try_from+2]
 Fallible `TryFrom` trait impls MUST be provided on each type for common integer types, all returning `Result<Self, PosOverflow>`:
 
 - `TryFrom<i32>`: rejects negative values (for `Pos0`) or values < 1 (for `Pos1`).
 - `TryFrom<u32>`: delegates to `new()`.
 - `TryFrom<i64>`: rejects negative values (for `Pos0`) or values < 1 (for `Pos1`), and values exceeding `i32::MAX`.
 - `TryFrom<u64>`: rejects values exceeding `i32::MAX` (and 0 for `Pos1`).
+- `TryFrom<usize>`: as `TryFrom<u64>`.
 
 Each is `new` behind a widening or narrowing that cannot itself invent a
 position. These and `new()` are the ONLY entry points for external integer

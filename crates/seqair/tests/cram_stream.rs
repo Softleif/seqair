@@ -1,5 +1,6 @@
 //! `CramStreamReader` and `CramContainerDecoder` against samtools and the
 //! indexed CRAM reader.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

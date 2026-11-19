@@ -7,6 +7,7 @@
 //! The CRAMs in this directory use attached (downstream) mates. TLEN is
 //! validated both via the BAM path (SAM -> sorted BAM -> seqair) and the
 //! CRAM path (pre-built CRAM -> seqair), covering both storage formats.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

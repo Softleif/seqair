@@ -458,7 +458,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-// r[verify pos.try_from]
+// r[verify pos.try_from+2]
 #[test]
 fn push_raw_rejects_negative_position() {
     let mut store = RecordStore::new();
@@ -467,7 +467,7 @@ fn push_raw_rejects_negative_position() {
     assert!(result.is_err(), "negative position should be rejected");
 }
 
-// r[verify pos.try_from]
+// r[verify pos.try_from+2]
 #[test]
 fn push_raw_rejects_very_negative_position() {
     let mut store = RecordStore::new();

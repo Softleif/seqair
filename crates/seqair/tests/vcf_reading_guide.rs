@@ -2,18 +2,12 @@
 //! (`crates/seqair/src/vcf/reading.md`, `r[vcf_fields.guide]`): each runs as
 //! a doctest of `seqair::vcf::reader`, and none may stay `ignore`.
 //!
-//! Until the region query and partition phases land, the examples that
-//! need them stay `ignore`. This test pins exactly which: making an
-//! example run means taking it off the list, and the list must end empty.
+//! The list of examples allowed to stay `ignore` is empty and must stay so.
 #![allow(clippy::unwrap_used, reason = "test code")]
 
 /// (section heading, example index within the section) of every example
 /// still marked `ignore`, and what it waits for.
-const STILL_IGNORED: &[(&str, usize, &str)] = &[
-    ("Region queries", 0, "region queries"),
-    ("Region queries", 1, "query_many"),
-    ("Many threads", 0, "partitions"),
-];
+const STILL_IGNORED: &[(&str, usize, &str)] = &[];
 
 // r[verify vcf_fields.guide]
 #[test]

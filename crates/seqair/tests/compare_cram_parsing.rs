@@ -1,5 +1,6 @@
 //! Compares CRAM parsing between seqair, noodles-cram, and htslib.
 //! Tests verify that our CRAM container/block/header parsing produces
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

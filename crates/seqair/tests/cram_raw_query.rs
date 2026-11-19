@@ -2,6 +2,7 @@
 //! CRAM fixtures, against two oracles: what `samtools view -b <cram> <region>`
 //! writes, and the records the stream decoder yields for the whole file,
 //! filtered to the region by a CIGAR walk of their own.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

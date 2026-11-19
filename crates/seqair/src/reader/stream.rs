@@ -3,11 +3,14 @@
 //! See `r[unified.stream.detect+4]`.
 
 use crate::bam::{
-    BamHeader, RawBamRecord,
-    bgzf::{BgzfError, BgzfStream, EofMarker, Pool, Workers},
+    BamHeader,
+    bgzf::{BgzfError, BgzfStream, EofMarker, Workers},
     header::BAM_MAGIC,
     stream::{BamStreamError, BamStreamReader},
 };
+#[cfg(feature = "cram")]
+use crate::bam::{RawBamRecord, bgzf::Pool};
+#[cfg(feature = "cram")]
 use crate::cram::{
     slice::Plan,
     stream::{CramContainer, CramContainerDecoder, CramStreamError, CramStreamReader},
@@ -15,17 +18,20 @@ use crate::cram::{
 use crate::reader::{Complete, Partial, RecordFields, RecordKind, TOKEN};
 use crate::sam::{SamStreamError, SamStreamReader};
 use seqair_types::SmolStr;
-use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::marker::PhantomData;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
+#[cfg(feature = "cram")]
+use {
+    std::collections::VecDeque,
+    std::panic::{self, AssertUnwindSafe},
+    std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    tracing::{trace, warn},
 };
-use tracing::{trace, warn};
 
 /// The format an [`AlignmentStream`] detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,7 @@ pub enum AlignmentStreamError {
         source: SamStreamError,
     },
 
+    #[cfg(feature = "cram")]
     #[error("CRAM stream error")]
     Cram {
         #[from]
@@ -82,6 +89,10 @@ pub enum AlignmentStreamError {
     )]
     CramNeedsReference,
 
+    /// seqair was built without its `cram` feature.
+    #[error("the input is CRAM, but seqair was built without its `cram` feature")]
+    CramDisabled,
+
     /// BAM in ordinary gzip rather than BGZF. htslib reads it; recompress with
     /// `samtools view -b` to stream it here.
     #[error("the input is BAM compressed with gzip rather than BGZF; recompress it with samtools")]
@@ -93,17 +104,20 @@ pub enum AlignmentStreamError {
 
 type Source = std::io::Chain<Cursor<Vec<u8>>, Box<dyn Read + Send>>;
 
+#[cfg(feature = "cram")]
 /// The input of a CRAM [`AlignmentStream`] hands over with
 /// [`AlignmentStream::into_cram`]: the bytes it read to detect the format,
 /// then the rest.
 pub struct CramInput(Source);
 
+#[cfg(feature = "cram")]
 impl Read for CramInput {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
     }
 }
 
+#[cfg(feature = "cram")]
 impl std::fmt::Debug for CramInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CramInput").finish_non_exhaustive()
@@ -113,9 +127,11 @@ impl std::fmt::Debug for CramInput {
 enum Inner {
     Bam(Box<BamStreamReader<Source>>),
     Sam(Box<SamStreamReader<Box<dyn BufRead + Send>>>),
+    #[cfg(feature = "cram")]
     Cram(Box<CramRecords>),
 }
 
+#[cfg(feature = "cram")]
 /// A CRAM stream: containers read on the reading thread, decoded there or,
 /// with threads, on a rayon pool (`r[unified.stream.cram_threads]`).
 struct CramRecords {
@@ -131,6 +147,7 @@ struct CramRecords {
     threads: Option<CramThreads>,
 }
 
+#[cfg(feature = "cram")]
 impl CramRecords {
     fn new(
         reader: CramStreamReader<CramInput>,
@@ -181,6 +198,7 @@ impl CramRecords {
     }
 }
 
+#[cfg(feature = "cram")]
 /// A container's records, `result` how many of them it holds (or why it
 /// failed), and the buffer they are in.
 struct Decoded {
@@ -188,6 +206,7 @@ struct Decoded {
     result: Result<usize, CramStreamError>,
 }
 
+#[cfg(feature = "cram")]
 /// One container, in file order.
 enum Pending {
     /// Read, waiting for a decoder.
@@ -200,10 +219,12 @@ enum Pending {
     Ready(Decoded),
 }
 
+#[cfg(feature = "cram")]
 /// Containers decoded in flight per thread asked for: one decoding, one read
 /// and waiting for a decoder (or decoded and waiting for the consumer).
 const CONTAINERS_PER_THREAD: usize = 2;
 
+#[cfg(feature = "cram")]
 // r[impl unified.stream.cram_threads]
 /// Containers decoded on a rayon pool by at most `threads` decoders, so at
 /// most `threads` at once, with up to twice as many read ahead.
@@ -225,12 +246,14 @@ struct CramThreads {
     dropped: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "cram")]
 impl Drop for CramThreads {
     fn drop(&mut self) {
         self.dropped.store(true, Ordering::Relaxed);
     }
 }
 
+#[cfg(feature = "cram")]
 impl CramThreads {
     fn new(pool: Pool, threads: usize) -> Self {
         let (give_back, returned) = mpsc::channel();
@@ -343,6 +366,7 @@ impl CramThreads {
     }
 }
 
+#[cfg(feature = "cram")]
 /// Decode a container on a pool thread, hand the decoder back, then send the
 /// records. A panic (there should be none) drops `reply` unanswered, which
 /// the stream reports as [`CramStreamError::WorkerLost`]; rayon would
@@ -581,6 +605,12 @@ impl<K: RecordKind> AlignmentStream<K> {
             let text: Box<dyn BufRead + Send> = Box::new(Cursor::new(magic).chain(gzip));
             return Self::sam(text, StreamFormat::GzipSam, fields);
         }
+        // r[impl vcf_reader.features]
+        #[cfg(not(feature = "cram"))]
+        if prefix.starts_with(b"CRAM") {
+            return Err(AlignmentStreamError::CramDisabled);
+        }
+        #[cfg(feature = "cram")]
         if prefix.starts_with(b"CRAM") {
             // r[impl cram.stream.fields.reference_optional]
             // Before the header: the decoder generates MD/NM by default.
@@ -632,6 +662,7 @@ impl<K: RecordKind> AlignmentStream<K> {
         match &self.inner {
             Inner::Bam(r) => r.header(),
             Inner::Sam(r) => r.header(),
+            #[cfg(feature = "cram")]
             Inner::Cram(r) => r.reader.header(),
         }
     }
@@ -653,10 +684,12 @@ impl<K: RecordKind> AlignmentStream<K> {
         Ok(match &mut self.inner {
             Inner::Bam(r) => r.read_record(record)?,
             Inner::Sam(r) => r.read_record(record)?,
+            #[cfg(feature = "cram")]
             Inner::Cram(r) => r.read_record(record)?,
         })
     }
 
+    #[cfg(feature = "cram")]
     // r[impl unified.stream.into_cram+2]
     /// For CRAM, the reader and decoder this stream decodes with, set up as
     /// [`AlignmentStreamBuilder::build`] set them up (reference, name prefix),
@@ -696,6 +729,7 @@ impl<K: RecordKind> AlignmentStream<K> {
         match &self.inner {
             Inner::Bam(r) => r.is_failed(),
             Inner::Sam(r) => r.is_failed(),
+            #[cfg(feature = "cram")]
             Inner::Cram(r) => r.is_failed(),
         }
     }

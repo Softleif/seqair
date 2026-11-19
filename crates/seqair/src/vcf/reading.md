@@ -2,9 +2,8 @@
 
 <!--
 These examples are the acceptance target of the reader (docs/spec/2-vcf-*.md).
-Each starts as `rust,ignore`; the phase that implements it switches it to a plain
-`rust` doctest and makes it pass. `tests/vcf_reading_guide.rs` fails while any
-`ignore` remains. Fixtures live in tests/data/vcf/ (see its README).
+Each runs as a doctest; `tests/vcf_reading_guide.rs` fails if any is marked
+`ignore`. Fixtures live in tests/data/vcf/ (see its README).
 -->
 
 Open a file once, resolve the fields you need from its header, and read
@@ -136,7 +135,7 @@ assert!(samples.sample(na12878).get(&gt)?.is_some());
 A query reuses the file's parsed header and index; each call opens its own file
 handle, so queries from different threads never contend.
 
-```rust,ignore
+```rust
 use seqair::vcf::{Locus, VcfFile, VcfPos, VcfReadError};
 use seqair_types::{Pos1, RegionString};
 
@@ -166,7 +165,7 @@ match file.reader::<Locus>().query(&unknown) {
 Visiting regions one at a time returns a record that spans two of them twice;
 `query_many` merges the regions and yields every record once:
 
-```rust,ignore
+```rust
 use seqair::vcf::{Locus, VcfFile};
 use seqair_types::RegionString;
 
@@ -184,19 +183,54 @@ while let Some(locus) = query.next_record()? {
 # Ok(()) }
 ```
 
+A `Region` takes a range in either coordinate system: `Pos1` ranges count as
+VCF and region strings do (`a..=b`, inclusive), `Pos0` ranges as BED does
+(`a..b`, half-open). `requery` points a reader at the next region, keeping its
+file handle and the blocks it has already decompressed — the shape for many
+small queries on one thread. `Match::StartsIn` yields only the records that
+start in the region (`bcftools view -t`), the default `Overlapping` also those
+that reach into it (`-r`).
+
+```rust
+use seqair::vcf::{Locus, Match, Region, VcfFile, VcfPos};
+use seqair_types::{Pos0, Pos1};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/truth.vcf.gz");
+let file = VcfFile::open(path)?;
+let one_based = Region::new("chr1", Pos1::try_from(600_001u32)?..=Pos1::try_from(700_000u32)?)?;
+let zero_based = Region::new("chr1", Pos0::try_from(600_000u32)?..Pos0::try_from(700_000u32)?)?;
+assert_eq!(one_based, zero_based);
+
+let mut reader = file.reader::<Locus>().matching(Match::StartsIn).query(&one_based)?;
+let mut starts = Vec::new();
+while let Some(locus) = reader.next_record()? {
+    starts.push(locus.start());
+}
+// The next window, on the same file handle and block cache:
+reader.requery(Region::new("chr1", Pos0::try_from(700_000u32)?..Pos0::try_from(800_000u32)?)?)?;
+while let Some(locus) = reader.next_record()? {
+    starts.push(locus.start());
+}
+let (first, last) = (VcfPos::At(Pos1::try_from(600_001u32)?), VcfPos::At(Pos1::try_from(800_000u32)?));
+assert!(!starts.is_empty() && starts.iter().all(|&s| first <= s && s <= last));
+assert!(starts.is_sorted());
+# Ok(()) }
+```
+
 ## Many threads
 
 `VcfFile` is `Send + Sync + Clone`. Split a file into partitions and read each on
 its own thread; every record belongs to exactly one partition, so the union is
 the file, with nothing visited twice.
 
-```rust,ignore
+```rust
 use seqair::vcf::{Locus, VcfFile};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/rastair.bcf");
 let file = VcfFile::open(path)?;
-let partitions = file.partitions(4)?;
+let partitions = file.partitions(std::num::NonZeroUsize::try_from(4)?)?;
 let counts = std::thread::scope(|s| {
     let handles: Vec<_> = partitions
         .iter()

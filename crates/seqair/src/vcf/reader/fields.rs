@@ -99,12 +99,15 @@ impl From<SampleIdx> for SampleSel {
 pub enum ReadOption {
     /// `.sample(name)`.
     Sample,
+    /// `.matching(..)`, which only a query reads.
+    Matching,
 }
 
 impl std::fmt::Display for ReadOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Sample => "sample",
+            Self::Matching => "matching",
         })
     }
 }

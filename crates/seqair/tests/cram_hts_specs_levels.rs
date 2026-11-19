@@ -3,6 +3,7 @@
 //! and rANS Nx16 transforms at level 2, bzip2 and fqzcomp at level 3, lzma and
 //! the arithmetic coder (also inside tok3) at level 4. seqair must decode every
 //! level to exactly the records htslib decodes.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

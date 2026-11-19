@@ -252,6 +252,15 @@ impl BamIndex {
     }
 
     fn from_tabix_data(data: &[u8], header: &BamHeader) -> Result<Self, BaiError> {
+        let (index, names) = Self::from_tabix_named(data)?;
+        let names: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+        Ok(index.in_header_order(&names, header))
+    }
+
+    /// Parse a tabix index from decompressed bytes, its references in the
+    /// index's own order, with the sequence names that order follows: the
+    /// caller maps them to its own sequences (a BAM header, a VCF's contigs).
+    pub(crate) fn from_tabix_named(data: &[u8]) -> Result<(Self, Vec<Vec<u8>>), BaiError> {
         if data.len() < 4 {
             return Err(BaiError::TruncatedTabixHeader { reason: "file too short for magic" });
         }
@@ -280,7 +289,8 @@ impl BamIndex {
             .get(pos..pos.wrapping_add(l_nm))
             .ok_or(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" })?;
         pos = pos.wrapping_add(l_nm);
-        let names: Vec<&[u8]> = names.split(|&b| b == 0).filter(|n| !n.is_empty()).collect();
+        let names: Vec<Vec<u8>> =
+            names.split(|&b| b == 0).filter(|n| !n.is_empty()).map(<[u8]>::to_vec).collect();
         if names.len() != n_ref {
             return Err(BaiError::TabixNameCount { names: names.len(), n_ref });
         }
@@ -288,7 +298,7 @@ impl BamIndex {
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
         let index = parse_refs_with_count(data, &mut pos, n_ref)?;
-        Ok(index.in_header_order(&names, header))
+        Ok((index, names))
     }
 
     // r[impl index.edge.name_mismatch+2]
@@ -419,6 +429,26 @@ pub enum AlignmentIndex {
 }
 
 impl AlignmentIndex {
+    /// Leaf-window starts of `tid` with the virtual offset records near
+    /// them start at, by position (the linear index, or a CSI's leaf-bin
+    /// `loffset`s): where a position falls in the file.
+    pub(crate) fn leaf_offsets(&self, tid: u32) -> Vec<(u64, VirtualOffset)> {
+        match self {
+            Self::Bai(idx) => idx.references.get(tid as usize).map_or_else(Vec::new, |r| {
+                (0u64..).zip(&r.linear_index).map(|(i, &o)| (i << BAI_MIN_SHIFT, o)).collect()
+            }),
+            Self::Csi(idx) => idx.leaf_offsets(tid),
+        }
+    }
+
+    /// One past the last position the index's binning addresses.
+    pub(crate) fn max_position(&self) -> u64 {
+        match self {
+            Self::Bai(_) => 1 << (BAI_MIN_SHIFT + 3 * BAI_DEPTH),
+            Self::Csi(idx) => idx.max_position(),
+        }
+    }
+
     // r[impl index.reference_stats]
     /// One entry per reference, in header (tid) order.
     pub fn reference_stats(&self) -> &[ReferenceStats] {
@@ -480,7 +510,7 @@ impl From<CsiIndex> for AlignmentIndex {
 /// Chunks from different bins can cover overlapping file regions. Without
 /// merging, `fetch_into` would read records in the overlap zone twice.
 /// Input must be sorted by `begin`; output preserves that invariant.
-pub(super) fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
+pub(crate) fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
     if chunks.len() <= 1 {
         return;
     }
@@ -585,7 +615,7 @@ pub(super) fn read_n_no_coor<E>(
 }
 
 /// Decompress all BGZF blocks from a BGZF-compressed file into a single buffer.
-pub(super) fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
+pub(crate) fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
     let mut result = Vec::with_capacity(compressed.len().wrapping_mul(3));
     let mut offset = 0;
     let mut decompressor = libdeflater::Decompressor::new();

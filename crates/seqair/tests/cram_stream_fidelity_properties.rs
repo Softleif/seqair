@@ -2,6 +2,7 @@
 //! generated sample and any CRAM writer options, the streamed records are
 //! the records `samtools view -b` writes and format as `samtools view` prints
 //! them (`r[cram.stream.fidelity+2]`).
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

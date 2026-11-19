@@ -108,6 +108,10 @@ pub(crate) fn decode_iupac_into(encoded: &[u8], out: &mut [u8]) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NibbleOrder {
     HighFirst,
+    #[cfg_attr(
+        all(not(feature = "cram"), not(test)),
+        expect(dead_code, reason = "only CRAM uses it")
+    )]
     LowFirst,
 }
 

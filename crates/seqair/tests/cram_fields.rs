@@ -6,6 +6,7 @@
 //!
 //! samtools writes each series and tag to a block of its own; htsjdk shares
 //! blocks between series, which the vendored htsjdk files cover.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

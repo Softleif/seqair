@@ -4,10 +4,13 @@
 use super::entries::{FormatIndex, LazyIndex};
 use super::error::{RecordAt, RecordError, RecordPart, VcfFormat, VcfReadError};
 use super::fields::{
-    Fields, PlanContext, PlanError, ReadOptions, SampleSel, SampleSelection, Sections,
+    Fields, PlanContext, PlanError, ReadOption, ReadOptions, SampleSel, SampleSelection, Sections,
 };
 use super::file::{DataStart, FileShared, Input, VcfFile};
+use super::query::{self, Partition, Query, RegionInput, Verdict};
 use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord, parse_pos};
+use super::region::{Match, Region};
+use super::rlen::{RlenColumns, text_rlen};
 use super::site::{SiteParts, bcf_info_start};
 use crate::bam::bgzf::{BgzfError, BgzfStream, VirtualOffset, Workers};
 use crate::io::text_scan::find_byte;
@@ -15,7 +18,7 @@ use crate::vcf::header::VcfHeader;
 use crate::vcf::record_encoder::ContigId;
 use rayon_core::ThreadPool;
 use std::io::{BufRead, Seek, SeekFrom};
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
 
 /// Most bytes a BCF record's `l_shared + l_indiv` may claim
@@ -33,6 +36,7 @@ pub struct ReaderBuilder<'f, F: Fields> {
     workers: Workers,
     sample: Option<SampleSel>,
     plan: Option<F::Plan>,
+    matching: Option<Match>,
 }
 
 impl<F: Fields> std::fmt::Debug for ReaderBuilder<'_, F> {
@@ -41,28 +45,38 @@ impl<F: Fields> std::fmt::Debug for ReaderBuilder<'_, F> {
             .field("workers", &self.workers)
             .field("sample", &self.sample)
             .field("with_plan", &self.plan.is_some())
+            .field("matching", &self.matching)
             .finish_non_exhaustive()
     }
 }
 
 impl<'f, F: Fields> ReaderBuilder<'f, F> {
     pub(crate) fn new(file: &'f VcfFile) -> Self {
-        Self { file, workers: Workers::Inline, sample: None, plan: None }
+        Self { file, workers: Workers::Inline, sample: None, plan: None, matching: None }
     }
 
-    // r[impl vcf_reader.reader.threads]
-    /// Decompress with up to `n` batches in flight on the rayon pool the
-    /// reading thread runs in (else the global one).
-    pub fn threads(mut self, n: NonZeroU8) -> Self {
-        self.workers = Workers::Threads { n, pool: None };
+    // r[impl vcf_reader.reader.threads+2]
+    /// Decompress with up to `n` (at most 255) batches in flight on the
+    /// rayon pool the reading thread runs in (else the global one). Queries
+    /// and partitions decompress on the calling thread.
+    pub fn threads(mut self, n: NonZeroUsize) -> Self {
+        self.workers = Workers::Threads { n: batches(n), pool: None };
         self
     }
 
-    // r[impl vcf_reader.reader.threads]
-    /// Decompress with up to `n` batches in flight on `pool`, so many
-    /// readers can share a bounded set of threads.
-    pub fn threads_in(mut self, n: NonZeroU8, pool: impl Into<Arc<ThreadPool>>) -> Self {
-        self.workers = Workers::Threads { n, pool: Some(pool.into()) };
+    // r[impl vcf_reader.reader.threads+2]
+    /// Decompress with up to `n` (at most 255) batches in flight on `pool`,
+    /// so many readers can share a bounded set of threads.
+    pub fn threads_in(mut self, n: NonZeroUsize, pool: impl Into<Arc<ThreadPool>>) -> Self {
+        self.workers = Workers::Threads { n: batches(n), pool: Some(pool.into()) };
+        self
+    }
+
+    // r[impl vcf_reader.query.overlap+2]
+    /// How a [`query`](Self::query) selects records: [`Match::Overlapping`]
+    /// (the default) or [`Match::StartsIn`].
+    pub fn matching(mut self, matching: Match) -> Self {
+        self.matching = Some(matching);
         self
     }
 
@@ -91,8 +105,53 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
     /// one file open, no header or index parse.
     ///
     /// # Errors
-    /// [`VcfReadError::Plan`] if `F` cannot read this file, or an I/O error.
+    /// [`VcfReadError::Plan`] if `F` cannot read this file (or
+    /// [`matching`](Self::matching) was set), or an I/O error.
     pub fn open(self) -> Result<Reader<F>, VcfReadError> {
+        self.start(Start::Sequential)
+    }
+
+    // r[impl vcf_reader.query+2]
+    /// Plan `F` like [`open`](Self::open) and read only the records of
+    /// `region` (a [`Region`], a `&`[`RegionString`](seqair_types::RegionString)),
+    /// in file order.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open); [`VcfReadError::NoIndex`] without an index,
+    /// [`VcfReadError::UnknownContig`] for a contig the file does not know,
+    /// [`VcfReadError::ForeignKey`] for a contig of another file.
+    pub fn query(self, region: impl Into<Region>) -> Result<Reader<F>, VcfReadError> {
+        self.query_many([region])
+    }
+
+    // r[impl vcf_reader.query.many+2]
+    /// Like [`query`](Self::query), over the union of `regions`: each record
+    /// at most once, in file order.
+    ///
+    /// # Errors
+    /// As [`query`](Self::query).
+    pub fn query_many<I>(self, regions: I) -> Result<Reader<F>, VcfReadError>
+    where
+        I: IntoIterator,
+        I::Item: Into<Region>,
+    {
+        let matching = self.matching.unwrap_or_default();
+        self.start(Start::Query(regions.into_iter().map(Into::into).collect(), matching))
+    }
+
+    // r[impl vcf_reader.partitions.ownership+2]
+    /// Read the records that start in `partition`
+    /// ([`VcfFile::partitions`]): every record of the file is in exactly one.
+    ///
+    /// # Errors
+    /// As [`query`](Self::query), and [`PlanError::UnusedOption`] if
+    /// [`matching`](Self::matching) was set: a partition is always read
+    /// [`Match::StartsIn`].
+    pub fn partition(self, partition: &Partition) -> Result<Reader<F>, VcfReadError> {
+        self.start(Start::Partition(partition.region().clone()))
+    }
+
+    pub(crate) fn start(self, start: Start) -> Result<Reader<F>, VcfReadError> {
         let shared = &self.file.0;
         let opts = ReadOptions::new(self.sample);
         let plan = match self.plan {
@@ -103,43 +162,91 @@ impl<'f, F: Fields> ReaderBuilder<'f, F> {
             return Err(PlanError::UnusedOption { option }.into());
         }
         let sections = F::needs(&plan);
-        let (start, skip) = match shared.data_start {
-            DataStart::At(offset) => (offset.block_offset(), u64::from(offset.within_block())),
-            DataStart::After(n) => (0, n),
-        };
-        let mut input = shared.open_input()?;
-        let seek = |input: &mut Input, at: u64| {
-            input.seek(SeekFrom::Start(at)).map_err(|source| BgzfError::ReadFailed { source })
-        };
-        let input = if shared.format == VcfFormat::Vcf {
-            seek(&mut input, start.saturating_add(skip))?;
-            Framed::Plain(input)
-        } else {
-            seek(&mut input, start)?;
-            // r[impl vcf_reader.reuse_io]
-            // r[impl vcf_reader.fork_equivalence]
-            let stream =
-                BgzfStream::builder(input).workers(self.workers).start_offset(start).build();
-            let mut input = Framed::Bgzf(Box::new(stream));
-            skip_bytes(&mut input, skip)
-                .map_err(|e| e.into_read_error(RecordAt::default(), shared))?;
-            input
+        // Line numbers are known reading VCF text from its start, not inside
+        // a query's chunks.
+        let mut line = shared.is_text().then_some(shared.header_lines);
+        let (input, query) = match start {
+            // r[impl vcf_reader.query.options]
+            Start::Sequential | Start::Stream(_) | Start::Partition(_)
+                if self.matching.is_some() =>
+            {
+                return Err(PlanError::UnusedOption { option: ReadOption::Matching }.into());
+            }
+            Start::Sequential => (open_sequential(shared, self.workers)?, None),
+            Start::Stream(input) => (input, None),
+            Start::Query(regions, matching) => {
+                line = None;
+                query_input(shared, regions, matching)?
+            }
+            Start::Partition(region) => {
+                line = None;
+                query_input(shared, vec![region], Match::StartsIn)?
+            }
         };
         let core = Core {
             file: Arc::clone(shared),
             plan,
             sections,
             input,
+            query,
             scratch: Vec::new(),
             site: SiteParts::default(),
             info_index: LazyIndex::default(),
             format_index: LazyIndex::default(),
             text: TextState::default(),
             ordinal: 0,
-            line: shared.is_text().then_some(shared.header_lines),
+            line,
         };
         Ok(Reader { core, current: None })
     }
+}
+
+/// Where a reader starts.
+pub(crate) enum Start {
+    Sequential,
+    /// A [`VcfStream`](super::VcfStream)'s input, past its header.
+    Stream(Framed),
+    Query(Vec<Region>, Match),
+    Partition(Region),
+}
+
+/// A query's input and filter.
+fn query_input(
+    shared: &FileShared,
+    regions: Vec<Region>,
+    matching: Match,
+) -> Result<(Framed, Option<Query>), VcfReadError> {
+    let (query, chunks) = query::plan(shared, regions, matching)?;
+    let input = RegionInput::new(shared.open_input()?, chunks)?;
+    Ok((Framed::Region(Box::new(input)), Some(query)))
+}
+
+/// `n` batches in flight, as many as a `BgzfStream` takes.
+pub(crate) fn batches(n: NonZeroUsize) -> NonZeroU8 {
+    NonZeroU8::try_from(n).unwrap_or(NonZeroU8::MAX)
+}
+
+/// A file's records from the first, front to back.
+fn open_sequential(shared: &FileShared, workers: Workers) -> Result<Framed, VcfReadError> {
+    let (start, skip) = match shared.data_start {
+        DataStart::At(offset) => (offset.block_offset(), u64::from(offset.within_block())),
+        DataStart::After(n) => (0, n),
+    };
+    let mut input = shared.open_input()?;
+    let seek = |input: &mut Input, at: u64| {
+        input.seek(SeekFrom::Start(at)).map_err(|source| BgzfError::ReadFailed { source })
+    };
+    if shared.format == VcfFormat::Vcf {
+        seek(&mut input, start.saturating_add(skip))?;
+        return Ok(Framed::Plain(input));
+    }
+    seek(&mut input, start)?;
+    // r[impl vcf_reader.reuse_io+2]
+    // r[impl vcf_reader.fork_equivalence]
+    let stream = BgzfStream::builder(input).workers(workers).start_offset(start).build();
+    let mut input = Framed::Bgzf(Box::new(stream));
+    skip_bytes(&mut input, skip).map_err(|e| e.into_read_error(RecordAt::default(), shared))?;
+    Ok(input)
 }
 
 /// A failure while framing a record: a cut-short input is a record error.
@@ -166,10 +273,12 @@ impl Framing {
     }
 }
 
-/// A reader's decompressed input: a BGZF stream, or a plain text file.
-enum Framed {
+/// A reader's decompressed input: a BGZF stream, a plain text file, or a
+/// query's chunks.
+pub(crate) enum Framed {
     Bgzf(Box<BgzfStream<Input>>),
     Plain(Input),
+    Region(Box<RegionInput>),
 }
 
 impl Framed {
@@ -177,6 +286,7 @@ impl Framed {
         match self {
             Self::Bgzf(s) => s.fill(),
             Self::Plain(p) => p.fill_buf().map_err(|source| BgzfError::ReadFailed { source }),
+            Self::Region(r) => r.fill(),
         }
     }
 
@@ -184,6 +294,24 @@ impl Framed {
         match self {
             Self::Bgzf(s) => s.advance(n),
             Self::Plain(p) => p.consume(n),
+            Self::Region(r) => r.advance(n),
+        }
+    }
+
+    /// Whether another record follows: input is left, or, for a query,
+    /// left in its chunks.
+    fn has_record(&mut self) -> Result<bool, BgzfError> {
+        if let Self::Region(r) = self {
+            return r.has_record();
+        }
+        Ok(!self.fill()?.is_empty())
+    }
+
+    /// The query group of the chunk being read.
+    fn group(&self) -> Option<usize> {
+        match self {
+            Self::Region(r) => r.group(),
+            _ => None,
         }
     }
 
@@ -211,6 +339,7 @@ impl Framed {
         match self {
             Self::Bgzf(s) => s.virtual_offset(),
             Self::Plain(_) => None,
+            Self::Region(r) => Some(r.virtual_offset()),
         }
     }
 }
@@ -268,6 +397,8 @@ struct Core<P> {
     plan: P,
     sections: Sections,
     input: Framed,
+    /// What a query yields of the records it reads; `None` reading front to back.
+    query: Option<Query>,
     /// A record that spans the stream's batches, copied together.
     scratch: Vec<u8>,
     /// The current record's site columns, decoded.
@@ -279,6 +410,47 @@ struct Core<P> {
     ordinal: u64,
     /// The line last framed, for VCF text read from its start.
     line: Option<u64>,
+}
+
+/// What reading one record came to.
+enum Step<R> {
+    Took(R),
+    /// Not in the query.
+    Skip,
+    /// Past the query's ranges on the group's contig.
+    Stop(usize),
+    End,
+}
+
+/// What a query does with a record: `None` to go on decoding it.
+fn query_step<R>(
+    query: Option<&Query>,
+    group: Option<usize>,
+    tid: u32,
+    pos0: i64,
+    rlen: impl FnOnce() -> i64,
+) -> Option<Step<R>> {
+    let (query, group) = (query?, group?);
+    match query.verdict(group, tid, pos0, rlen) {
+        Verdict::Take => None,
+        Verdict::Skip => Some(Step::Skip),
+        Verdict::Stop => Some(Step::Stop(group)),
+    }
+}
+
+/// Hand `raw` to the caller's `with`, once.
+fn take<P, R, W>(
+    with: &mut Option<W>,
+    plan: &P,
+    raw: RawRecord<'_>,
+) -> Result<Step<R>, VcfReadError>
+where
+    W: FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+{
+    match with.take() {
+        Some(with) => with(plan, raw).map(Step::Took),
+        None => Ok(Step::Skip),
+    }
 }
 
 /// Where a line is: in the input's current batch (its length, and the
@@ -296,15 +468,32 @@ impl<P> Core<P> {
         &mut self,
         with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
     ) -> Result<Option<R>, VcfReadError> {
-        self.info_index.reset();
-        self.format_index.reset();
-        if self.file.is_text() { self.next_text(with) } else { self.next_bcf(with) }
+        let mut with = Some(with);
+        loop {
+            self.info_index.reset();
+            self.format_index.reset();
+            let step = if self.file.is_text() {
+                self.next_text(&mut with)?
+            } else {
+                self.next_bcf(&mut with)?
+            };
+            match step {
+                Step::Took(r) => return Ok(Some(r)),
+                Step::End => return Ok(None),
+                Step::Skip => {}
+                Step::Stop(group) => {
+                    if let Framed::Region(r) = &mut self.input {
+                        r.skip_group(group);
+                    }
+                }
+            }
+        }
     }
 
     /// Frame the next non-empty line; `None` at the end.
     fn frame_line(&mut self) -> Result<Option<(Line, RecordAt)>, VcfReadError> {
         loop {
-            if self.input.fill()?.is_empty() {
+            if !self.input.has_record()? {
                 return Ok(None);
             }
             self.line = self.line.map(|l| l.saturating_add(1));
@@ -364,13 +553,24 @@ impl<P> Core<P> {
         }
     }
 
-    fn next_text<R>(
-        &mut self,
-        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
-    ) -> Result<Option<R>, VcfReadError> {
-        let Some((framed, mut at)) = self.frame_line()? else { return Ok(None) };
+    fn next_text<R, W>(&mut self, with: &mut Option<W>) -> Result<Step<R>, VcfReadError>
+    where
+        W: FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    {
+        let Some((framed, mut at)) = self.frame_line()? else { return Ok(Step::End) };
+        let group = self.input.group();
         let Self {
-            file, plan, sections, input, scratch, site, info_index, format_index, text, ..
+            file,
+            plan,
+            sections,
+            input,
+            query,
+            scratch,
+            site,
+            info_index,
+            format_index,
+            text,
+            ..
         } = self;
         let (line, consumed) = match framed {
             Line::InPlace { len, consumed } => {
@@ -381,6 +581,32 @@ impl<P> Core<P> {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let result = (|| {
             text.read(line, file, &mut at).map_err(|e| at.error(file, e))?;
+            if let (Some(q), Some(contig)) = (query.as_ref(), text.contig.as_ref()) {
+                let cols = &text.cols;
+                let pos0 = at.pos.ok_or_else(|| {
+                    at.error(
+                        file,
+                        RecordError::Text {
+                            part: RecordPart::Pos,
+                            source: super::text_value::TextValueError::invalid_integer(
+                                cols.col(line, Col::Pos),
+                            ),
+                        },
+                    )
+                })?;
+                let rlen = || {
+                    let columns = RlenColumns {
+                        reference: cols.col(line, Col::Ref),
+                        alt: cols.col(line, Col::Alt),
+                        info: cols.col(line, Col::Info),
+                        format: cols.rest(line),
+                    };
+                    text_rlen(&columns, file, pos0)
+                };
+                if let Some(step) = query_step(Some(q), group, contig.tid(), pos0, rlen) {
+                    return Ok(step);
+                }
+            }
             if sections.site() {
                 site.decode_text(line, &text.cols, file).map_err(|e| at.error(file, e))?;
             }
@@ -396,20 +622,20 @@ impl<P> Core<P> {
                 format_index,
                 repr: Repr::Text(TextRecord { line, cols: &text.cols }),
             };
-            with(plan, raw)
+            take(with, plan, raw)
         })();
         if let Some(n) = consumed {
             input.advance(n);
         }
-        result.map(Some)
+        result
     }
 
-    fn next_bcf<R>(
-        &mut self,
-        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
-    ) -> Result<Option<R>, VcfReadError> {
-        if self.input.fill()?.is_empty() {
-            return Ok(None);
+    fn next_bcf<R, W>(&mut self, with: &mut Option<W>) -> Result<Step<R>, VcfReadError>
+    where
+        W: FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    {
+        if !self.input.has_record()? {
+            return Ok(Step::End);
         }
         let at = RecordAt {
             ordinal: self.ordinal,
@@ -417,9 +643,29 @@ impl<P> Core<P> {
             ..RecordAt::default()
         };
         self.ordinal = self.ordinal.saturating_add(1);
-        let Self { file, plan, sections, input, scratch, site, info_index, format_index, .. } =
-            self;
-        let parts = Parts { file, sections: *sections, site, info_index, format_index, at };
+        let group = self.input.group();
+        let Self {
+            file,
+            plan,
+            sections,
+            input,
+            query,
+            scratch,
+            site,
+            info_index,
+            format_index,
+            ..
+        } = self;
+        let parts = Parts {
+            file,
+            sections: *sections,
+            site,
+            info_index,
+            format_index,
+            at,
+            query: query.as_ref(),
+            group,
+        };
 
         // The record header straight from the batch, or, cut by the batch's
         // end, read (and kept) here.
@@ -452,7 +698,7 @@ impl<P> Core<P> {
         if !head_read && let Some(record) = input.fill()?.get(..end) {
             let result = parts.hand_out(plan, record, shared_end, with);
             input.advance(end);
-            return result.map(Some);
+            return result;
         }
         // Otherwise copy it together, skipping samples nobody reads.
         let framing = |e: Framing| e.into_read_error(at, file);
@@ -469,7 +715,7 @@ impl<P> Core<P> {
         if !wants_indiv {
             skip_bytes(input, u64::from(l_indiv)).map_err(framing)?;
         }
-        parts.hand_out(plan, scratch, shared_end, with).map(Some)
+        parts.hand_out(plan, scratch, shared_end, with)
     }
 }
 
@@ -482,19 +728,24 @@ struct Parts<'c> {
     info_index: &'c LazyIndex,
     format_index: &'c LazyIndex<FormatIndex>,
     at: RecordAt,
+    query: Option<&'c Query>,
+    group: Option<usize>,
 }
 
 impl Parts<'_> {
     /// Hand `with` the BCF record `record`, whose shared section ends at
     /// `shared_end` (its individual section, if read, follows).
-    fn hand_out<P, R>(
+    fn hand_out<P, R, W>(
         self,
         plan: &P,
         record: &[u8],
         shared_end: usize,
-        with: impl FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
-    ) -> Result<R, VcfReadError> {
-        let Self { file, sections, site, info_index, format_index, mut at } = self;
+        with: &mut Option<W>,
+    ) -> Result<Step<R>, VcfReadError>
+    where
+        W: FnOnce(&P, RawRecord<'_>) -> Result<R, VcfReadError>,
+    {
+        let Self { file, sections, site, info_index, format_index, mut at, query, group } = self;
         let shared = record.get(8..shared_end).unwrap_or_default();
         let indiv = record.get(shared_end..).unwrap_or_default();
         let fixed = Fixed::parse(shared)
@@ -505,6 +756,10 @@ impl Parts<'_> {
             at.error(file, RecordError::ContigIndexOutOfRange { index: fixed.rid })
         })?;
         at.contig = Some(contig.tid());
+        let rlen = || i64::from(fixed.rlen);
+        if let Some(step) = query_step(query, group, contig.tid(), i64::from(fixed.pos), rlen) {
+            return Ok(step);
+        }
         let info_start = if sections.site() {
             site.decode_bcf(shared, fixed.n_allele, fixed.qual, file)
         } else if sections.info() {
@@ -525,7 +780,7 @@ impl Parts<'_> {
             format_index,
             repr: Repr::Bcf(bcf),
         };
-        with(plan, raw)
+        take(with, plan, raw)
     }
 }
 
@@ -556,6 +811,45 @@ impl<F: Fields> Reader<F> {
     /// The file's header, as [`Writer::write_header`](crate::vcf::Writer::write_header) takes it.
     pub fn header(&self) -> &VcfHeader {
         &self.core.file.header
+    }
+
+    // r[impl vcf_reader.query+2]
+    /// Read the records of `region` next, as [`ReaderBuilder::query`] would,
+    /// reusing this reader's file handle and block cache. The match mode
+    /// is the one the reader was opened with ([`Match::StartsIn`] for a
+    /// partition reader).
+    ///
+    /// # Errors
+    /// As [`ReaderBuilder::query`]; the reader is unchanged on error.
+    pub fn requery(&mut self, region: impl Into<Region>) -> Result<(), VcfReadError> {
+        self.requery_many([region])
+    }
+
+    // r[impl vcf_reader.query.many+2]
+    /// [`requery`](Self::requery) over the union of `regions`, as
+    /// [`ReaderBuilder::query_many`].
+    ///
+    /// # Errors
+    /// As [`ReaderBuilder::query`].
+    pub fn requery_many<I>(&mut self, regions: I) -> Result<(), VcfReadError>
+    where
+        I: IntoIterator,
+        I::Item: Into<Region>,
+    {
+        let core = &mut self.core;
+        let matching = core.query.as_ref().map_or_else(Match::default, Query::matching);
+        let (query, chunks) =
+            query::plan(&core.file, regions.into_iter().map(Into::into), matching)?;
+        match &mut core.input {
+            Framed::Region(input) => input.replan(chunks),
+            _ => {
+                let input = RegionInput::new(core.file.open_input()?, chunks)?;
+                core.input = Framed::Region(Box::new(input));
+            }
+        }
+        core.query = Some(query);
+        core.line = None;
+        Ok(())
     }
 
     // r[impl vcf_reader.read_into+2]

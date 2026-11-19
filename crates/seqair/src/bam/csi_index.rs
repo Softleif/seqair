@@ -333,6 +333,32 @@ impl CsiIndex {
         &self.aux
     }
 
+    /// The start of every leaf bin of `tid` that holds records, with its
+    /// `loffset`, by position: where records near that position start in
+    /// the file.
+    pub(crate) fn leaf_offsets(&self, tid: u32) -> Vec<(u64, VirtualOffset)> {
+        let Some(reference) = self.references.get(tid as usize) else { return Vec::new() };
+        // Leaf bins are numbered from ((1 << 3·depth) − 1) / 7; validated depths fit.
+        let first =
+            1u64.checked_shl(self.depth.saturating_mul(3)).unwrap_or(0).saturating_sub(1) / 7;
+        let mut leaves: Vec<(u64, VirtualOffset)> = reference
+            .bins
+            .iter()
+            .filter_map(|b| {
+                let pos = u64::from(b.bin_id).checked_sub(first)?.checked_shl(self.min_shift)?;
+                Some((pos, b.loffset))
+            })
+            .collect();
+        leaves.sort_unstable_by_key(|&(pos, _)| pos);
+        leaves
+    }
+
+    /// One past the last position the binning scheme addresses.
+    pub(crate) fn max_position(&self) -> u64 {
+        1u64.checked_shl(self.min_shift.saturating_add(self.depth.saturating_mul(3)))
+            .unwrap_or(u64::MAX)
+    }
+
     // r[impl csi.query]
     // r[impl csi.query_interface]
     /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).

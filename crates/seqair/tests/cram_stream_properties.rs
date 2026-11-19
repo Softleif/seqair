@@ -6,6 +6,7 @@
 //! unplaced ones. Bases are ACGT and read names are kept (`RN`), so the
 //! stream's known gaps with htslib (`cram_stream.rs`'s `KNOWN_MISMATCHES`)
 //! cannot show up, and the comparison is byte for byte.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

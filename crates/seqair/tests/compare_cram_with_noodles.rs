@@ -1,6 +1,7 @@
 //! Compares CRAM record decoding between seqair and noodles.
 //! Reads all records sequentially from the same CRAM file using both
 //! Tests run against both CRAM v3.0 and v3.1.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

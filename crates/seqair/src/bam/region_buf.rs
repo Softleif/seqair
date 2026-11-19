@@ -194,6 +194,29 @@ struct MergedRange {
     needed_until: u64,
 }
 
+/// A [`RegionBuf`]'s block cache: lent by a reader that outlives the query,
+/// or owned by a `RegionBuf` that is replanned for each query instead.
+enum CacheSlot<'r> {
+    Lent(&'r mut BlockCache),
+    Owned(Box<BlockCache>),
+}
+
+impl CacheSlot<'_> {
+    fn get(&mut self) -> &mut BlockCache {
+        match self {
+            Self::Lent(c) => c,
+            Self::Owned(c) => c,
+        }
+    }
+
+    fn get_ref(&self) -> &BlockCache {
+        match self {
+            Self::Lent(c) => c,
+            Self::Owned(c) => c,
+        }
+    }
+}
+
 /// Streaming BGZF decompressor over a region's index chunks.
 ///
 /// Created by [`RegionBuf::new`], which borrows a seekable reader and computes
@@ -201,8 +224,9 @@ struct MergedRange {
 /// bytes are pulled into a bounded `WINDOW_BUDGET`-sized window on demand and
 /// decompressed block-by-block.
 pub struct RegionBuf<'r, R: Read + Seek> {
-    /// Reader kept alive to refill the window. Bulk, unbuffered.
-    reader: &'r mut R,
+    /// Reader kept alive to refill the window. Bulk, unbuffered: a
+    /// `&mut` to the caller's, or (a VCF reader's) owned.
+    reader: R,
     /// Merged byte ranges to stream, sorted by file offset (the read plan).
     ranges: Vec<MergedRange>,
     /// Index of the range currently being streamed.
@@ -234,8 +258,9 @@ pub struct RegionBuf<'r, R: Read + Seek> {
     decompressor: Option<libdeflater::Decompressor>,
     blocks_decompressed: u32,
     decompressed_bytes: u64,
-    /// Blocks shared with the reader's other queries, when it lent one.
-    cache: Option<&'r mut BlockCache>,
+    /// Blocks shared with the reader's other queries, when it lent one or
+    /// the `RegionBuf` keeps its own across [`replan`](Self::replan)s.
+    cache: Option<CacheSlot<'r>>,
     /// `(file offset, compressed length)` of the verified block in `buf`,
     /// while it is one the cache should get back.
     buf_block: Option<(u64, usize)>,
@@ -256,7 +281,7 @@ impl<R: Read + Seek> std::fmt::Debug for RegionBuf<'_, R> {
 }
 
 impl<'r, R: Read + Seek> RegionBuf<'r, R> {
-    // r[impl region_buf.new+2]
+    // r[impl region_buf.new+3]
     // r[impl region_buf.empty]
     // r[related region_buf.merge_chunks]
     /// Plan a streaming read over the given chunks.
@@ -264,7 +289,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
     /// Merges overlapping/adjacent chunks into the ranges to stream, but reads
     /// nothing — the first window is pulled lazily on the first decode (or
     /// [`seek_virtual`](Self::seek_virtual) with a non-zero intra-block offset).
-    pub fn new(reader: &'r mut R, chunks: &[Chunk]) -> Result<Self, BgzfError> {
+    pub fn new(reader: R, chunks: &[Chunk]) -> Result<Self, BgzfError> {
         Self::with_budget(reader, chunks, WINDOW_BUDGET)
     }
 
@@ -273,40 +298,47 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
     /// tests that force many refills with a tiny budget; the budget is floored
     /// at one max BGZF block so a single block always fits.
     #[doc(hidden)]
-    pub fn with_budget(
-        reader: &'r mut R,
-        chunks: &[Chunk],
-        budget: usize,
-    ) -> Result<Self, BgzfError> {
+    pub fn with_budget(reader: R, chunks: &[Chunk], budget: usize) -> Result<Self, BgzfError> {
         Self::build(reader, chunks, budget, None)
     }
 
     /// Like [`new`](Self::new), keeping decompressed blocks in `cache` so the
     /// reader's next query can reuse them.
     pub(crate) fn with_cache(
-        reader: &'r mut R,
+        reader: R,
         chunks: &[Chunk],
         cache: &'r mut BlockCache,
     ) -> Result<Self, BgzfError> {
-        Self::build(reader, chunks, WINDOW_BUDGET, Some(cache))
+        Self::build(reader, chunks, WINDOW_BUDGET, Some(CacheSlot::Lent(cache)))
+    }
+
+    /// Like [`new`](Self::new), owning `reader` and a block cache, for a
+    /// reader that keeps one `RegionBuf` and [`replan`](Self::replan)s it.
+    pub(crate) fn owning(reader: R, chunks: &[Chunk]) -> Result<RegionBuf<'static, R>, BgzfError> {
+        RegionBuf::build(
+            reader,
+            chunks,
+            WINDOW_BUDGET,
+            Some(CacheSlot::Owned(Box::new(BlockCache::new()))),
+        )
     }
 
     /// [`with_cache`](Self::with_cache) with an explicit window budget, for tests.
     #[cfg(test)]
     pub(crate) fn with_cache_and_budget(
-        reader: &'r mut R,
+        reader: R,
         chunks: &[Chunk],
         cache: &'r mut BlockCache,
         budget: usize,
     ) -> Result<Self, BgzfError> {
-        Self::build(reader, chunks, budget, Some(cache))
+        Self::build(reader, chunks, budget, Some(CacheSlot::Lent(cache)))
     }
 
     fn build(
-        reader: &'r mut R,
+        mut reader: R,
         chunks: &[Chunk],
         budget: usize,
-        mut cache: Option<&'r mut BlockCache>,
+        mut cache: Option<CacheSlot<'r>>,
     ) -> Result<Self, BgzfError> {
         let budget = budget.max(MAX_BLOCK_SIZE);
         let ranges = merge_chunks(chunks);
@@ -315,12 +347,12 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         // r[impl io.fuzz.alloc_limits]
         // Capture the real file length so refills never over-allocate when a
         // corrupt index points a chunk's end far past EOF.
-        let file_size = match cache.as_deref().and_then(|c| c.file_size) {
+        let file_size = match cache.as_ref().and_then(|c| c.get_ref().file_size) {
             Some(size) => size,
             None => reader.seek(SeekFrom::End(0)).map_err(|_| BgzfError::SeekFailed)?,
         };
-        let (window, buf, decompressor) = match cache {
-            Some(ref mut c) => {
+        let (window, buf, decompressor) = match cache.as_mut().map(CacheSlot::get) {
+            Some(c) => {
                 c.begin_query();
                 c.file_size = Some(file_size);
                 let mut window = std::mem::take(&mut c.window);
@@ -349,6 +381,26 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             cache,
             buf_block: None,
         })
+    }
+
+    /// Point the buffer at a new query's `chunks`, keeping its reader, its
+    /// buffers and its block cache — the next query's first blocks are often
+    /// the last one's.
+    // r[impl region_buf.replan]
+    pub(crate) fn replan(&mut self, chunks: &[Chunk]) {
+        self.release_block();
+        self.ranges = merge_chunks(chunks);
+        self.range_idx = 0;
+        self.window.clear();
+        self.window_file_start = self.ranges.first().map_or(0, |r| r.file_start);
+        self.cursor = 0;
+        self.read_size = FIRST_READ.min(self.budget);
+        self.buf_pos = 0;
+        self.block_offset = self.window_file_start;
+        self.eof = self.ranges.is_empty();
+        if let Some(cache) = self.cache.as_mut().map(CacheSlot::get) {
+            cache.begin_query();
+        }
     }
 
     /// Ensure at least `need` compressed bytes are resident at/after `cursor`
@@ -405,7 +457,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             // truncate to the bytes actually read immediately after.
             unsafe { bgzf::resize_uninit(&mut self.window, old_len.wrapping_add(read_len)) };
             #[allow(clippy::indexing_slicing, reason = "old_len ≤ window.len() after resize above")]
-            let got = read_all(self.reader, &mut self.window[old_len..]);
+            let got = read_all(&mut self.reader, &mut self.window[old_len..]);
             self.window.truncate(old_len.wrapping_add(got));
             if got < read_len {
                 // Reader delivered fewer bytes than the (EOF-clamped) range
@@ -432,7 +484,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 
     /// Empty `buf`, handing the block it holds back to the cache first.
     fn release_block(&mut self) {
-        release_block(self.cache.as_deref_mut(), &mut self.buf_block, &mut self.buf);
+        release_block(self.cache.as_mut().map(CacheSlot::get), &mut self.buf_block, &mut self.buf);
     }
 
     // r[impl region_buf.seek_virtual]
@@ -620,7 +672,11 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             // The block we are leaving goes back to the cache before `buf` is
             // overwritten.
             let block_file_offset = self.block_offset;
-            release_block(self.cache.as_deref_mut(), &mut self.buf_block, &mut self.buf);
+            release_block(
+                self.cache.as_mut().map(CacheSlot::get),
+                &mut self.buf_block,
+                &mut self.buf,
+            );
 
             // Safety: `inflate_checked` writes every byte or fails, and on
             // failure `buf` is cleared before anything can read it.
@@ -676,7 +732,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
     /// in it, or the block would not lie wholly inside the current range —
     /// the uncached path then reads it, and decides as it always has.
     fn take_cached_block(&mut self) -> bool {
-        let Some(cache) = self.cache.as_deref_mut() else {
+        let Some(cache) = self.cache.as_mut().map(CacheSlot::get) else {
             return false;
         };
         let Some(range) = self.ranges.get(self.range_idx) else {
@@ -856,7 +912,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 impl<R: Read + Seek> Drop for RegionBuf<'_, R> {
     fn drop(&mut self) {
         self.release_block();
-        if let Some(cache) = self.cache.as_deref_mut() {
+        if let Some(cache) = self.cache.as_mut().map(CacheSlot::get) {
             if let Some(d) = self.decompressor.take() {
                 cache.decompressor = Some(d);
             }
@@ -2097,10 +2153,12 @@ mod tests {
     }
 
     // r[verify region_buf.block_cache]
+    // r[verify region_buf.replan]
     /// A sequence of queries sharing one cache — repeats, backward jumps,
     /// disjoint ranges, a cache small enough to evict — hands out exactly the
     /// pieces a fresh uncached buffer hands out for each query, and those
-    /// pieces are the original payloads.
+    /// pieces are the original payloads; so does one owning buffer replanned
+    /// for each query.
     #[hegel::test]
     fn cached_queries_match_uncached(tc: TestCase) {
         let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(24));
@@ -2129,6 +2187,7 @@ mod tests {
         let mut cache = BlockCache::with_capacity(capacity);
         let mut cached_file = std::io::Cursor::new(file.clone());
 
+        let mut owned: Option<RegionBuf<'static, std::io::Cursor<Vec<u8>>>> = None;
         let n_queries = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
         for _ in 0..n_queries {
             // Sorted, non-overlapping chunks: pair up consecutive sorted points.
@@ -2151,6 +2210,15 @@ mod tests {
             let got = read_chunks(&mut buf, &chunks);
             drop(buf);
             assert_eq!(got, expected, "chunks {chunks:?}");
+
+            let replanned = match &mut owned {
+                Some(buf) => buf,
+                None => owned.insert(
+                    RegionBuf::owning(std::io::Cursor::new(file.clone()), &chunks).unwrap(),
+                ),
+            };
+            replanned.replan(&chunks);
+            assert_eq!(read_chunks(replanned, &chunks), expected, "replanned {chunks:?}");
 
             let mut oracle: Vec<u8> = Vec::new();
             for &[(b0, w0), (b1, w1)] in pairs {

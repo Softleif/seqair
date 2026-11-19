@@ -544,7 +544,7 @@ fn line_reference(line: &[u8], header: &BamHeader) -> Result<Option<Tid>, SamErr
 /// The alignment lines of a query's index chunks, handed out one at a time
 /// and resumable between them.
 struct ChunkLines<'r, R: Read + Seek> {
-    region: RegionBuf<'r, R>,
+    region: RegionBuf<'r, &'r mut R>,
     chunks: Vec<Chunk>,
     next_chunk: usize,
     /// End of the chunk being read; `None` between chunks.
@@ -555,7 +555,7 @@ struct ChunkLines<'r, R: Read + Seek> {
 }
 
 impl<'r, R: Read + Seek> ChunkLines<'r, R> {
-    fn new(region: RegionBuf<'r, R>, chunks: Vec<Chunk>) -> Self {
+    fn new(region: RegionBuf<'r, &'r mut R>, chunks: Vec<Chunk>) -> Self {
         Self { region, chunks, next_chunk: 0, chunk_end: None, line: Vec::with_capacity(1024) }
     }
 

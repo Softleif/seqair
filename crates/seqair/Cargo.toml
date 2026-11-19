@@ -18,9 +18,16 @@ cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
 ignored-paths = ["tests/support/cram_raw_blocks.rs"]
 
 [features]
+default = ["cram"]
+# The CRAM reader and its codecs (bzip2, lzma, MD5 for slice checks). Without
+# it the unified reader refuses CRAM files with a typed error.
+cram = ["dep:bz2ngrs", "dep:xz2", "dep:md5"]
+# Forwards `tracing` events to the `log` crate, for applications that install
+# a `log` logger and no `tracing` subscriber.
+log = ["tracing/log"]
 # Forwards `seqair-types/serde`; seqair itself serializes nothing.
 serde = ["seqair-types/serde"]
-fuzz = ["dep:bzip2"]
+fuzz = ["dep:bzip2", "cram"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -43,11 +50,11 @@ rustc-hash = "2.1.3"
 hashbrown = "0.17.1"
 # used for streaming gzip (e.g. non bgzf sam)
 flate2 = "1.1.10"
-bz2ngrs = "0.1.1"
+bz2ngrs = { version = "0.1.1", optional = true }
 # used for fuzzing
 bzip2 = { version = "0.6.1", optional = true }
-xz2 = "0.1.7"
-md5 = "0.8.1"
+xz2 = { version = "0.1.7", optional = true }
+md5 = { version = "0.8.1", optional = true }
 
 [dev-dependencies]
 # Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
@@ -111,14 +118,33 @@ harness = false
 [[bench]]
 name = "cram"
 harness = false
+required-features = ["cram"]
 
 [[bench]]
 name = "simd_kernels"
 harness = false
+required-features = ["cram"]
 
 [[bench]]
 name = "fqzcomp"
 harness = false
+required-features = ["cram"]
+
+[[example]]
+name = "codec_decode_loop"
+required-features = ["cram"]
+
+[[example]]
+name = "cram_codec_blocks"
+required-features = ["cram"]
+
+[[example]]
+name = "cram_decode_loop"
+required-features = ["cram"]
+
+[[example]]
+name = "cram_tile_sweep"
+required-features = ["cram"]
 
 [[bench]]
 name = "cram_encode"

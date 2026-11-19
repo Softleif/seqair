@@ -6,6 +6,7 @@
 //! Here samtools writes the *same* generated reads as both BAM and CRAM, and
 //! seqair reads both: the BAM path is the oracle, and the generated reads are
 //! the oracle for that in turn, so a misreading shared by neither can hide.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

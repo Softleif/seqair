@@ -439,6 +439,7 @@ pub(crate) enum Qualities<'a> {
     /// SAM's QUAL text, Phred+33.
     Phred33(&'a [u8]),
     /// BAM's bytes, copied as they are.
+    #[cfg_attr(not(feature = "cram"), expect(dead_code, reason = "only CRAM uses it"))]
     Raw(&'a [u8]),
 }
 
@@ -448,6 +449,7 @@ pub(crate) enum Seq<'a> {
     /// ASCII, `=ACMGRSVTWYHKDBN` and lower case, as SAM writes it.
     Ascii(&'a [u8]),
     /// BAM's 4-bit codes.
+    #[cfg_attr(not(feature = "cram"), expect(dead_code, reason = "only CRAM uses it"))]
     Iupac(&'a [IupacBase]),
 }
 

@@ -515,7 +515,7 @@ fn skip_before(chunks: &mut Vec<Chunk>, hit: VirtualOffset) {
 /// release the borrow.
 pub struct BamQuery<'r, R: Read + Seek> {
     /// Streaming buffer spanning all of the query's chunks; owns the reader borrow.
-    region: RegionBuf<'r, R>,
+    region: RegionBuf<'r, &'r mut R>,
     /// All index chunks for the query, in begin order.
     chunks: Vec<Chunk>,
     chunk_idx: usize,

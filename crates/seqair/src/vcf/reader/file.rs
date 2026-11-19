@@ -1,18 +1,20 @@
 //! [`VcfFile`]: a VCF/BCF file opened once — format, header, index and the
-//! tables every reader of it shares (`r[vcf_reader.file]`).
+//! tables every reader of it shares (`r[vcf_reader.file+2]`).
 
 use super::error::{VcfFormat, VcfReadError};
 use super::fields::Fields;
 use super::keys::FieldTable;
+use super::query::Partition;
+use super::region_index::VcfIndex;
 use super::rlen::RlenKeys;
 use super::stream::ReaderBuilder;
 use crate::bam::bgzf::{BgzfStream, VirtualOffset, find_bsize};
-use crate::bam::csi_index::CsiIndex;
 use crate::vcf::header::{MAX_HEADER_TEXT, VcfHeader, VcfVersion};
 use crate::vcf::record_encoder::{ContigId, FilterId};
 use seqair_types::SmolStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -25,9 +27,9 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 /// Bytes each read from a file asks for: BGZF blocks are at most 64 KiB, so
 /// this keeps the block parser's small reads off the system call path.
-const FILE_BUFFER: usize = 128 * 1024;
+pub(crate) const FILE_BUFFER: usize = 128 * 1024;
 
-// r[impl vcf_reader.file]
+// r[impl vcf_reader.file+2]
 // r[impl vcf_reader.file.shared+2]
 /// A VCF or BCF file: its header, index and contig table, parsed once and
 /// shared by every reader opened from it.
@@ -45,16 +47,29 @@ impl std::fmt::Debug for VcfFile {
 
 /// Where a file's bytes come from.
 #[derive(Debug)]
-enum Source {
+pub(crate) enum Source {
     Path(PathBuf),
     Bytes(Arc<[u8]>),
+    /// A [`VcfStream`](super::VcfStream)'s input, read once by its reader.
+    Stream,
 }
 
-/// A reader's input: a file handle or a view of in-memory bytes.
-#[derive(Debug)]
+/// A reader's input: a file handle, a view of in-memory bytes, or a stream
+/// that cannot seek.
 pub(crate) enum Input {
     File(BufReader<File>),
     Bytes(Cursor<Arc<[u8]>>),
+    Stream(BufReader<Box<dyn Read + Send>>),
+}
+
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(file) => f.debug_tuple("File").field(file).finish(),
+            Self::Bytes(_) => f.write_str("Bytes"),
+            Self::Stream(_) => f.write_str("Stream"),
+        }
+    }
 }
 
 impl Read for Input {
@@ -62,6 +77,7 @@ impl Read for Input {
         match self {
             Self::File(f) => f.read(buf),
             Self::Bytes(b) => b.read(buf),
+            Self::Stream(s) => s.read(buf),
         }
     }
 }
@@ -71,6 +87,7 @@ impl BufRead for Input {
         match self {
             Self::File(f) => f.fill_buf(),
             Self::Bytes(b) => b.fill_buf(),
+            Self::Stream(s) => s.fill_buf(),
         }
     }
 
@@ -78,6 +95,7 @@ impl BufRead for Input {
         match self {
             Self::File(f) => f.consume(n),
             Self::Bytes(b) => b.consume(n),
+            Self::Stream(s) => s.consume(n),
         }
     }
 }
@@ -87,6 +105,7 @@ impl Seek for Input {
         match self {
             Self::File(f) => f.seek(pos),
             Self::Bytes(b) => b.seek(pos),
+            Self::Stream(_) => Err(std::io::ErrorKind::Unsupported.into()),
         }
     }
 }
@@ -101,13 +120,17 @@ pub(crate) enum DataStart {
     After(u64),
 }
 
+/// What reading a header finds: the format, the header, where records start,
+/// and (VCF text) how many lines the header took.
+pub(crate) type HeaderStart = (VcfFormat, VcfHeader, DataStart, u64);
+
 /// Everything a [`VcfFile`]'s readers share.
 pub(crate) struct FileShared {
     source: Source,
     pub(crate) format: VcfFormat,
     pub(crate) header: VcfHeader,
     pub(crate) data_start: DataStart,
-    index: Option<CsiIndex>,
+    pub(crate) index: Option<VcfIndex>,
     pub(crate) contigs: ContigTable,
     /// VCF text: the header's lines, so a record's line number is known.
     pub(crate) header_lines: u64,
@@ -131,6 +154,7 @@ impl std::fmt::Debug for FileShared {
         match &self.source {
             Source::Path(path) => d.field("path", path),
             Source::Bytes(bytes) => d.field("bytes", &bytes.len()),
+            Source::Stream => d.field("stream", &true),
         };
         d.field("format", &self.format).finish_non_exhaustive()
     }
@@ -143,6 +167,9 @@ impl Source {
                 .map(|f| Input::File(BufReader::with_capacity(FILE_BUFFER, f)))
                 .map_err(|source| VcfReadError::Open { path: path.clone(), source }),
             Source::Bytes(bytes) => Ok(Input::Bytes(Cursor::new(Arc::clone(bytes)))),
+            // Its one reader holds the input; nothing reopens it but a
+            // query, which fails first for want of an index.
+            Source::Stream => Err(VcfReadError::NoIndex),
         }
     }
 }
@@ -157,7 +184,7 @@ impl FileShared {
     pub(crate) fn path(&self) -> Option<&Path> {
         match &self.source {
             Source::Path(path) => Some(path),
-            Source::Bytes(_) => None,
+            Source::Bytes(_) | Source::Stream => None,
         }
     }
 
@@ -201,14 +228,20 @@ impl VcfFile {
     /// malformed, or an index exists and does not parse.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, VcfReadError> {
         let path = path.as_ref();
-        let index = match crate::utils::find_index(path, &["csi"]) {
-            Some(index) => Some(CsiIndex::from_path(&index)?),
+        let source = Source::Path(path.to_path_buf());
+        let start = read_header(source.open()?)?;
+        let index = match crate::utils::find_index(path, index_extensions(start.0)) {
+            Some(index) => Some(
+                std::fs::read(&index)
+                    .map_err(|source| VcfReadError::Open { path: index, source })?,
+            ),
             None => None,
         };
-        Self::new(Source::Path(path.to_path_buf()), index)
+        Self::new(source, start, index.as_deref())
     }
 
-    /// A file held in memory, with its index's bytes if it has one.
+    /// A file held in memory, with its index's bytes (TBI or CSI) if it has
+    /// one. A plain-text VCF has no index: one given for it is not read.
     ///
     /// # Errors
     /// As [`Self::open`].
@@ -216,17 +249,28 @@ impl VcfFile {
         data: impl Into<Arc<[u8]>>,
         index: Option<&[u8]>,
     ) -> Result<Self, VcfReadError> {
-        let index = index.map(CsiIndex::from_bytes).transpose()?;
-        Self::new(Source::Bytes(data.into()), index)
+        let source = Source::Bytes(data.into());
+        let start = read_header(source.open()?)?;
+        Self::new(source, start, index)
     }
 
-    fn new(source: Source, index: Option<CsiIndex>) -> Result<Self, VcfReadError> {
-        let (format, header, data_start, header_lines) = read_header(source.open()?)?;
+    pub(crate) fn new(
+        source: Source,
+        (format, header, data_start, header_lines): HeaderStart,
+        index: Option<&[u8]>,
+    ) -> Result<Self, VcfReadError> {
+        let mut contigs = ContigTable::new(&header);
+        let index = match index {
+            Some(bytes) if format != VcfFormat::Vcf => {
+                Some(VcfIndex::parse(bytes, &header, &mut contigs)?)
+            }
+            _ => None,
+        };
         let fields = FieldTable::new(&header, format != VcfFormat::Bcf);
         let shared = FileShared {
             rlen_keys: RlenKeys::new(&fields),
             fields,
-            contigs: ContigTable::new(&header),
+            contigs,
             filters: filter_table(&header),
             first_phase_is_read: header.version() >= VcfVersion::V4_4,
             header_lines,
@@ -257,10 +301,32 @@ impl VcfFile {
         self.0.index.is_some()
     }
 
+    // r[impl vcf_reader.partitions+2]
+    /// Split the file into about `n` [`Partition`]s of roughly equal
+    /// compressed bytes, in file order: whole regions of the indexed
+    /// contigs, at least one per contig. Read each with
+    /// [`ReaderBuilder::partition`]; every record is in exactly one.
+    ///
+    /// # Errors
+    /// [`VcfReadError::NoIndex`] without an index.
+    pub fn partitions(&self, n: NonZeroUsize) -> Result<Vec<Partition>, VcfReadError> {
+        super::query::partitions(&self.0, n)
+    }
+
     // r[impl vcf_reader.reader]
     /// A reader of records into `F`, to configure and [`open`](ReaderBuilder::open).
     pub fn reader<F: Fields>(&self) -> ReaderBuilder<'_, F> {
         ReaderBuilder::new(self)
+    }
+}
+
+/// The index names of `r[index.locate]` a format's index may have: a
+/// plain-text VCF has none.
+fn index_extensions(format: VcfFormat) -> &'static [&'static str] {
+    match format {
+        VcfFormat::Vcf => &[],
+        VcfFormat::VcfGz => &["csi", "tbi"],
+        VcfFormat::Bcf => &["csi"],
     }
 }
 
@@ -278,7 +344,7 @@ fn filter_table(header: &VcfHeader) -> Vec<Option<FilterId>> {
 }
 
 /// How the first bytes of a file are framed.
-enum Container {
+pub(crate) enum Container {
     Bgzf,
     Gzip,
     Plain,
@@ -286,7 +352,7 @@ enum Container {
 
 // r[impl vcf_reader.formats]
 /// The container `prefix` (the file's first bytes) starts with.
-fn container(prefix: &[u8]) -> Container {
+pub(crate) fn container(prefix: &[u8]) -> Container {
     if !prefix.starts_with(&GZIP_MAGIC) {
         return Container::Plain;
     }
@@ -304,7 +370,7 @@ fn container(prefix: &[u8]) -> Container {
 }
 
 /// The format a decompressed (or plain) start of a file names.
-fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> {
+pub(crate) fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> {
     if start.starts_with(BCF_MAGIC) {
         return if compressed { Ok(VcfFormat::Bcf) } else { Err(VcfReadError::UncompressedBcf) };
     }
@@ -319,7 +385,7 @@ fn format_of(start: &[u8], compressed: bool) -> Result<VcfFormat, VcfReadError> 
 
 /// Detect the format, read the header, and find where records start and
 /// (VCF text) how many lines the header took.
-fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart, u64), VcfReadError> {
+fn read_header(mut input: Input) -> Result<HeaderStart, VcfReadError> {
     let mut prefix = Vec::with_capacity(64);
     (&mut input).take(64).read_to_end(&mut prefix).map_err(read_failed)?;
     input.seek(SeekFrom::Start(0)).map_err(read_failed)?;
@@ -347,7 +413,9 @@ fn read_header(mut input: Input) -> Result<(VcfFormat, VcfHeader, DataStart, u64
 }
 
 /// A BCF header after its magic, and the bytes it took.
-fn read_bcf_header(stream: &mut BgzfStream<Input>) -> Result<(VcfHeader, u64), VcfReadError> {
+pub(crate) fn read_bcf_header(
+    stream: &mut BgzfStream<Input>,
+) -> Result<(VcfHeader, u64), VcfReadError> {
     stream.advance(BCF_MAGIC.len());
     let mut l_text = [0u8; 4];
     stream.read_exact_into(&mut l_text)?;
@@ -370,7 +438,9 @@ fn read_bcf_header(stream: &mut BgzfStream<Input>) -> Result<(VcfHeader, u64), V
 /// A VCF text header: the `##` lines through the `#CHROM` line, and the
 /// bytes and lines they took. A line that is not a header line ends it, and
 /// [`VcfHeader::parse`] says what is missing.
-fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64, u64), VcfReadError> {
+pub(crate) fn read_text_header(
+    input: &mut impl BufRead,
+) -> Result<(VcfHeader, u64, u64), VcfReadError> {
     let mut text = Vec::new();
     let mut lines = 0u64;
     loop {
@@ -399,7 +469,7 @@ fn read_text_header(input: &mut impl BufRead) -> Result<(VcfHeader, u64, u64), V
     Ok((VcfHeader::parse(text)?, len, lines))
 }
 
-fn read_failed(source: std::io::Error) -> VcfReadError {
+pub(crate) fn read_failed(source: std::io::Error) -> VcfReadError {
     VcfReadError::Bgzf(crate::bam::bgzf::BgzfError::ReadFailed { source })
 }
 
@@ -428,6 +498,40 @@ impl ContigTable {
             }
         }
         Self { by_rid, discovered: RwLock::default() }
+    }
+
+    /// Add `name`, which an index lists, if the header does not declare
+    /// it (`r[vcf_reader.contigs]`: such contigs follow the header's); its tid.
+    pub(crate) fn add_indexed(&mut self, header: &VcfHeader, name: &str) -> u32 {
+        if let Some(id) = self.find(header, name) {
+            return id.tid;
+        }
+        let discovered =
+            self.discovered.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tid = self.by_rid.len().saturating_add(discovered.contigs.len());
+        let tid = u32::try_from(tid).unwrap_or(u32::MAX);
+        discovered.contigs.push(ContigId { tid, name: SmolStr::from(name), header: header.id() });
+        tid
+    }
+
+    /// The contig named `name`, if the header, the index or a record named it.
+    pub(crate) fn find(&self, header: &VcfHeader, name: &str) -> Option<ContigId> {
+        if let Some(id) =
+            header.contig_map().get(name).and_then(|rid| self.by_rid.get(rid)?.clone())
+        {
+            return Some(id);
+        }
+        let read = self.discovered.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        read.contigs.iter().find(|c| c.name() == name).cloned()
+    }
+
+    /// The contig with tid `tid`.
+    pub(crate) fn get(&self, tid: u32) -> Option<ContigId> {
+        if let Some(id) = self.by_rid.iter().flatten().find(|c| c.tid == tid) {
+            return Some(id.clone());
+        }
+        let read = self.discovered.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        read.contigs.iter().find(|c| c.tid == tid).cloned()
     }
 
     /// The contig a BCF record's `CHROM` index names.

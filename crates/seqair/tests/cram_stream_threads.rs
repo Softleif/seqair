@@ -1,6 +1,7 @@
 //! A CRAM `AlignmentStream` decoding on threads against the same stream
 //! decoding inline: the same records and errors in the same order, however
 //! the input arrives, on whichever pool, whatever fields are read.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

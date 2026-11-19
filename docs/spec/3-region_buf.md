@@ -33,8 +33,11 @@ r[region_buf.no_bin0]
 
 ## Construction
 
-r[region_buf.new+2]
-`RegionBuf::new` MUST accept a seekable reader (borrowed for the buffer's lifetime) and a slice of index chunks. It MUST merge chunks into the ranges to stream, but MUST NOT eagerly read the region; compressed bytes are pulled into the window lazily on the first decode (or on a `seek_virtual` with a non-zero intra-block offset). Refills MUST be sequential reads sized per `r[region_buf.refill_growth]`, not one read per block.
+r[region_buf.new+3]
+`RegionBuf::new` MUST accept a seekable reader (a `&mut` borrowed for the buffer's lifetime, or owned) and a slice of index chunks. It MUST merge chunks into the ranges to stream, but MUST NOT eagerly read the region; compressed bytes are pulled into the window lazily on the first decode (or on a `seek_virtual` with a non-zero intra-block offset). Refills MUST be sequential reads sized per `r[region_buf.refill_growth]`, not one read per block.
+
+r[region_buf.replan]
+A `RegionBuf` that owns its reader and block cache (the VCF reader's, which outlives any one query) MUST be pointable at a new query's chunks, keeping its reader, buffers and cache, and MUST then read exactly what a fresh `RegionBuf` over those chunks reads.
 
 r[region_buf.refill_growth]
 The first refill MUST read one maximum BGZF block (64 KiB, or what `need` requires if more), and each later refill of the same buffer MUST read twice the previous one, up to the window budget. A query stops at the first record past its end, often far short of its planned range, and with the block cache (`r[region_buf.block_cache]`) it may need only a block or two: a budget-sized first read fetched the whole rest of the range regardless — 13.6× the bytes their blocks span for 1 bp queries every 1 kb on 30× WGS, 5.5× with this rule. Doubling keeps a large region at about one read per `WINDOW_BUDGET` plus a logarithmic number of smaller ones.

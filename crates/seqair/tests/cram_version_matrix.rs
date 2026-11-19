@@ -1,5 +1,6 @@
 //! CRAM version matrix tests: generate CRAM v3.0 and v3.1 from htslib test
 //! SAMs via samtools, then read with seqair and compare against noodles.
+#![cfg(feature = "cram")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

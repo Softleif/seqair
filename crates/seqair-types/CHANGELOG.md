@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `Pos0` and `Pos1` implement `TryFrom<usize>`, as `TryFrom<u64>`.
+
 ### Changed
 
 - MSRV 1.98.1 → 1.100: `smallvec` 2.0.0-beta.5, which the lock file resolves, declares `rust-version = "1.100"`.
