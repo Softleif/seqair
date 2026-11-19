@@ -189,6 +189,14 @@ impl<'a> InfoRef<'a> {
         &self,
     ) -> impl Iterator<Item = Result<(&'a str, &'a InfoDef, DynValue<'a>), VcfReadError>> + use<'a>
     {
+        self.iter_ids().map(|field| field.map(|(_, name, def, value)| (name, def, value)))
+    }
+
+    /// [`Self::iter`], each field with its id in the file's field table.
+    pub(crate) fn iter_ids(
+        &self,
+    ) -> impl Iterator<Item = Result<(DictId, &'a str, &'a InfoDef, DynValue<'a>), VcfReadError>>
+    + use<'a> {
         let this = *self;
         let file = self.file;
         let (error, entries) = match self.index() {
@@ -200,7 +208,7 @@ impl<'a> InfoRef<'a> {
             let value = this
                 .value(e.span())
                 .and_then(|v| dyn_decode(v, name, def.typ, false, file, this.at));
-            Some(value.map(|v| (name, def, v)))
+            Some(value.map(|v| (e.id, name, def, v)))
         }))
     }
 }
@@ -250,6 +258,13 @@ impl Info {
         &self,
     ) -> impl Iterator<Item = Result<(&str, &InfoDef, DynValue<'_>), VcfReadError>> {
         self.view().iter()
+    }
+
+    /// Every field present, with its id (see [`InfoRef::iter`]).
+    pub(crate) fn iter_ids(
+        &self,
+    ) -> impl Iterator<Item = Result<(DictId, &str, &InfoDef, DynValue<'_>), VcfReadError>> {
+        self.view().iter_ids()
     }
 }
 

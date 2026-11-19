@@ -21,6 +21,8 @@ mod fields;
 mod file;
 mod full;
 mod index;
+pub(crate) use index::DictId;
+pub(crate) use samples::DynColumn;
 mod info;
 mod keys;
 mod locus;

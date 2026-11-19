@@ -154,7 +154,7 @@ impl FieldTable {
     }
 
     /// Ids below this one are the header's or reserved.
-    fn base(&self) -> usize {
+    pub(crate) fn base(&self) -> usize {
         self.header_len.saturating_add(self.reserved_names.len())
     }
 

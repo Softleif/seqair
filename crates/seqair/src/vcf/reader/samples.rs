@@ -348,6 +348,26 @@ impl<'a> SampleRef<'a> {
     }
 }
 
+/// One FORMAT field of a record with its id in the file's field table, read
+/// sample by sample as its definition says: what a passthrough copy writes.
+pub(crate) struct DynColumn<'a> {
+    pub(crate) id: DictId,
+    pub(crate) name: &'a str,
+    pub(crate) def: &'a FormatDef,
+    field: FieldAt<'a>,
+    file: &'a FileShared,
+    at: RecordAt,
+}
+
+impl<'a> DynColumn<'a> {
+    /// Sample `i`'s value; `None` past the last sample.
+    pub(crate) fn sample(&self, i: usize) -> Result<Option<DynValue<'a>>, VcfReadError> {
+        let Some(value) = self.field.sample(i) else { return Ok(None) };
+        let genotype = self.name == "GT";
+        dyn_decode(value, self.name, self.def.typ, genotype, self.file, self.at).map(Some)
+    }
+}
+
 /// Every sample's FORMAT values, borrowed.
 #[derive(Clone, Copy)]
 pub struct SamplesRef<'a> {
@@ -420,6 +440,24 @@ impl<'a> SamplesRef<'a> {
     /// How many samples there are.
     pub fn len(&self) -> usize {
         self.view.n_samples
+    }
+
+    /// Every FORMAT field present, in record order (a repeated key once).
+    pub(crate) fn columns(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<DynColumn<'a>, VcfReadError>> + use<'a>, VcfReadError>
+    {
+        let view = self.view;
+        let index = view.index()?;
+        Ok(index.keys.entries().iter().map(move |&entry| {
+            let (file, at) = (view.file, view.at);
+            let index_id = i32::try_from(entry.id.get()).unwrap_or(i32::MAX);
+            let (name, def) = file.fields.format_def(&file.header, entry.id).ok_or_else(|| {
+                at.error(file, RecordError::UnknownKey { index: index_id, kind: KeyKind::Format })
+            })?;
+            let field = view.field_at(index, entry)?;
+            Ok(DynColumn { id: entry.id, name, def, field, file, at })
+        }))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -674,6 +712,13 @@ impl Samples {
     /// How many samples there are.
     pub fn len(&self) -> usize {
         self.0.n_samples
+    }
+
+    /// Every FORMAT field present (see [`SamplesRef::columns`]).
+    pub(crate) fn columns(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<DynColumn<'_>, VcfReadError>>, VcfReadError> {
+        SamplesRef::new(self.0.view()).columns()
     }
 
     pub fn is_empty(&self) -> bool {
