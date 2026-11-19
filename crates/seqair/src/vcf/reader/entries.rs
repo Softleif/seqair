@@ -269,6 +269,13 @@ pub(crate) struct LazyIndex<T = FieldIndex> {
 // builder may be another thread than the owner, which needs `T: Send`.
 unsafe impl<T: Send + Sync> Sync for LazyIndex<T> {}
 
+// The impl above hands out `&RecordError` across threads and moves it with
+// the index: it must stay `Send + Sync` whatever variants it gains.
+const _: () = {
+    const fn send_sync<E: Send + Sync>() {}
+    send_sync::<RecordError>();
+};
+
 impl<T: Default> Default for LazyIndex<T> {
     fn default() -> Self {
         Self {
