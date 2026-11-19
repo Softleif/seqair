@@ -2,7 +2,7 @@
 //! region; [`BamIndex::query_split`] separates nearby (levels 3–5) from distant (levels 0–2) chunks.
 
 use super::bgzf::{BgzfError, VirtualOffset};
-use super::csi_index::{CsiIndex, csi_pseudo_bin};
+use super::csi_index::{CsiIndex, bin_end, csi_pseudo_bin};
 use super::header::BamHeader;
 use crate::reader::Tid;
 use seqair_types::Pos0;
@@ -64,12 +64,16 @@ struct RefIndex {
     /// thousands of bins × ~8 candidates on every query.
     bins: Vec<Bin>,
     linear_index: Vec<VirtualOffset>,
+    /// Where the last of its bins ends: no bin holds a position at or past
+    /// it, so a query's end is clamped to it before listing candidate bins.
+    end: u64,
 }
 
 impl RefIndex {
     fn new(mut bins: Vec<Bin>, linear_index: Vec<VirtualOffset>) -> Self {
         bins.sort_by_key(|b| b.bin_id);
-        RefIndex { bins, linear_index }
+        let end = bins.iter().filter_map(|b| bin_end(b.bin_id, BAI_MIN_SHIFT, BAI_DEPTH)).max();
+        RefIndex { bins, linear_index, end: end.unwrap_or(0) }
     }
 
     /// The bins whose id is in `candidates`.
@@ -389,7 +393,13 @@ impl BamIndex {
         };
 
         let start_u64 = start.as_u64();
-        let end_u64 = end.as_u64();
+        // r[impl index.query_clamp]
+        // No bin reaches past `ref_idx.end`: an open-ended region lists the
+        // bins up to there, not the binning's 2^29.
+        let end_u64 = end.as_u64().min(ref_idx.end.saturating_sub(1));
+        if start_u64 > end_u64 {
+            return QueryChunks { nearby: Vec::new(), distant: Vec::new() };
+        }
         let candidate_bins = reg2bins(start_u64, end_u64.wrapping_add(1)); // reg2bins uses half-open
 
         // Linear index: minimum virtual offset for reads starting at or after `start`
@@ -802,6 +812,80 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, BaiError> {
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
+
+    /// BAI's bins (`[SAMv1]` §5.3): the six levels' first ids and shifts.
+    #[test]
+    fn bin_ends_follow_the_bai_layout() {
+        let levels = [
+            (0u32, 1u32, 29u32),
+            (1, 8, 26),
+            (9, 64, 23),
+            (73, 512, 20),
+            (585, 4096, 17),
+            (4681, 32768, 14),
+        ];
+        for (first, n, shift) in levels {
+            for k in [0, n / 2, n - 1] {
+                let expected = (u64::from(k) + 1) << shift;
+                assert_eq!(
+                    bin_end(first + k, BAI_MIN_SHIFT, BAI_DEPTH),
+                    Some(expected),
+                    "bin {}",
+                    first + k
+                );
+            }
+        }
+        assert_eq!(bin_end(37449, BAI_MIN_SHIFT, BAI_DEPTH), None);
+        assert_eq!(bin_end(csi_pseudo_bin(BAI_DEPTH), BAI_MIN_SHIFT, BAI_DEPTH), None);
+    }
+
+    /// Every index fixture, BAI, TBI and CSI.
+    fn fixture_indexes() -> Vec<AlignmentIndex> {
+        let data = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/");
+        let read = |name: &str| std::fs::read(format!("{data}{name}")).unwrap();
+        let tabix = |name: &str| {
+            let raw = decompress_bgzf_file(&read(name)).unwrap();
+            AlignmentIndex::Bai(BamIndex::from_tabix_named(&raw).unwrap().0)
+        };
+        vec![
+            AlignmentIndex::Bai(
+                BamIndex::from_path(Path::new(&format!("{data}test.bam.bai"))).unwrap(),
+            ),
+            AlignmentIndex::Csi(CsiIndex::from_bytes(&read("test.bam.samtools.csi")).unwrap()),
+            tabix("vcf/rastair.vcf.gz.tbi"),
+            tabix("vcf/truth.vcf.gz.tbi"),
+            AlignmentIndex::Csi(CsiIndex::from_bytes(&read("vcf/rastair.bcf.csi")).unwrap()),
+            AlignmentIndex::Csi(CsiIndex::from_bytes(&read("vcf/panel.bcf.csi")).unwrap()),
+        ]
+    }
+
+    // r[verify index.query_clamp]
+    /// A query lists the chunks of every bin overlapping its region, clamped
+    /// or not: against the diagnostic scan of all bins, which never clamps,
+    /// on regions bounded and open-ended (to the binning's last position).
+    #[hegel::test]
+    fn clamped_queries_find_every_overlapping_chunk(tc: TestCase) {
+        use hegel::prelude::*;
+        let indexes = fixture_indexes();
+        let index = tc.draw(gs::sampled_from(indexes.iter().collect::<Vec<_>>()));
+        let n_refs = index.reference_stats().len() as u32;
+        let tid = tc.draw(gs::integers::<u32>().max_value(n_refs.saturating_sub(1)));
+        let max = index.max_position() - 1;
+        let start = tc.draw(gs::integers::<u64>().max_value(max));
+        let start = start >> tc.draw(gs::integers::<u32>().max_value(20));
+        let end = if tc.draw(gs::booleans()) {
+            max
+        } else {
+            (start + tc.draw(gs::integers::<u64>().max_value(1 << 22))).min(max)
+        };
+        let (s, e) = (Pos0::new(start as u32).unwrap(), Pos0::new(end as u32).unwrap());
+        let mut expected: Vec<Chunk> =
+            index.query_annotated(tid, s, e).into_iter().map(|a| a.chunk).collect();
+        expected.sort_by_key(|c| c.begin);
+        merge_overlapping_chunks(&mut expected);
+        let pairs = |v: Vec<Chunk>| v.iter().map(|c| (c.begin, c.end)).collect::<Vec<_>>();
+        assert_eq!(pairs(index.query(tid, s, e)), pairs(expected), "tid {tid} {start}..={end}");
+    }
     use seqair_types::Pos0;
 
     #[test]

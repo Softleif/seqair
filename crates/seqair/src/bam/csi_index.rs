@@ -146,15 +146,19 @@ struct CsiRefIndex {
     /// candidate bins by binary search instead of testing every bin of the
     /// reference against the candidate list.
     sorted_ids: Vec<(u32, usize)>,
+    /// Where the last of its bins ends: no bin holds a position at or past
+    /// it, so a query's end is clamped to it before listing candidate bins.
+    end: u64,
 }
 
 impl CsiRefIndex {
-    fn new(bins: Vec<CsiBin>) -> Self {
+    fn new(bins: Vec<CsiBin>, min_shift: u32, depth: u32) -> Self {
         let by_bin_id = bins.iter().enumerate().map(|(i, b)| (b.bin_id, i)).collect();
         let mut sorted_ids: Vec<(u32, usize)> =
             bins.iter().enumerate().map(|(i, b)| (b.bin_id, i)).collect();
         sorted_ids.sort_unstable();
-        CsiRefIndex { bins, by_bin_id, sorted_ids }
+        let end = bins.iter().filter_map(|b| bin_end(b.bin_id, min_shift, depth)).max();
+        CsiRefIndex { bins, by_bin_id, sorted_ids, end: end.unwrap_or(0) }
     }
 
     /// The bins whose id is in `candidates`.
@@ -298,7 +302,7 @@ impl CsiIndex {
                 depth,
             ));
 
-            references.push(CsiRefIndex::new(bins));
+            references.push(CsiRefIndex::new(bins, min_shift, depth));
         }
 
         // r[impl csi.n_no_coor]
@@ -422,7 +426,13 @@ impl CsiIndex {
         };
 
         let start_u64 = start.as_u64();
-        let end_u64 = end.as_u64();
+        // r[impl index.query_clamp]
+        // No bin reaches past `ref_idx.end`: an open-ended region lists the
+        // bins up to there, not the binning's 2^29 (or more).
+        let end_u64 = end.as_u64().min(ref_idx.end.saturating_sub(1));
+        if start_u64 > end_u64 {
+            return empty();
+        }
         // reg2bins uses half-open interval
         let candidate_bins =
             match csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth) {
@@ -595,6 +605,15 @@ fn csi_bin_level(bin_id: u32, depth: u32) -> Result<u32, CsiError> {
     // Pseudo-bin or invalid. Use saturating_add since depth+1 is only used as
     // a "past the end" sentinel; the caller never uses it for further math.
     Ok(depth.saturating_add(1))
+}
+
+/// Where bin `bin_id` of a `min_shift`/`depth` binning ends (exclusive);
+/// `None` for the pseudo-bin or an id past the binning.
+pub(crate) fn bin_end(bin_id: u32, min_shift: u32, depth: u32) -> Option<u64> {
+    let level = csi_bin_level(bin_id, depth).ok().filter(|&l| l <= depth)?;
+    let first = (1u64.checked_shl(level.checked_mul(3)?)?.checked_sub(1)?) / 7;
+    let shift = min_shift.checked_add(depth.checked_sub(level)?.checked_mul(3)?)?;
+    u64::from(bin_id).checked_sub(first)?.checked_add(1)?.checked_shl(shift)
 }
 
 // r[impl csi.pseudo_bin]
@@ -947,7 +966,7 @@ mod tests {
             min_shift: 14,
             depth: 5,
             aux: Vec::new(),
-            references: vec![CsiRefIndex::new(bins)],
+            references: vec![CsiRefIndex::new(bins, 14, 5)],
             stats: Vec::new(),
             unplaced_unmapped: None,
         }
@@ -1128,7 +1147,7 @@ mod tests {
         let err = csi_reg2bins(0, 100, 14, 22).unwrap_err();
         assert!(matches!(err, CsiError::BinArithmeticOverflow { .. }), "got {err:?}");
 
-        let dummy = CsiRefIndex::new(Vec::new());
+        let dummy = CsiRefIndex::new(Vec::new(), 14, 5);
         let err = csi_min_offset(&dummy, 0, 14, 22).unwrap_err();
         assert!(matches!(err, CsiError::BinArithmeticOverflow { .. }), "got {err:?}");
     }
