@@ -42,7 +42,7 @@ r[vcf_fields.plan]
 A reader MUST call `F::plan` once, when it opens, and keep the plan for every record. Everything that depends only on the header — resolved keys, the selected sample's index, type checks — MUST happen in `plan`, so a type mismatch fails at open rather than on some record. Planning MUST be cheap enough to repeat per `file.query` (it runs once per reader, not per file).
 
 r[vcf_fields.plan_context]
-`plan` MUST receive a `PlanContext` rather than the header and the options: `header()`; `info_key`, `format_key` and their `_opt` forms, resolved through the file's field table (`r[vcf_values.file_keys]`); `filter(name)`; and `selected_sample() -> Result<SampleIdx, PlanError>`, the sample selection `Sample` itself uses (`r[vcf_fields.sample+2]`), so a user type reading one sample's FORMAT needs no logic of its own.
+`plan` MUST receive a `PlanContext` rather than the header and the options: `header()`; `info_key`, `format_key` and their `_opt` forms, resolved as the file resolves them (`r[vcf_values.file_keys+2]`), and `lenient()` (`r[vcf_values.lenient_keys]`); `filter(name)`; and `selected_sample() -> Result<SampleIdx, PlanError>`, the sample selection `Sample` itself uses (`r[vcf_fields.sample+2]`), so a user type reading one sample's FORMAT needs no logic of its own.
 
 r[vcf_fields.with_plan]
 `builder.with_plan(plan)` MUST open the reader with a plan the caller built instead of calling `F::plan`. That is the way to give a type runtime context (a length band, a region, a trimming switch): it lives in the caller's `Plan`, whose keys come from `file.info_key` and friends.

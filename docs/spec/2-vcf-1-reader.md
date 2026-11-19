@@ -15,7 +15,7 @@ r[vcf_reader.file+2]
 `VcfFile::open(path)` MUST parse the header (`r[vcf_header.parse]`) and locate an index by the names of `r[index.locate]` (VCF: `csi`, then `tbi`; BCF: `csi`). `VcfFile::from_bytes(data, index)` takes the index's bytes and MUST tell TBI from CSI by content (BGZF-compressed or not). A missing index MUST NOT fail the open: sequential reading works without one, `has_index()` is `false`, and only a query or `partitions` fails, with `VcfReadError::NoIndex`. An index that exists but does not parse MUST fail the open.
 
 r[vcf_reader.file.shared+2]
-`VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the field table (`r[vcf_reader.field_table]`) and its text-key lookup (`r[vcf_values.text_resolution+2]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared+2]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
+`VcfFile` MUST be `Send + Sync + Clone`, with its parsed state — header, index, the field table (`r[vcf_reader.field_table]`) and its text-key lookup (`r[vcf_values.text_resolution+2]`), the contig table (`r[vcf_reader.contigs]`) and the warn-once state (`r[vcf_reader.undeclared+3]`) — behind one `Arc`. Cloning it MUST NOT re-read the file. This is what lets a rayon task query a file without reopening and re-parsing it (aardvark does that today because noodles' readers are not `Send`).
 
 ## Readers
 
@@ -83,15 +83,15 @@ r[vcf_reader.stream]
 ## Undeclared fields
 
 r[vcf_reader.field_table]
-A VCF text file's INFO and FORMAT keys MUST resolve against a field table: the header's string dictionary, extended with
+A VCF text file's records and a file's lenient keys (`r[vcf_values.lenient_keys]`) MUST resolve INFO and FORMAT keys against a field table: the header's string dictionary, extended with
 
 - every VCF 4.5 reserved INFO and FORMAT key (the specification's tables of reserved INFO keys and genotype keys, and its structural-variant INFO and FORMAT keys; the `M[0-9]+[ACGTUN]` patterns excepted) that the header does not declare in that section, with its reserved `Type` and `Number`;
-- every other key a record uses or a caller resolves, as `Type=String, Number=.`.
+- every other key a record uses or a lenient key resolves, as `Type=String, Number=.`.
 
-Keys new to the dictionary get ids past the header's (the reserved ones first, then others in order of first use); a name the header declares in the other section keeps its id. The table is append-only and shared by every reader of the file, so a record read on one thread and a key resolved on another agree on the id. htslib adds an undeclared key to its header as `Type=String` too (with `Number=1`; `Str` reads either) but knows no reserved definitions; noodles applies the reserved ones. Without either, aardvark's undeclared `SVTYPE` and `TRID` silently turned breakends and tandem repeats into insertions. A BCF file's table is its header's dictionary alone: a BCF record names fields by dictionary index, so an index the dictionary lacks is a malformed record and MUST fail with a typed error.
+Keys new to the dictionary get ids past the header's (the reserved ones first, then others in order of first use); a name the header declares in the other section keeps its id. The table is append-only and shared by every reader of the file, so a record read on one thread and a key resolved on another agree on the id. htslib adds an undeclared key to its header as `Type=String` too (with `Number=1`; `Str` reads either) but knows no reserved definitions; noodles applies the reserved ones. Without either, aardvark's undeclared `SVTYPE` and `TRID` silently turned breakends and tandem repeats into insertions. A BCF record names fields by dictionary index, so an index the dictionary lacks is a malformed record and MUST fail with a typed error; a BCF file's table adds only the names lenient keys resolve, at ids no record can name.
 
-r[vcf_reader.undeclared+2]
-Reading an undeclared key MUST be visible in the log even when no record is ever indexed: resolving a reserved key the header does not declare logs a `debug!`, resolving any other undeclared key logs one `warn!` per name ("not declared in the header, read as String"), and a record that uses an undeclared key that VCF does not reserve and nobody resolved logs a single `warn!` per file naming the first such key. A warning only on access never fires for the caller who could not resolve the key and so never reads it.
+r[vcf_reader.undeclared+3]
+Reading an undeclared key MUST be visible in the log even when no record is ever indexed: resolving an undeclared key through a lenient key logs one `warn!` per name, giving the `Type` and `Number` it is read with, and a record that uses an undeclared key — reserved or not — that no lenient key resolved logs a single `warn!` per file naming the first such key. A warning only on access never fires for the caller who could not resolve the key and so never reads it: aardvark's undeclared `SVTYPE` would otherwise vanish silently behind an `info_key_opt` that returns `None`.
 
 r[vcf_reader.undeclared.filter]
 A VCF text FILTER name the header does not declare MUST still fail the record (`FilterStatus::Failed`), so a record never passes for a filter the header forgot; no `FilterId` can name it, so `Failed` does not list it, and it counts towards the same single `warn!` per file. htslib instead adds the name to its header; seqair's header is shared and immutable. Dropping the name would turn a record whose only filter is undeclared into `Missing`, which `bcf_has_filter` and many callers count as passing.

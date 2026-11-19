@@ -9,20 +9,23 @@ Fields are read through the same typed keys the writer uses (`InfoKey<V>`, `Form
 r[vcf_values.keys+2]
 `VcfHeader` MUST resolve keys by name: `info_key::<V>(name) -> Result<InfoKey<V>, KeyError>`, `format_key::<V>(name)`, `filter(name) -> Result<FilterId, _>`, `contig(name) -> Result<ContigId, _>`. A header resolves only what it declares: it is what a writer writes, and the keys it hands out are valid for writing. Resolution MUST check the marker against the declaration through a `FieldKind` trait on each marker: `UnknownField { name, kind }` for an undeclared name, naming the section (`KeyKind`), `TypeMismatch { name, declared, requested }` when the `ValueType` disagrees, `NumberMismatch { name, declared }` when the cardinality cannot hold (a `Scalar` needs `Number=1`, a `Flag` needs `Type=Flag`, `Gt` needs the FORMAT `GT` field).
 
-r[vcf_values.file_keys]
-Readers resolve keys through their file: `file.info_key::<V>(name)` and `file.format_key::<V>(name)` (and the same on `PlanContext`) MUST resolve against the file's field table (`r[vcf_reader.field_table]`):
+r[vcf_values.file_keys+2]
+Readers resolve keys through their file: `file.info_key::<V>(name)` and `file.format_key::<V>(name)` (and the same on `PlanContext`) MUST resolve exactly what the header declares, as `r[vcf_values.keys+2]` does, for VCF text and BCF alike. The same file in both formats then resolves the same keys: HiPhase decided whether a file carries tandem-repeat annotations by whether `TRID` resolved, and with an undeclared `TRID` resolving in text but not in BCF it classified every text record as a tandem repeat. A key a header leaves out needs a lenient key (`r[vcf_values.lenient_keys]`); a record that uses one is still reported (`r[vcf_reader.undeclared+3]`).
+
+r[vcf_values.lenient_keys]
+`file.lenient()` (and `PlanContext::lenient()`) MUST return a `LenientKeys` view with the same four methods, resolving against the file's field table (`r[vcf_reader.field_table]`):
 
 | name | result |
 |---|---|
 | declared in the header | the header's key (`r[vcf_values.keys+2]`) |
-| reserved, undeclared (VCF text) | a key checked against the reserved `Type`/`Number`; `debug!` |
-| other undeclared (VCF text), `V` is `Str` or `Any` | a key, the name added to the table now; one `warn!` per name |
-| other undeclared, any other `V`, or any undeclared name in BCF | `UnknownField { name, kind }` |
+| reserved by VCF 4.5, undeclared | a key checked against the reserved `Type`/`Number` |
+| other undeclared, `V` is `Str` or `Any` | a key read as `Type=String, Number=.` |
+| other undeclared, any other `V` | `UnknownField { name, kind }` |
 
-A key the header does not declare MUST carry the file's own id rather than the header's, so the file's readers accept it and every writer refuses it as foreign (`r[vcf_values.header_brand+2]`): a writer would write a dictionary index its header lacks.
+Each undeclared name a lenient key resolves MUST log one `warn!` naming the `Type` and `Number` it is read with. The result MUST NOT depend on the format: in BCF the name gets an id past the dictionary, which no record can name, so the key resolves and finds nothing. A key the header does not declare MUST carry the file's own id rather than the header's, so the file's readers accept it and every writer refuses it as foreign (`r[vcf_values.header_brand+2]`): a writer would write a dictionary index its header lacks.
 
-r[vcf_values.optional_keys]
-`info_key_opt`/`format_key_opt` MUST return `Result<Option<Key<V>>, KeyError>`: `Ok(None)` exactly where the plain form fails with `UnknownField`, every other error kept. An optional annotation (GIAB has no CPG, many headers no SVTYPE) is then one `?` and one `Option`. There MUST NOT be a `get(Option<&Key>)`: the `Option` belongs to the plan, not to every record.
+r[vcf_values.optional_keys+2]
+`info_key_opt`/`format_key_opt`, on the file, on `PlanContext` and on `LenientKeys`, MUST return `Result<Option<Key<V>>, KeyError>`: `Ok(None)` exactly where the plain form fails with `UnknownField`, every other error kept. An optional annotation (GIAB has no CPG, many headers no SVTYPE) is then one `?` and one `Option`. There MUST NOT be a `get(Option<&Key>)`: the `Option` belongs to the plan, not to every record.
 
 r[vcf_values.field_kind]
 `FieldKind` MUST be the single source of a marker's `ValueType` and accepted `Number`s, used by reader key resolution and by the writer's `InfoFieldDef`/`FormatFieldDef`, so a definition whose marker disagrees with its declared `ValueType` (`InfoFieldDef::<Scalar<i32>>` with `ValueType::Float`) can no longer be written.
