@@ -575,3 +575,95 @@ while let Some((locus, site)) = reader.next_record()? {
 assert!(variants.len() >= 1237);
 # Ok(()) }
 ```
+
+## Writing what you read: conversion and edits
+
+[`Writer::copy_record`](crate::vcf::Writer::copy_record) copies a
+[`FullRecord`] into any output format whose header is the file's own or was
+derived from it with [`to_builder`](crate::vcf::VcfHeader::to_builder); the
+[`RecordEdit`](crate::vcf::RecordEdit) it returns takes the output header's
+keys like any record encoder: `key.encode(&mut edit, value)` replaces a field
+where it stands (or appends it), `remove_info`/`remove_format` drop one.
+Behind it is a [`FieldMap`](crate::vcf::FieldMap), the input's fields
+translated to the output header's and checked once; build one yourself for
+an unrelated output header, or to drop undeclared keys, and copy with
+`copy_record_with`. Converting VCF to BCF is a copy with the file's own header:
+
+```rust
+use seqair::vcf::{FullRecord, OutputFormat, VcfFile, Writer};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/rastair.vcf.gz");
+let file = VcfFile::open(path)?;
+let mut writer = Writer::new(Vec::new(), OutputFormat::Bcf).write_header(file.header())?;
+let mut reader = file.reader::<FullRecord>().open()?;
+while let Some(record) = reader.next_record()? {
+    writer.copy_record(record)?.emit()?;
+}
+let (bcf, index) = writer.finish()?;
+assert_eq!(VcfFile::from_bytes(bcf, None)?.reader::<FullRecord>().open()?.into_iter().count(), 400);
+assert!(index.is_some());
+# Ok(()) }
+```
+
+Rewriting a few fields and keeping the rest: derive the output header with
+[`to_builder`](crate::vcf::VcfHeader::to_builder), remove what you redefine,
+register the new definitions, and encode them into every copy. A name
+removed from the builder is never copied from the input, even when you
+register it again: the new PS below holds only what you write.
+
+```rust
+use seqair::vcf::record_encoder::{FormatFieldDef, Scalar};
+use seqair::vcf::{FormatGt, FullRecord, Genotype, OutputFormat, VcfFile, Writer};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/vcf/panel.bcf");
+let file = VcfFile::open(path)?;
+let mut builder = file.header().to_builder();
+builder.remove_format("PS"); // a field the input may declare differently
+builder.add_other_line("phaser_version=1.0");
+let mut builder = builder.formats();
+let ps = builder.register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set"))?;
+let output = builder.build()?;
+
+let in_gt: FormatGt = file.format_key("GT")?;
+let out_gt: FormatGt = output.format_key("GT")?;
+let mut writer = Writer::new(Vec::new(), OutputFormat::VcfGz).write_header(&output)?;
+let mut reader = file.reader::<FullRecord>().open()?;
+let (mut gts, mut sets) = (Vec::new(), Vec::new());
+while let Some(record) = reader.next_record()? {
+    gts.clear();
+    sets.clear();
+    for (i, gt) in record.samples().column(&in_gt)?.into_iter().flatten().enumerate() {
+        // Phase every diploid call; leave the others as they were.
+        match gt.map(|g| g.to_genotype()) {
+            Some(Genotype { alleles, .. }) if alleles.len() == 2 => {
+                gts.push(Genotype { alleles, phased: [true].into_iter().collect() });
+                sets.push(Some(i32::try_from(record.locus().start().pos1().map_or(0, |p| p.as_u32()))?));
+            }
+            other => {
+                gts.push(other.unwrap_or_else(Genotype::missing_diploid));
+                sets.push(None);
+            }
+        }
+    }
+    let mut edit = writer.copy_record(record)?;
+    if !gts.is_empty() {
+        out_gt.encode(&mut edit, &gts)?; // replaces GT where it stands
+        ps.encode_opt(&mut edit, &sets)?; // appended: `.` where `None`
+    }
+    edit.emit()?;
+}
+writer.finish()?;
+# Ok(()) }
+```
+
+A field the input header declares and the output header does not is left
+out of every copy; one both declare must have the same `Type` and `Number`,
+or building the map fails. Keys and filters a VCF text file uses without
+declaring them fail the copy with `VcfError::UndeclaredField` unless the
+output header declares them (as `String`) or the map is built with
+`.drop_undeclared()`: a writer cannot add header lines once records follow.
+Values are re-encoded, not copied as bytes, so the output is what bcftools
+writes for the same records (`0.10` comes out `0.1`, integers take the
+smallest BCF type).
