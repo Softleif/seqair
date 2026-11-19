@@ -2530,7 +2530,13 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
     if vcf.info_count == 0 {
         vcf.buf.push(b'.');
     }
-    // r[impl vcf_writer.format_serialization]
+    // r[impl vcf_writer.format_serialization+2]
+    if vcf.fmt_keys.is_empty() && vcf.n_samples > 0 {
+        vcf.buf.extend_from_slice(b"\t.");
+        for _ in 0..vcf.n_samples {
+            vcf.buf.extend_from_slice(b"\t.");
+        }
+    }
     if !vcf.fmt_keys.is_empty() {
         vcf.buf.push(b'\t');
         for (i, key) in vcf.fmt_keys.iter().enumerate() {

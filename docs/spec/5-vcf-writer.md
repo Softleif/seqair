@@ -18,8 +18,8 @@ Missing values MUST be serialized as `.`: missing QUAL, missing ID, missing INFO
 r[vcf_writer.info_serialization]
 INFO fields MUST be serialized as semicolon-separated `key=value` pairs. Flag-type fields emit the key only (no `=`). Multiple values within a field MUST be comma-separated. An empty INFO column MUST be written as `.`.
 
-r[vcf_writer.format_serialization]
-FORMAT keys MUST be colon-separated. Per-sample values MUST be colon-separated in the same order as FORMAT keys. Trailing missing values at the end of a sample MAY be omitted.
+r[vcf_writer.format_serialization+2]
+FORMAT keys MUST be colon-separated. Per-sample values MUST be colon-separated in the same order as FORMAT keys. Trailing missing values at the end of a sample MAY be omitted. A record without FORMAT fields in a file with samples MUST still have every column: FORMAT `.` and `.` for each sample, as htslib writes it; bcftools refuses a line with fewer columns than the header has samples.
 
 > _[VCF43] §1.3.2 "Genotype fields" — GT: `allele[sep allele]_`, sep is `/`or`|`, missing allele `.`\*
 

@@ -298,7 +298,7 @@ fn format_float_arrays_round_trip_through_bcftools(tc: TestCase) {
 }
 
 // r[verify record_encoder.format_methods+2]
-// r[verify vcf_writer.format_serialization]
+// r[verify vcf_writer.format_serialization+2]
 /// seqair writes the sample columns twice over: as VCF text, and as BCF that
 /// bcftools turns back into VCF text. The two paths share no encoding code, so
 /// agreeing is evidence about both.
