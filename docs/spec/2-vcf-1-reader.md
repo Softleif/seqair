@@ -121,8 +121,8 @@ Everything that fails while opening a file — detecting its format, reading and
 r[vcf_reader.debug]
 `Debug` of a record component, of a record view and of `VcfFile` MUST NOT print the file's shared state (header, dictionaries, tables): it prints what the record holds — contig and positions, IDs, alleles, QUAL, FILTER names, the fields present with their values — so a record in a log line or a panic message stays short. `Locus` MUST implement `Display` as `CHROM:POS`, `CHROM:START-END` when it spans more than one position.
 
-r[vcf_reader.fuzz]
-There MUST be fuzz targets for BCF records, VCF text records, header parsing, and a full-stack target that opens a VCF or BCF from bytes and reads every field of every record through `FullRecord` (`r[io.fuzz.readers]`).
+r[vcf_reader.fuzz+2]
+There MUST be fuzz targets for BCF records, VCF text records, header parsing, and a full-stack target that opens a VCF or BCF from bytes, reads every field of every record through `FullRecord` (`r[io.fuzz.readers]`), and copies every record into a writer with the file's own header, as VCF text and as BCF (`r[vcf_passthrough.copy]`): a record the reader accepts may not make the copy panic.
 
 ## Implementation
 

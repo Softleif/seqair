@@ -1,9 +1,9 @@
 //! Reading every field of every record of a VCF/BCF file, shared by the
-//! VCF fuzz targets (`r[vcf_reader.fuzz]`).
+//! VCF fuzz targets (`r[vcf_reader.fuzz+2]`).
 
 use seqair::vcf::{
-    DynValue, Fields, Flag, FullRecord, Info, Locus, OptArr, PlanContext, PlanError, RawRecord,
-    Sample, Sections, Str, ValueType, VcfFile, VcfHeader, VcfReadError,
+    DynValue, Fields, Flag, FullRecord, Info, Locus, OptArr, OutputFormat, PlanContext, PlanError,
+    RawRecord, Sample, Sections, Str, ValueType, VcfFile, VcfHeader, VcfReadError, Writer,
 };
 
 /// At most this many records per input, so a run stays fast.
@@ -152,6 +152,27 @@ pub fn read_narrow(file: &VcfFile) -> usize {
     if let Ok(reader) = file.reader::<Raw>().open() {
         n +=
             reader.into_iter().take(MAX_RECORDS).filter_map(Result::ok).map(|r| r.0).sum::<usize>();
+    }
+    n
+}
+
+// r[verify vcf_reader.fuzz+2]
+// r[verify vcf_passthrough.copy]
+/// Copy every record (up to [`MAX_RECORDS`]) into a writer with the file's
+/// own header, as VCF text and as BCF: a record that cannot be copied fails
+/// with a typed error, and the writer goes on with the next.
+pub fn copy_all(file: &VcfFile) -> usize {
+    let mut n = 0;
+    for format in [OutputFormat::Vcf, OutputFormat::Bcf] {
+        let Ok(mut writer) = Writer::new(Vec::new(), format).write_header(file.header()) else {
+            continue;
+        };
+        let Ok(mut reader) = file.reader::<FullRecord>().open() else { return n };
+        for _ in 0..MAX_RECORDS {
+            let Ok(Some(rec)) = reader.next_record() else { break };
+            n += writer.copy_record(rec).is_ok_and(|copy| copy.emit().is_ok()) as usize;
+        }
+        n += writer.finish().map_or(0, |(out, _)| out.len());
     }
     n
 }

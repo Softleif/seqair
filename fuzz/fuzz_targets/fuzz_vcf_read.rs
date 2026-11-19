@@ -1,5 +1,6 @@
 //! A VCF/BCF file opened from bytes and every field of every record read
-//! through `FullRecord`, then through narrower types (`r[vcf_reader.fuzz]`):
+//! through `FullRecord`, then through narrower types, and every record
+//! copied into a writer with the file's own header (`r[vcf_reader.fuzz+2]`):
 //! nothing panics, however the file is malformed. BCF and VCF text alike:
 //! the format is detected from the content.
 //!
@@ -8,12 +9,12 @@
 //! rest is the file as is.
 #![no_main]
 
-// r[verify vcf_reader.fuzz]
+// r[verify vcf_reader.fuzz+2]
 
 use libfuzzer_sys::fuzz_target;
 use seqair::io::BgzfWriter;
 use seqair::vcf::VcfFile;
-use seqair_fuzz::vcf_fields::{read_all, read_narrow};
+use seqair_fuzz::vcf_fields::{copy_all, read_all, read_narrow};
 
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
@@ -30,6 +31,6 @@ fuzz_target!(|data: &[u8]| {
         rest.to_vec()
     };
     if let Ok(file) = VcfFile::from_bytes(bytes, None) {
-        std::hint::black_box(read_all(&file) + read_narrow(&file));
+        std::hint::black_box(read_all(&file) + read_narrow(&file) + copy_all(&file));
     }
 });

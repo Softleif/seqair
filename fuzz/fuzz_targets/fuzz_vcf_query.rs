@@ -1,5 +1,5 @@
 //! A VCF/BCF file and its index from bytes, queried and partitioned
-//! (`r[vcf_reader.fuzz]`, `docs/spec/2-vcf-1-reader.md` "Region queries"):
+//! (`r[vcf_reader.fuzz+2]`, `docs/spec/2-vcf-1-reader.md` "Region queries"):
 //! nothing panics, however file or index is malformed, and on a file that
 //! reads whole a query yields only records the overlap rule selects.
 //!
@@ -9,7 +9,7 @@
 //! byte: bit 0 `StartsIn`, bits 2.. the partition count), then the file.
 #![no_main]
 
-// r[verify vcf_reader.fuzz]
+// r[verify vcf_reader.fuzz+2]
 
 use libfuzzer_sys::fuzz_target;
 use seqair::io::BgzfWriter;

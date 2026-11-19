@@ -1,12 +1,12 @@
 //! VCF text records under a fixed header that declares every value kind,
 //! END, SVLEN and LEN, read through every component and `RawRecord`'s views
-//! (`r[vcf_reader.fuzz]`): nothing panics, however a line is malformed.
+//! (`r[vcf_reader.fuzz+2]`): nothing panics, however a line is malformed.
 //!
 //! The first byte picks the framing: even, BGZF (lines then span blocks
 //! and are copied together); odd, plain text.
 #![no_main]
 
-// r[verify vcf_reader.fuzz]
+// r[verify vcf_reader.fuzz+2]
 
 use libfuzzer_sys::fuzz_target;
 use seqair::io::BgzfWriter;

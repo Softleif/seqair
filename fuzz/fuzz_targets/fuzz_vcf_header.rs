@@ -1,9 +1,9 @@
-//! VCF header text parsed (`r[vcf_reader.fuzz]`): nothing panics, and a
+//! VCF header text parsed (`r[vcf_reader.fuzz+2]`): nothing panics, and a
 //! header that parses writes BCF text that parses again, with the same
 //! dictionaries and samples, and VCF text that writes itself again.
 #![no_main]
 
-// r[verify vcf_reader.fuzz]
+// r[verify vcf_reader.fuzz+2]
 
 use libfuzzer_sys::fuzz_target;
 use seqair::vcf::VcfHeader;
