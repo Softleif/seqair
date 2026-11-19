@@ -1907,7 +1907,7 @@ fn records_debug_as_what_they_hold() {
             assert!(!debug.contains(leak), "{name}: {debug}");
         }
         assert!(debug.contains(&format!("locus: {}", record.locus())), "{debug}");
-        assert!(format!("{file:?}").len() < 200);
+        assert!(format!("{file:?}").len() < 200 + fixture(name).as_os_str().len(), "{file:?}");
     }
     let recs = text_records(&[
         "chr1\t5\trs1;rs2\tAC\tA,<DEL>\t3\tq10\tDP=4;AF=0.5,.;DB\tGT:DP\t0|1:7\t./.",
