@@ -223,6 +223,7 @@ fn split_allele(rest: &[u8]) -> (&[u8], Option<(bool, &[u8])>) {
 }
 
 /// One allele: decimal digits, or `.` for missing.
+#[inline]
 fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
     if token == b"." {
         return Ok(None);
@@ -231,10 +232,11 @@ fn parse_allele(token: &[u8]) -> Result<Option<u16>, TextValueError> {
     if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
         return Err(invalid());
     }
-    let s = std::str::from_utf8(token).map_err(|_| invalid())?;
-    s.parse()
+    token
+        .iter()
+        .try_fold(0u16, |n, &d| n.checked_mul(10)?.checked_add(u16::from(d.wrapping_sub(b'0'))))
         .map(Some)
-        .map_err(|_| TextValueError::GenotypeAlleleOutOfRange { value: Offending::new(token) })
+        .ok_or_else(|| TextValueError::GenotypeAlleleOutOfRange { value: Offending::new(token) })
 }
 
 // r[impl vcf_values.gt+2]
@@ -256,6 +258,7 @@ impl<'a> TextGt<'a> {
     /// it; without one, htslib's rule infers it — a haploid allele is phased
     /// unless it is `.`, a longer genotype is phased iff every separator is
     /// `|` — so text and htslib-written BCF agree. Before 4.4 it is unphased.
+    #[inline]
     pub(crate) fn new(gt: &'a [u8], first_phase_is_read: bool) -> Result<Self, TextValueError> {
         let (prefix, body) = match gt.split_first() {
             Some((&b'|', body)) => (Some(true), body),
@@ -308,6 +311,31 @@ impl ExactSizeIterator for TextGt<'_> {}
 mod tests {
     use super::*;
     use hegel::prelude::*;
+
+    // r[verify vcf_values.gt+2]
+    /// An allele reads as std parses its digits: leading zeros, `u16`'s
+    /// bound and anything not a digit included.
+    #[hegel::test]
+    fn alleles_read_as_std_parses_them(tc: TestCase) {
+        let token = if tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<u32>().max_value(70_000)).to_string().into_bytes()
+        } else {
+            tc.draw(gs::vecs(gs::sampled_from(b"0123456789.+-x ".to_vec())).max_size(7))
+        };
+        let expected = match std::str::from_utf8(&token) {
+            _ if token == b"." => Some(Ok(None)),
+            Ok(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(s.parse::<u16>().map(Some).map_err(drop))
+            }
+            _ => None,
+        };
+        match (parse_allele(&token), expected) {
+            (Ok(v), Some(Ok(e))) => assert_eq!(v, e),
+            (Err(TextValueError::GenotypeAlleleOutOfRange { .. }), Some(Err(()))) => {}
+            (Err(TextValueError::InvalidGenotype { .. }), None) => {}
+            (got, expected) => panic!("{token:?}: {got:?} vs {expected:?}"),
+        }
+    }
 
     // r[verify vcf_values.text_numbers]
     /// Any `i32` std prints, with an optional `+` and leading zeros, reads back.
