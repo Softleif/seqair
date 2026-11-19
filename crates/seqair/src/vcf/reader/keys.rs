@@ -105,7 +105,7 @@ impl FieldTable {
                     return Some(header_len.saturating_add(at));
                 }
                 let id = header_len.saturating_add(reserved_names.len());
-                // r[impl vcf_reader.limits]
+                // r[impl vcf_reader.limits+2]
                 DictId::new(u32::try_from(id).ok()?)?;
                 reserved_names.push(name);
                 Some(id)
@@ -253,7 +253,7 @@ impl FieldTable {
             Some(id) => id,
             None => {
                 let index = self.extra_names.len();
-                // r[impl vcf_reader.limits]
+                // r[impl vcf_reader.limits+2]
                 let id =
                     u32::try_from(self.base().saturating_add(index)).ok().and_then(DictId::new)?;
                 self.extra_names.push(index, SmolStr::from(name));

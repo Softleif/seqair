@@ -243,7 +243,7 @@ impl std::fmt::Display for RecordPart {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordError {
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     #[error("the record is {size} bytes, more than the {max} a record may hold")]
     TooLarge { size: u64, max: u64 },
 
@@ -265,14 +265,14 @@ pub enum RecordError {
     #[error("the record has {found} samples, the header {expected}")]
     SampleCount { found: u32, expected: usize },
 
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     #[error("the line is {len} bytes or more, more than the {max} a line may hold")]
     LineTooLong { len: u64, max: u64 },
 
     #[error("the line has {found} TAB-separated columns, fewer than VCF's 8")]
     TooFewColumns { found: usize },
 
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     #[error("the record has {n} alleles, more than BCF's 16-bit count holds")]
     TooManyAlleles { n: usize },
 
@@ -309,7 +309,7 @@ pub enum FieldError {
     #[error("holds {len} values where its declaration allows one")]
     NotScalar { len: usize },
 
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     #[error("genotype ploidy {ploidy} is above {max}")]
     Ploidy { ploidy: usize, max: usize },
 

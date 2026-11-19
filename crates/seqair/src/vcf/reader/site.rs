@@ -206,7 +206,7 @@ impl SiteParts {
                 .map_err(|source| RecordError::Utf8 { part: RecordPart::Alleles, source })?;
             let mut start = alt.start;
             for allele in alt_bytes.split(|&b| b == b',') {
-                // r[impl vcf_reader.limits]
+                // r[impl vcf_reader.limits+2]
                 if self.alleles.len() >= usize::from(u16::MAX) {
                     let n = alt_bytes.iter().filter(|&&b| b == b',').count().saturating_add(2);
                     return Err(RecordError::TooManyAlleles { n });
@@ -307,7 +307,7 @@ impl<'a> AllelesRef<'a> {
     /// REF, then the ALTs, in GT index order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Allele<'a>> + Clone + use<'a> {
         let this = *self;
-        // At most 65 535 alleles (`r[vcf_reader.limits]`).
+        // At most 65 535 alleles (`r[vcf_reader.limits+2]`).
         let n = u16::try_from(self.spans.len()).unwrap_or(u16::MAX);
         // `get` finds every index below the count.
         (0..n).map(move |i| this.get(i).unwrap_or(Allele::Missing))

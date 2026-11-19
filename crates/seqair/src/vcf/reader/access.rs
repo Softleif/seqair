@@ -11,7 +11,7 @@ use crate::vcf::record_encoder::{
     Arr, FieldKind, Flag, FormatKey, Gt, InfoKey, OptArr, Scalar, Str,
 };
 
-/// Most alleles a genotype may have (`r[vcf_reader.limits]`).
+/// Most alleles a genotype may have (`r[vcf_reader.limits+2]`).
 pub(crate) const MAX_PLOIDY: usize = 256;
 
 /// One field's value as a record stores it, not yet decoded.
@@ -293,7 +293,7 @@ impl ReadKind for Any {
     }
 }
 
-// r[impl vcf_reader.limits]
+// r[impl vcf_reader.limits+2]
 /// Refuse a genotype of more than [`MAX_PLOIDY`] alleles before reading it.
 fn check_ploidy(n: usize) -> Result<(), FieldError> {
     if n > MAX_PLOIDY {

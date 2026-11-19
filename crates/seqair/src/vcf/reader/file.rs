@@ -547,7 +547,7 @@ pub(crate) fn read_bcf_header(
     let mut l_text = [0u8; 4];
     stream.read_exact_into(&mut l_text)?;
     let l_text = u32::from_le_bytes(l_text) as usize;
-    // r[impl vcf_reader.limits]
+    // r[impl vcf_reader.limits+2]
     if l_text > MAX_HEADER_TEXT {
         return Err(
             crate::vcf::VcfHeaderError::TextTooLarge { len: l_text, max: MAX_HEADER_TEXT }.into()
@@ -571,7 +571,7 @@ pub(crate) fn read_text_header(
     let mut lines = 0u64;
     loop {
         let start = text.len();
-        // r[impl vcf_reader.limits]
+        // r[impl vcf_reader.limits+2]
         let room = (MAX_HEADER_TEXT.saturating_sub(start) as u64).saturating_add(1);
         let peek = input.fill_buf()?;
         if peek.first().is_some_and(|&b| b != b'#') {
