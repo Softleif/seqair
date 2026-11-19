@@ -15,7 +15,8 @@
 
 use seqair::io::BgzfWriter;
 use seqair::vcf::reader::{
-    FieldError, FilterStatus, KeyKind, MAX_RECORD_BYTES, ReadOption, RecordSection,
+    BcfValueError, FieldError, FilterStatus, KeyKind, MAX_RECORD_BYTES, ReadOption, RecordPart,
+    RecordSection,
 };
 use seqair::vcf::{
     Allele, DynValue, Fields, FormatGt, FullRecord, Info, InfoFlag, InfoInt, KeyError, Locus,
@@ -935,6 +936,38 @@ fn malformed_records_are_typed_errors_with_their_place() {
         e,
         RecordError::Field { source: FieldError::Ploidy { ploidy: 300, max: 256 }, .. }
     ));
+}
+
+// r[verify vcf_fields.only_sample]
+// r[verify vcf_fields.lazy+2]
+/// One sample's FORMAT data is copied whole, unchecked: malformed data (a
+/// truncated column, bytes after the last field) fails on access with the
+/// same typed error the multi-sample index gives, and the next record reads.
+#[test]
+fn a_malformed_single_sample_fails_on_access() {
+    let trailing = Rec { indiv: vec![0x11, 0x02, 0x21, 0x02, 0x04, 0x99], ..Rec::default() };
+    let cut = Rec { indiv: vec![0x11, 0x02, 0x21, 0x02], ..Rec::default() };
+    let file = VcfFile::from_bytes(bcf(&[trailing, cut, Rec::default()]), None).unwrap();
+    let gt: FormatGt = file.header().format_key("GT").unwrap();
+    let mut only = file.reader::<OnlySample>().open().unwrap();
+    let mut all = file.reader::<Samples>().open().unwrap();
+    let sample = file.header().sample_indices().next().unwrap();
+    let expected = [
+        RecordError::TrailingBytes { part: RecordPart::Format, len: 1 },
+        RecordError::Value {
+            part: RecordPart::Format,
+            source: BcfValueError::Truncated { needed: 3, available: 2 },
+        },
+    ];
+    for e in expected {
+        let one = only.next_record().unwrap().unwrap();
+        assert_eq!(record_error(one.get(&gt).unwrap_err()).1, e);
+        assert_eq!(record_error(one.has(&gt).unwrap_err()).1, e);
+        let every = all.next_record().unwrap().unwrap();
+        assert_eq!(record_error(every.sample(sample).get(&gt).unwrap_err()).1, e);
+    }
+    let one = only.next_record().unwrap().unwrap();
+    assert!(one.get(&gt).unwrap().is_some());
 }
 
 // r[verify vcf_fields.lazy+2]

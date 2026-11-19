@@ -71,6 +71,13 @@ impl FormatData {
     fn fill(&mut self, raw: &RawRecord<'_>, sample: Option<SampleIdx>) -> Result<(), VcfReadError> {
         match raw.format_source(sample)? {
             FormatSource::Bcf { indiv, n_fmt, n_samples } => match sample {
+                // One sample's values are the whole section: copy it as it
+                // is, leaving malformed data to the index, which fails on access.
+                None | Some(_) if n_samples == 1 => {
+                    self.begin(raw, 1);
+                    self.bytes.extend_from_slice(indiv);
+                    self.n_fmt = n_fmt;
+                }
                 None => {
                     self.begin(raw, n_samples);
                     self.bytes.extend_from_slice(indiv);
