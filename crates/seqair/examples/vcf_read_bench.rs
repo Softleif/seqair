@@ -12,6 +12,8 @@
 //! sample) `full` `all` (every value, decoded dynamically).
 #![allow(
     clippy::unwrap_used,
+    clippy::unwrap_in_result,
+    clippy::panic,
     clippy::print_stdout,
     clippy::indexing_slicing,
     clippy::cast_precision_loss,
