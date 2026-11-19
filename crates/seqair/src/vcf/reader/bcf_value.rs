@@ -81,6 +81,18 @@ impl BcfType {
         })
     }
 
+    /// How many elements `bytes` bytes hold: a division by a constant per
+    /// type, where one by [`Self::width`] is a hardware divide.
+    #[inline]
+    const fn elements(self, bytes: usize) -> usize {
+        match self {
+            Self::Missing => 0,
+            Self::Int8 | Self::Char => bytes,
+            Self::Int16 => bytes / 2,
+            Self::Int32 | Self::Float => bytes / 4,
+        }
+    }
+
     /// Bytes per element.
     pub(crate) const fn width(self) -> usize {
         match self {
@@ -406,8 +418,9 @@ impl<T: BcfNumber> Iterator for BcfVec<'_, T> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.rest.len().checked_div(self.ty.width()).unwrap_or(0);
+        let len = self.ty.elements(self.rest.len());
         (len, Some(len))
     }
 }
@@ -442,6 +455,7 @@ impl<'a> BcfGt<'a> {
     }
 
     /// Whether the genotype is `.`: no alleles, or one missing allele.
+    #[inline]
     pub(crate) fn is_missing(&self) -> bool {
         match self.alleles.len() {
             0 => true,

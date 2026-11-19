@@ -360,7 +360,7 @@ impl ReadKind for Gt {
     // r[impl vcf_values.gt+2]
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
-    #[inline]
+    #[inline(always)]
     fn read(value: Valid<'_, Self>) -> Self::Out<'_> {
         let first_phase_is_read = value.cx.first_phase_is_read;
         let gt = match value.value.0 {
