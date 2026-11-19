@@ -43,9 +43,7 @@ type Dictionary = BTreeMap<String, usize>;
 /// BCF, where htslib writes `IDX=` on every definition line, and read those
 /// back with plain string search — not with the parser under test.
 fn bcftools_dictionaries(text: &str) -> (Dictionary, Dictionary) {
-    let mut vcf = tempfile::Builder::new().suffix(".vcf").tempfile().unwrap();
-    vcf.write_all(text.as_bytes()).unwrap();
-    vcf.flush().unwrap();
+    let vcf = vcf_file(text);
     let bcf = tempfile::Builder::new().suffix(".bcf").tempfile().unwrap();
     let out = Command::new("bcftools")
         .args(["view", "--no-version", "-Ob", "-o"])
@@ -54,9 +52,22 @@ fn bcftools_dictionaries(text: &str) -> (Dictionary, Dictionary) {
         .output()
         .expect("bcftools");
     assert!(out.status.success(), "bcftools: {}", String::from_utf8_lossy(&out.stderr));
+    l_text_dictionaries(bcf.path())
+}
 
+/// `text` in a temporary `.vcf` file.
+fn vcf_file(text: &str) -> tempfile::NamedTempFile {
+    let mut vcf = tempfile::Builder::new().suffix(".vcf").tempfile().unwrap();
+    vcf.write_all(text.as_bytes()).unwrap();
+    vcf.flush().unwrap();
+    vcf
+}
+
+/// The dictionaries a BCF file's `l_text` declares, every definition line
+/// carrying the `IDX=` htslib writes.
+fn l_text_dictionaries(bcf: &Path) -> (Dictionary, Dictionary) {
     let mut bytes = Vec::new();
-    noodles_bgzf::io::Reader::new(std::fs::File::open(bcf.path()).unwrap())
+    noodles_bgzf::io::Reader::new(std::fs::File::open(bcf).unwrap())
         .read_to_end(&mut bytes)
         .unwrap();
     assert_eq!(bytes.get(..5), Some(&b"BCF\x02\x02"[..]));
@@ -74,7 +85,9 @@ fn bcftools_dictionaries(text: &str) -> (Dictionary, Dictionary) {
         };
         let id = line.split_once("<ID=").unwrap().1;
         let id = &id[..id.find([',', '>']).unwrap()];
-        let idx = &line[line.rfind(",IDX=").unwrap() + 5..line.len() - 1];
+        // Where the line had it, or last when htslib added it.
+        let idx = &line[line.rfind(",IDX=").unwrap() + 5..];
+        let idx = &idx[..idx.find(|c: char| !c.is_ascii_digit()).unwrap()];
         let previous = dict.insert(id.to_owned(), idx.parse().unwrap());
         assert!(previous.is_none_or(|p| p == idx.parse().unwrap()), "{id} twice in {line}");
     }
@@ -561,4 +574,297 @@ fn a_derived_header_refuses_a_number_newer_than_its_version() {
     for (i, (number, _)) in newer.into_iter().enumerate() {
         built.add_format(format!("F{i}"), FormatDef::new(number, ValueType::Integer, "x")).unwrap();
     }
+}
+
+// ── Line order and form, against bcftools ──────────────────────────────
+
+/// `bcftools <args> <path>`'s standard output.
+fn bcftools(args: &[&str], path: &Path) -> String {
+    let out = Command::new("bcftools").args(args).arg(path).output().expect("bcftools");
+    assert!(out.status.success(), "bcftools {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+// r[verify vcf_header.line_order]
+// r[verify vcf_header.line_form]
+// r[verify vcf_header.serialization+2]
+/// A real file's header, read and written back, is what `bcftools view -h`
+/// prints for it: same lines, same order, same attributes as written. The
+/// fixtures include a BCF `l_text` with `IDX=` gaps, FORMAT GT between INFO
+/// lines, and 1000 Genomes' `Type` before `Number`; the files, a GIAB truth
+/// set with quoted contig attributes.
+#[test]
+fn real_headers_print_as_bcftools_prints_them() {
+    for name in FIXTURES {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/data/vcf/headers").join(name);
+        let ours = VcfHeader::parse(&fixture(name)).unwrap().to_vcf_text();
+        assert_eq!(ours, bcftools(&["view", "-h", "--no-version"], &path), "{name}");
+    }
+    for name in ["rastair.bcf", "rastair.vcf.gz", "truth.vcf.gz", "panel.bcf"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/data/vcf").join(name);
+        let ours = seqair::vcf::VcfFile::open(&path).unwrap().header().to_vcf_text();
+        assert_eq!(ours, bcftools(&["view", "-h", "--no-version"], &path), "{name}");
+    }
+}
+
+fn shuffled<T>(tc: &TestCase, items: Vec<T>) -> Vec<T> {
+    let mut keyed: Vec<(u32, T)> =
+        items.into_iter().map(|i| (tc.draw(gs::integers::<u32>()), i)).collect();
+    keyed.sort_by_key(|(k, _)| *k);
+    keyed.into_iter().map(|(_, i)| i).collect()
+}
+
+/// `n` distinct indices from `from` up, with gaps, in random order: what a
+/// BCF header's `IDX=` may hold.
+fn indices(tc: &TestCase, n: usize, from: usize) -> Vec<usize> {
+    let mut next = from;
+    let increasing = (0..n)
+        .map(|_| {
+            next += tc.draw(gs::integers::<usize>().max_value(2));
+            next += 1;
+            next - 1
+        })
+        .collect();
+    shuffled(tc, increasing)
+}
+
+/// A quoted value as a file writes it, with an escaped quote now and then.
+fn quoted(tc: &TestCase) -> String {
+    let text = tc.draw(gs::from_regex(r#"[ !#-\[\]-~]{0,10}"#).fullmatch(true));
+    let escape = if tc.draw(gs::booleans()) { r#"\"x\\"# } else { "" };
+    format!("\"{text}{escape}\"")
+}
+
+/// A header as files hold them: FILTER, INFO, FORMAT, contig and other lines
+/// interleaved, attributes in any order after `ID`, values quoted or bare,
+/// spaces after commas, `IDX=` with gaps (or none), a `PASS` line anywhere,
+/// repeated other lines.
+#[hegel::composite]
+fn file_header(tc: &TestCase) -> String {
+    let n_ids = tc.draw(gs::integers::<usize>().max_value(8));
+    let ids: Vec<(String, u8)> = (0..n_ids)
+        .map(|i| {
+            let prefix = tc.draw(gs::from_regex("[A-Za-z_][A-Za-z0-9_]{0,3}").fullmatch(true));
+            (format!("{prefix}{i}"), tc.draw(gs::integers::<u8>().min_value(1).max_value(7)))
+        })
+        .collect();
+    let n_contigs = tc.draw(gs::integers::<usize>().max_value(4));
+    let with_idx = tc.draw(gs::booleans());
+    let field_idx = indices(tc, n_ids, 1);
+    let contig_idx = indices(tc, n_contigs, 0);
+    let idx = |i: usize| with_idx.then(|| format!("IDX={i}"));
+
+    let extra = |tc: &TestCase| -> Vec<String> {
+        let n = tc.draw(gs::integers::<usize>().max_value(2));
+        (0..n)
+            .map(|j| {
+                let value = if tc.draw(gs::booleans()) {
+                    quoted(tc)
+                } else {
+                    tc.draw(gs::from_regex("[A-Za-z0-9_.:/]{1,8}").fullmatch(true))
+                };
+                format!("x{j}={value}")
+            })
+            .collect()
+    };
+    // One line: ID first, the rest (IDX among them) in any order.
+    let line = |tc: &TestCase, key: &str, id: &str, mut attrs: Vec<String>| {
+        attrs.extend(extra(tc));
+        let mut attrs = shuffled(tc, attrs);
+        attrs.insert(0, format!("ID={id}"));
+        let sep = if tc.draw(gs::booleans()) { ", " } else { "," };
+        format!("##{key}=<{}>", attrs.join(sep))
+    };
+
+    let mut lines = Vec::new();
+    for ((id, mask), &i) in ids.iter().zip(&field_idx) {
+        if mask & 1 != 0 {
+            let attrs = vec![format!("Description={}", quoted(tc))];
+            lines.push(line(tc, "FILTER", id, attrs.into_iter().chain(idx(i)).collect()));
+        }
+        for (bit, key) in [(2, "INFO"), (4, "FORMAT")] {
+            if mask & bit == 0 {
+                continue;
+            }
+            let (number, typ) = tc.draw(gs::sampled_from(vec![
+                ("1", "Integer"),
+                ("A", "Float"),
+                ("R", "Integer"),
+                ("G", "Float"),
+                (".", "String"),
+                ("2", "Character"),
+            ]));
+            let attrs = vec![
+                format!("Number={number}"),
+                format!("Type={typ}"),
+                format!("Description={}", quoted(tc)),
+            ];
+            lines.push(line(tc, key, id, attrs.into_iter().chain(idx(i)).collect()));
+        }
+    }
+    for (c, &i) in contig_idx.iter().enumerate() {
+        let mut attrs: Vec<String> = idx(i).into_iter().collect();
+        match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => {}
+            1 => attrs.push(format!("length={}", tc.draw(gs::integers::<u32>()))),
+            _ => attrs.push(format!("length=\"{}\"", tc.draw(gs::integers::<u32>()))),
+        }
+        lines.push(line(tc, "contig", &format!("chr{c}"), attrs));
+    }
+    if tc.draw(gs::booleans()) {
+        let attrs = vec![format!("Description={}", quoted(tc))];
+        lines.push(line(tc, "FILTER", "PASS", attrs.into_iter().chain(idx(0)).collect()));
+    }
+    let n_other = tc.draw(gs::integers::<usize>().max_value(4));
+    for i in 0..n_other {
+        let other = match tc.draw(gs::integers::<u8>().max_value(3)) {
+            0 => format!(
+                "##meta{i}={}",
+                tc.draw(gs::from_regex("[!-;=-~][ -~]{0,10}").fullmatch(true))
+            ),
+            1 => line(tc, "ALT", &format!("<DEL{i}>"), vec![format!("Description={}", quoted(tc))]),
+            2 => format!("##META=<Type={}>", tc.draw(gs::from_regex("[a-z]{1,4}").fullmatch(true))),
+            // A repeat: of a line drawn before, or of the version line.
+            _ => match lines.last() {
+                Some(last) if !last.starts_with("##FILTER") && !last.starts_with("##INFO") => {
+                    last.clone()
+                }
+                _ => "##fileformat=VCFv4.2".to_owned(),
+            },
+        };
+        lines.push(other);
+    }
+    let lines = shuffled(tc, lines);
+    let n_samples = tc.draw(gs::integers::<usize>().max_value(2));
+    let samples: Vec<String> = (0..n_samples).map(|i| format!("s{i}")).collect();
+    let samples: String = std::iter::once("FORMAT".to_owned())
+        .filter(|_| n_samples > 0)
+        .chain(samples)
+        .map(|column| "\t".to_owned() + &column)
+        .collect();
+    format!(
+        "##fileformat=VCFv4.2\n{}\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO{samples}\n",
+        lines.join("\n")
+    )
+}
+
+// r[verify vcf_header.line_order]
+// r[verify vcf_header.line_form]
+// r[verify vcf_header.serialization+2]
+// r[verify vcf_header.parse.round_trip+2]
+/// A header as files hold it prints as `bcftools view -h` prints it, gets the
+/// dictionary htslib gives it, and its BCF text gives htslib that dictionary
+/// again.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn file_headers_print_as_bcftools_prints_them(tc: TestCase) {
+    let text = tc.draw(file_header());
+    let header = VcfHeader::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let vcf = vcf_file(&text);
+    assert_eq!(
+        header.to_vcf_text(),
+        bcftools(&["view", "-h", "--no-version"], vcf.path()),
+        "{text}"
+    );
+    assert_eq!(dictionaries(&header), bcftools_dictionaries(&text), "{text}");
+    let bcf_text = header.to_bcf_text();
+    assert_eq!(bcftools_dictionaries(&bcf_text), dictionaries(&header), "{bcf_text}");
+}
+
+// r[verify vcf_header.to_builder+2]
+// r[verify vcf_header.remove+2]
+// r[verify vcf_header.line_order]
+// r[verify vcf_header.parse.preserve+2]
+/// A header derived with removals and additions is what `bcftools annotate
+/// -x <removed> -h <added>` makes of the same file: the same lines in the
+/// same order (the added ones last, in order; a repeated other line
+/// dropped), and the dictionary htslib gives it (a removed id registered
+/// again keeps its index). Its BCF text gives htslib that dictionary.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn derived_headers_are_what_bcftools_annotate_makes(tc: TestCase) {
+    let text = tc.draw(file_header());
+    let header = VcfHeader::parse(&text).unwrap();
+    let mut removed = Vec::new();
+    let mut builder = header.to_builder();
+    for id in header.filters().keys().filter(|id| *id != "PASS") {
+        if tc.draw(gs::booleans()) {
+            assert!(builder.remove_filter(id));
+            removed.push(format!("FILTER/{id}"));
+        }
+    }
+    let mut readd = Vec::new();
+    let infos = header.infos().keys().map(|id| ("INFO", id.clone()));
+    for (key, id) in infos.chain(header.formats().keys().map(|id| ("FORMAT", id.clone()))) {
+        if tc.draw(gs::booleans()) {
+            assert!(if key == "INFO" {
+                builder.remove_info(&id)
+            } else {
+                builder.remove_format(&id)
+            });
+            removed.push(format!("{key}/{id}"));
+            if tc.draw(gs::booleans()) {
+                readd.push((key, id));
+            }
+        }
+    }
+
+    let mut added: Vec<String> = Vec::new();
+    for i in 0..tc.draw(gs::integers::<usize>().max_value(2)) {
+        let line = match header.other_lines().first().filter(|_| tc.draw(gs::booleans())) {
+            Some(again) => again.to_string(),
+            None => format!("tool{i}=v{i}"),
+        };
+        builder.add_other_line(line.as_str());
+        added.push(format!("##{line}"));
+    }
+    let mut builder = builder.filters();
+    if tc.draw(gs::booleans()) {
+        builder.add_filter("zzF", FilterDef::new("new filter")).unwrap();
+        added.push("##FILTER=<ID=zzF,Description=\"new filter\">".to_owned());
+    }
+    let mut builder = builder.infos();
+    let new_infos = tc.draw(gs::integers::<usize>().max_value(1));
+    let infos = (0..new_infos).map(|i| SmolStr::from(format!("zzI{i}")));
+    let again = readd.iter().filter(|(key, _)| *key == "INFO").map(|(_, id)| id.clone());
+    for id in infos.chain(again) {
+        builder
+            .add_info(id.clone(), InfoDef::new(Number::Count(1), ValueType::Integer, "n"))
+            .unwrap();
+        added.push(format!("##INFO=<ID={id},Number=1,Type=Integer,Description=\"n\">"));
+    }
+    let mut builder = builder.formats();
+    let again = readd.iter().filter(|(key, _)| *key == "FORMAT").map(|(_, id)| id.clone());
+    for id in std::iter::once(SmolStr::from("zzG")).filter(|_| tc.draw(gs::booleans())).chain(again)
+    {
+        let def = FormatDef::new(Number::Unknown, ValueType::String, "n");
+        builder.add_format(id.clone(), def).unwrap();
+        added.push(format!("##FORMAT=<ID={id},Number=.,Type=String,Description=\"n\">"));
+    }
+    let derived = builder.build().unwrap();
+
+    let vcf = vcf_file(&text);
+    let hdr = vcf_file(&added.iter().map(|l| l.clone() + "\n").collect::<String>());
+    let bcf = tempfile::Builder::new().suffix(".bcf").tempfile().unwrap();
+    let mut args = vec!["annotate", "--no-version"];
+    let removed = removed.join(",");
+    if !removed.is_empty() {
+        args.extend(["-x", &removed]);
+    }
+    let hdr_path = hdr.path().to_str().unwrap();
+    if !added.is_empty() {
+        args.extend(["-h", hdr_path]);
+    }
+    if args.len() == 2 {
+        args = vec!["view", "--no-version"];
+    }
+    let theirs = bcftools(&[&args[..], &["-O", "v"]].concat(), vcf.path());
+    let theirs: String =
+        theirs.lines().take_while(|l| l.starts_with('#')).map(|l| l.to_owned() + "\n").collect();
+    assert_eq!(derived.to_vcf_text(), theirs, "{text}\nremoved {removed}\nadded {added:?}");
+
+    let bcf_path = bcf.path().to_str().unwrap();
+    bcftools(&[&args[..], &["-O", "b", "-o", bcf_path]].concat(), vcf.path());
+    assert_eq!(dictionaries(&derived), l_text_dictionaries(bcf.path()), "{text}\n{removed}");
+    let bcf_text = derived.to_bcf_text();
+    assert_eq!(bcftools_dictionaries(&bcf_text), dictionaries(&derived), "{bcf_text}");
 }

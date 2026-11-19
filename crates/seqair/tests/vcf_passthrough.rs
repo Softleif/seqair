@@ -609,7 +609,9 @@ fn copied_strings_are_written_as_stored() {
 // r[verify vcf_passthrough.edit.remove]
 /// Fields removed from the output header, or from each copied record, leave
 /// the copy as `bcftools annotate -x` leaves the input; a record whose
-/// failed filters are all removed passes.
+/// failed filters are all removed passes. Removed from the header, the copy's
+/// header is the one `bcftools annotate -x` writes, line for line, in every
+/// format.
 #[hegel::test(test_cases = pinned::cases(20))]
 fn removals_match_bcftools_annotate(tc: TestCase) {
     if !bcftools() {
@@ -669,6 +671,25 @@ fn removals_match_bcftools_annotate(tc: TestCase) {
         })
         .unwrap();
         assert_eq!(text_of(&out, format), expected, "{format:?}, removed {removed:?}\n{text}");
+        if in_header {
+            let removed = removed.join(",");
+            let theirs = if removed.is_empty() {
+                run(&["view", "--no-version", "-h"], &vcf)
+            } else {
+                let annotated = run(&["annotate", "--no-version", "-x", &removed], &vcf);
+                annotated
+                    .lines()
+                    .take_while(|l| l.starts_with('#'))
+                    .map(|l| l.to_owned() + "\n")
+                    .collect()
+            };
+            let copy = persist(&out, format);
+            assert_eq!(
+                run(&["view", "--no-version", "-h"], copy.path()),
+                theirs,
+                "{format:?}, removed {removed:?}\n{text}"
+            );
+        }
     }
 }
 
