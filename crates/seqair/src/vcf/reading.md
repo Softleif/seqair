@@ -689,8 +689,11 @@ A field the input header declares and the output header does not is left
 out of every copy; one both declare must have the same `Type` and `Number`,
 or building the map fails. Keys and filters a VCF text file uses without
 declaring them fail the copy with `VcfError::UndeclaredField` unless the
-output header declares them (as `String`) or the map is built with
-`.drop_undeclared()`: a writer cannot add header lines once records follow.
+output header declares them — as `String`, or, for a key VCF 4.5 reserves
+(`SVTYPE`, `END`, …), with its reserved `Type` and `Number`, as the reader
+reads it — or the map is built with `.drop_undeclared()`: a writer cannot add
+header lines once records follow. Dropping never makes a record pass: one
+whose failed filters would all be dropped still fails the copy.
 Values are re-encoded, not copied as bytes, so the output is what bcftools
 writes for the same records (`0.10` comes out `0.1`, integers take the
 smallest BCF type).
