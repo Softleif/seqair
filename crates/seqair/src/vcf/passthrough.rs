@@ -148,10 +148,12 @@ impl FieldMap {
         })
     }
 
-    // r[impl vcf_passthrough.undeclared]
+    // r[impl vcf_passthrough.undeclared+2]
     /// Leave the keys and filters neither the input header nor the output
     /// header declares out of every copy, with one `warn!` naming the first,
-    /// instead of failing the copy with [`VcfError::UndeclaredField`].
+    /// instead of failing the copy with [`VcfError::UndeclaredField`]. A
+    /// record that would then fail no filter still fails the copy so: it
+    /// must not pass for filters nobody declared.
     #[must_use]
     pub fn drop_undeclared(mut self) -> Self {
         self.drop_undeclared = true;
@@ -168,7 +170,7 @@ impl FieldMap {
         &self.output
     }
 
-    // r[impl vcf_passthrough.undeclared]
+    // r[impl vcf_passthrough.undeclared+2]
     /// What to do with a field or filter no header declares: `Ok(None)` drops it.
     fn undeclared<T>(&self, kind: KeyKind, name: &str) -> Result<Option<T>, VcfError> {
         if !self.drop_undeclared {
@@ -199,7 +201,7 @@ impl FieldMap {
             Some(Target::Removed) => return Ok(None),
             Some(Target::ByName) | None => {}
         }
-        // r[impl vcf_passthrough.undeclared]
+        // r[impl vcf_passthrough.undeclared+2]
         // Neither header defines it here: the reader read it as a String.
         let def = match kind {
             KeyKind::Info => self.output.infos().get(name).map(|d| (d.typ, d.number)),
@@ -231,7 +233,7 @@ impl FieldMap {
     }
 
     // r[impl vcf_passthrough.field_map.removed]
-    // r[impl vcf_passthrough.undeclared]
+    // r[impl vcf_passthrough.undeclared+2]
     /// The output filters a record failing `failed` fails.
     fn failed_filters(
         &self,
@@ -246,21 +248,33 @@ impl FieldMap {
             out.extend(failed.filter_map(|f| self.filters.get(f.dict_idx() as usize)?.clone()));
             return Ok(out);
         };
+        let mut dropped = None;
         for name in names {
-            let name = std::str::from_utf8(name).map_err(|_| VcfError::UndeclaredField {
-                kind: KeyKind::Filter,
-                name: SmolStr::from(name.escape_ascii().to_string()),
-            })?;
-            let mapped = match self.input().filter(name) {
-                Ok(id) => self.filters.get(id.dict_idx() as usize).cloned().flatten(),
-                Err(_) => match self.output.filter(name) {
-                    Ok(id) => Some(id),
-                    Err(_) => self.undeclared(KeyKind::Filter, name)?,
-                },
+            let utf8 = std::str::from_utf8(name).ok();
+            let mapped = match utf8.map(|n| (n, self.input().filter(n))) {
+                Some((_, Ok(id))) => self.filters.get(id.dict_idx() as usize).cloned().flatten(),
+                Some((n, Err(_))) if let Ok(id) = self.output.filter(n) => Some(id),
+                _ => {
+                    let name = utf8.map_or_else(
+                        || SmolStr::from(name.escape_ascii().to_string()),
+                        SmolStr::from,
+                    );
+                    let mapped = self.undeclared(KeyKind::Filter, &name)?;
+                    dropped.get_or_insert(name);
+                    mapped
+                }
             };
             out.extend(mapped);
         }
-        Ok(out)
+        // r[impl vcf_passthrough.undeclared+2]
+        // Dropping every filter it failed would make it pass for filters
+        // nobody declared.
+        match dropped {
+            Some(name) if out.is_empty() => {
+                Err(VcfError::UndeclaredField { kind: KeyKind::Filter, name })
+            }
+            _ => Ok(out),
+        }
     }
 }
 

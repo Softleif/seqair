@@ -755,7 +755,7 @@ chr1\t10\t.\tA\tG\t.\tq10;foo\tDP=5;TRID=x1\tGT:XX\t0/1:abc
 chr1\t20\t.\tA\tG\t.\tPASS\tDP=6\tGT\t1/1
 ";
 
-// r[verify vcf_passthrough.undeclared]
+// r[verify vcf_passthrough.undeclared+2]
 /// Keys and filters no header declares fail the copy, or are left out, or,
 /// declared in the output header, kept as bcftools keeps them.
 #[test]
@@ -805,6 +805,46 @@ fn undeclared_keys_fail_are_dropped_or_declared() {
         matches!(&err, VcfError::FieldMap(FieldMapError::Incompatible { name, .. }) if name == "TRID"),
         "{err:?}"
     );
+}
+
+// r[verify vcf_passthrough.undeclared+2]
+/// Dropping undeclared filters never makes a record pass: one whose failed
+/// filters would all be left out, a dropped one among them, fails the copy
+/// naming it, a name that is not UTF-8 included; one that keeps a filter is
+/// written failing it.
+#[test]
+fn a_record_failing_only_dropped_filters_is_refused() {
+    let file = |filter: &[u8]| {
+        let mut text = UNDECLARED.lines().take(6).collect::<Vec<_>>().join("\n").into_bytes();
+        text.extend_from_slice(b"\nchr1\t10\t.\tA\tG\t.\t");
+        text.extend_from_slice(filter);
+        text.extend_from_slice(b"\tDP=5\tGT\t0/1\n");
+        VcfFile::from_bytes(text, None).unwrap()
+    };
+    let copy = |file: &VcfFile, output: &VcfHeader| {
+        let map = FieldMap::new(file, output).unwrap().drop_undeclared();
+        copy_with(file, &map, OutputFormat::Vcf, |_, _| {})
+    };
+    let refused = |filter: &[u8], name: &str, remove_q10: bool| {
+        let file = file(filter);
+        let mut b = file.header().to_builder();
+        if remove_q10 {
+            assert!(b.remove_filter("q10"));
+        }
+        let err = copy(&file, &b.build().unwrap()).unwrap_err();
+        assert!(
+            matches!(&err, VcfError::UndeclaredField { kind: KeyKind::Filter, name: n } if n == name),
+            "{err:?}"
+        );
+    };
+    refused(b"foo", "foo", false);
+    refused(b"foo;bar", "foo", false);
+    refused(b"q\xffx", "q\\xffx", false);
+    refused(b"q10;foo", "foo", true);
+    let kept = file(b"foo;q10");
+    let out = copy(&kept, kept.header()).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.ends_with("chr1\t10\t.\tA\tG\t.\tq10\tDP=5\tGT\t0/1\n"), "{text}");
 }
 
 // ── Edits ───────────────────────────────────────────────────────────────
