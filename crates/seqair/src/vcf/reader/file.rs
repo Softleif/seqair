@@ -195,7 +195,7 @@ impl FileShared {
         self.format != VcfFormat::Bcf
     }
 
-    // r[impl vcf_reader.undeclared.filter]
+    // r[impl vcf_reader.undeclared.filter+2]
     /// Log, once per file, that a record names a FILTER the header does not
     /// declare.
     pub(crate) fn warn_undeclared_filter(&self, name: &[u8]) {

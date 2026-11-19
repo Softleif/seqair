@@ -216,7 +216,7 @@ impl FieldTable {
         })
     }
 
-    // r[impl vcf_reader.undeclared+4]
+    // r[impl vcf_reader.undeclared+5]
     /// The id of `key`, a VCF text record's `kind` key, appending it to the
     /// table if neither the header nor VCF defines it. A key the header does
     /// not declare, reserved or not, is warned of once per file. `None` only
@@ -328,7 +328,7 @@ impl FieldTable {
         // A VCF text table has the reserved ids; a BCF one gives the name an
         // id past the dictionary, which no record can name.
         let id = self.undeclared(kind, name.as_bytes(), false).ok_or_else(unknown)?;
-        // r[impl vcf_reader.undeclared+4]
+        // r[impl vcf_reader.undeclared+5]
         // Warned of where a record uses it: most lenient keys find nothing.
         debug!(%kind, key = name, %typ, %number, "a lenient key for a field the header does not declare");
         Ok(FieldId { dict_idx: id.get(), name: name.into(), number, header: self.id })
@@ -598,7 +598,7 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    // r[verify vcf_reader.undeclared+4]
+    // r[verify vcf_reader.undeclared+5]
     // r[verify vcf_values.lenient_keys]
     /// Resolving keys, strict or lenient, warns of nothing; the first record
     /// using an undeclared key, reserved or not, warns once per file.
