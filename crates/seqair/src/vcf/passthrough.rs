@@ -239,14 +239,14 @@ impl FieldMap {
         failed: super::reader::FailedFilters<'_>,
     ) -> Result<SmallVec<FilterId, 4>, VcfError> {
         let mut out = SmallVec::new();
-        if !self.input.0.is_text() {
+        // `FailedFilters` leaves out the names the header does not declare:
+        // then read the column as written.
+        let filters = record.site().filters();
+        let Some(names) = filters.names_with_undeclared() else {
             out.extend(failed.filter_map(|f| self.filters.get(f.dict_idx() as usize)?.clone()));
             return Ok(out);
-        }
-        // `FailedFilters` leaves out the names the header does not declare:
-        // read the column as written.
-        let column = record.raw_bytes().split(|&b| b == b'\t').nth(6).unwrap_or_default();
-        for name in column.split(|&b| b == b';') {
+        };
+        for name in names {
             let name = std::str::from_utf8(name).map_err(|_| VcfError::UndeclaredField {
                 kind: KeyKind::Filter,
                 name: SmolStr::from(name.escape_ascii().to_string()),

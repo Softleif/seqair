@@ -87,6 +87,9 @@ pub(crate) struct SiteParts {
     pub(crate) filter: FilterColumn,
     /// The FILTER ids in record order (for `Failed`, and `PASS` for `Pass`).
     pub(crate) filter_ids: Vec<DictId>,
+    /// VCF text: the FILTER column, when it names a FILTER the header does
+    /// not declare (which no id lists); empty otherwise.
+    pub(crate) filter_text: Range<u32>,
     pub(crate) qual: Option<f32>,
 }
 
@@ -104,11 +107,13 @@ impl SiteParts {
     pub(crate) fn begin(&mut self) {
         self.alleles.clear();
         self.filter_ids.clear();
+        self.filter_text = 0..0;
     }
 
-    /// The bytes the ID and alleles span: one run in either format.
+    /// The bytes the ID, the alleles and a kept FILTER column span: one run
+    /// in either format.
     fn span(&self) -> Range<usize> {
-        let end = self.alleles.last().map_or(self.id.end, |a| a.end);
+        let end = self.alleles.last().map_or(self.id.end, |a| a.end).max(self.filter_text.end);
         self.id.start as usize..end as usize
     }
 
@@ -119,6 +124,7 @@ impl SiteParts {
         self.alleles.extend(other.alleles.iter().map(|r| shifted(r, shift)));
         self.filter = other.filter;
         self.filter_ids.clone_from(&other.filter_ids);
+        self.filter_text = shifted(&other.filter_text, shift);
         self.qual = other.qual;
     }
 
@@ -233,7 +239,10 @@ impl SiteParts {
                     .filter(|id| file.filters.get(id.get() as usize).is_some_and(Option::is_some));
                 match declared {
                     Some(id) => self.filter_ids.push(id),
-                    None => file.warn_undeclared_filter(name),
+                    None => {
+                        file.warn_undeclared_filter(name);
+                        self.filter_text = cols.range(Col::Filter);
+                    }
                 }
             }
         }
@@ -385,6 +394,8 @@ fn base(b: u8) -> Option<Base> {
 pub struct FiltersRef<'a> {
     column: FilterColumn,
     ids: &'a [DictId],
+    /// VCF text: the column, when it names an undeclared FILTER.
+    text: &'a [u8],
     file: &'a FileShared,
 }
 
@@ -421,6 +432,14 @@ impl<'a> FiltersRef<'a> {
             return Err(VcfReadError::ForeignKey { name: filter.name.clone() });
         }
         Ok(self.ids.iter().any(|id| id.get() == filter.dict_idx))
+    }
+
+    // r[impl vcf_reader.undeclared.filter+2]
+    /// VCF text: every FILTER name in record order, as written, when one of
+    /// them is not declared by the header (and so missing from `Failed`);
+    /// `None` when the ids list them all.
+    pub(crate) fn names_with_undeclared(&self) -> Option<impl Iterator<Item = &'a [u8]>> {
+        (!self.text.is_empty()).then(|| self.text.split(|&b| b == b';'))
     }
 }
 
@@ -528,7 +547,13 @@ impl<'a> SiteRef<'a> {
     }
 
     pub fn filters(&self) -> FiltersRef<'a> {
-        FiltersRef { column: self.parts.filter, ids: &self.parts.filter_ids, file: self.file }
+        let text = &self.parts.filter_text;
+        FiltersRef {
+            column: self.parts.filter,
+            ids: &self.parts.filter_ids,
+            text: self.bytes.get(text.start as usize..text.end as usize).unwrap_or_default(),
+            file: self.file,
+        }
     }
 }
 
