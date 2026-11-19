@@ -43,7 +43,7 @@ fn make_setup(samples: &[&str]) -> Setup {
     Setup { header: Arc::new(builder.build().unwrap()), contig, gt_fmt, ad_fmt }
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn vcf_text_ragged_and_empty_format_ints() {
     let s = make_setup(&["a", "b", "c"]);
@@ -68,7 +68,7 @@ fn vcf_text_ragged_and_empty_format_ints() {
 }
 
 // r[verify bcf_writer.end_of_vector]
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn bcf_ragged_and_empty_format_ints_roundtrips_through_bcftools() {
     if std::process::Command::new("bcftools").arg("--version").output().is_err() {
@@ -104,7 +104,7 @@ fn bcf_ragged_and_empty_format_ints_roundtrips_through_bcftools() {
 }
 
 // r[verify bcf_writer.smallest_int_type]
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 /// The BCF integer type for the whole column must fit the largest value across
 /// *all* samples — not just the first. Sample a holds a value that fits INT8;
 /// sample b needs INT32. A per-sample (first-element) type choice would corrupt

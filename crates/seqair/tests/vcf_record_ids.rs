@@ -93,7 +93,7 @@ fn ids(tc: &TestCase) -> Vec<String> {
 }
 
 // r[verify record_encoder.record_id]
-// r[verify record_encoder.typestate_transitions+3]
+// r[verify record_encoder.typestate_transitions+4]
 /// bcftools reads the ID column seqair writes, the last list set winning, and
 /// the rest of the record unmoved by the replacement, from VCF text and BCF.
 #[hegel::test(test_cases = pinned::cases(40))]

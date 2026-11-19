@@ -30,7 +30,7 @@ pub struct Ready;
 
 // ── Record encoder state types ─────────────────────────────────────────
 
-// r[impl record_encoder.typestate_states]
+// r[impl record_encoder.typestate_states+2]
 /// Record state: fixed fields written, awaiting filter.
 pub struct Begun;
 
@@ -640,7 +640,7 @@ impl<W: Write> Writer<W, Ready> {
         if self.header != Some(contig.header) {
             return Err(VcfError::ForeignKey { name: contig.name.clone() });
         }
-        // r[impl record_encoder.reserved_rejection]
+        // r[impl record_encoder.reserved_rejection+2]
         // A QUAL whose bits are the float MISSING marker would read back as an
         // absent QUAL — indistinguishable from `None`.
         reject_reserved_floats("QUAL", qual)?;
@@ -1210,7 +1210,7 @@ impl EncoderInner<'_> {
 
 // ── Begun → Filtered ───────────────────────────────────────────────────
 
-// r[impl record_encoder.typestate_transitions+3]
+// r[impl record_encoder.typestate_transitions+4]
 // r[impl record_encoder.filters+3]
 impl<'a> RecordEncoder<'a, Begun> {
     pub fn filter_pass(mut self) -> RecordEncoder<'a, Filtered> {
@@ -1517,11 +1517,11 @@ fn nth_colon_field(buf: &[u8], n: usize) -> (usize, usize) {
 
 // ── Filtered: InfoEncoder ──────────────────────────────────────────────
 
-// r[impl record_encoder.info_encoder]
+// r[impl record_encoder.info_encoder+2]
 // r[impl record_encoder.bcf_encoding]
 // r[impl record_encoder.vcf_encoding]
 impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError> {
         self.check_key(id)?;
         reject_reserved_ints(id.name(), [value])?;
@@ -1552,7 +1552,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_float(&mut self, id: &FieldId, value: f32) -> Result<(), VcfError> {
         self.check_key(id)?;
         reject_reserved_floats(id.name(), [value])?;
@@ -1579,7 +1579,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_ints(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
@@ -1613,7 +1613,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_floats(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
@@ -1678,7 +1678,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         }
         self.info_str(id, if values.is_empty() { b"." } else { &joined }, Escape::Encoded)
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
@@ -1722,7 +1722,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         Ok(())
     }
     // r[impl vcf_passthrough.opt_arrays]
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn info_float_opts(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError> {
         self.check_key(id)?;
         id.check_count(self.n_allele_count(), None, values.len())?;
@@ -1778,7 +1778,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
     }
 }
 
-// r[impl record_encoder.typestate_transitions+3]
+// r[impl record_encoder.typestate_transitions+4]
 impl<'a> RecordEncoder<'a, Filtered> {
     /// Transition to the `WithSamples` state for encoding FORMAT fields.
     ///
@@ -1956,7 +1956,7 @@ impl<S: FormatPhase> RecordEncoder<'_, S> {
 
 // ── WithSamples: FormatEncoder ─────────────────────────────────────────
 
-// r[impl record_encoder.format_encoder]
+// r[impl record_encoder.format_encoder+2]
 // `sample_bufs[i]` is indexed with `i` in `0..values.len()`; each method asserts
 // `values.len() == n_samples()` up front, and `sample_bufs` is sized to
 // `n_samples()` in `begin_samples()`. The typed `FormatKey::encode` wrappers
@@ -2053,7 +2053,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         self.record.ploidies.extend(gts.iter().map(|g| g.alleles.len()));
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2091,7 +2091,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2126,7 +2126,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         Ok(())
     }
     // r[impl record_encoder.format_scalar_opt]
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_int_opt(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2170,7 +2170,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         Ok(())
     }
     // r[impl record_encoder.format_scalar_opt]
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_float_opt(&mut self, id: &FieldId, values: &[Option<f32>]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2206,7 +2206,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2276,7 +2276,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
         self.check_key(id)?;
         self.inner.check_format_room(id)?;
@@ -2334,7 +2334,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         }
         Ok(())
     }
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_float_opts(
         &mut self,
         id: &FieldId,
@@ -2407,7 +2407,7 @@ impl<S: FormatPhase> FormatEncoder for RecordEncoder<'_, S> {
         Ok(())
     }
     // r[impl vcf_passthrough.opt_arrays]
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     fn format_int_opts(
         &mut self,
         id: &FieldId,

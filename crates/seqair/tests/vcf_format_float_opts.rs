@@ -43,7 +43,7 @@ fn write(format: OutputFormat, values: &[Option<f32>]) -> (Vec<u8>, Result<(), V
     (out, result)
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 // r[verify vcf_writer.missing_dot]
 #[test]
 fn vcf_text_writes_dot_for_none() {
@@ -75,7 +75,7 @@ fn bcf_writes_float_missing_for_none() {
     assert_eq!(String::from_utf8(q.stdout).unwrap().trim(), "0.5,.");
 }
 
-// r[verify record_encoder.reserved_rejection]
+// r[verify record_encoder.reserved_rejection+2]
 #[test]
 fn reserved_float_still_rejected_next_to_none() {
     let reserved = f32::from_bits(0x7F80_0001);

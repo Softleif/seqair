@@ -101,21 +101,23 @@ Each typed key MUST provide an `encode` method that delegates to the correspondi
 r[record_encoder.typestate]
 The record encoder MUST use a typestate pattern to enforce the correct calling sequence at compile time. A single `RecordEncoder<'a, S>` type MUST handle both BCF and VCF encoding via internal enum dispatch. The encoder MUST be parameterized by a state type that restricts which methods are available.
 
-> r[record_encoder.typestate_states]
-> Three record states MUST be provided:
+> r[record_encoder.typestate_states+2]
+> Four record states MUST be provided:
 >
 > - `Begun` — record has been started (fixed fields written). Only filter methods are available.
 > - `Filtered` — filters have been written. INFO methods and state transition methods are available.
 > - `WithSamples` — sample count has been declared. FORMAT methods and `emit()` are available.
+> - `Edit` — a copied record (`RecordEdit`, `r[vcf_passthrough.edit+2]`). INFO and FORMAT methods in any order, `remove_info`/`remove_format`, and `emit()` are available.
 
-r[record_encoder.typestate_transitions+3]
+r[record_encoder.typestate_transitions+4]
 State transitions MUST consume the encoder by value and return the encoder in the new state, preventing use of the old state:
 
 - `writer.begin_record(contig, pos, alleles, qual)` → `RecordEncoder<Begun>`
 - `ids(self, ids)` on `Begun` → `Result<Begun, VcfError>`, optional, since the ID column is checked (`r[record_encoder.record_id]`)
 - `filter_pass(self)` / `no_filter(self)` on `Begun` → `Filtered`; `filter_fail(self, filters)` → `Result<Filtered, VcfError>`, since its handles are checked (`r[record_encoder.foreign_keys]`)
 - `begin_samples(self)` on `Filtered` → `WithSamples` (the sample count is the header's)
-- `emit(self)` on `Filtered` (no samples) or `WithSamples` → consumed (borrow released)
+- `writer.copy_record(record)` / `copy_record_with(map, record)` → `Result<RecordEncoder<Edit>, VcfError>` (`r[vcf_passthrough.copy]`), the whole record written and open for edits
+- `emit(self)` on `Filtered` (no samples), `WithSamples` or `Edit` → consumed (borrow released)
 
 r[record_encoder.typestate_must_use]
 The encoder types MUST be marked `#[must_use]` to warn at compile time if a record is silently discarded without calling `emit()`.
@@ -134,17 +136,17 @@ Exactly one filter method MUST be called per record: `filter_pass()` for PASS, `
 
 ## InfoEncoder Trait
 
-r[record_encoder.info_encoder]
-An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be implemented by `RecordEncoder<'_, Filtered>`. Its methods take `&mut self` and concrete parameter types; the typed [`InfoKey`] encode wrappers dispatch through it.
+r[record_encoder.info_encoder+2]
+An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be implemented by `RecordEncoder<'_, Filtered>` and `RecordEncoder<'_, Edit>`. Its methods take `&mut self` and concrete parameter types; the typed [`InfoKey`] encode wrappers dispatch through it.
 
-r[record_encoder.info_methods+2]
-INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. They perform no I/O — they write to in-memory buffers, which cannot fail. All of them nevertheless return `Result<(), VcfError>`, because they validate before writing: the key's header (`r[record_encoder.foreign_keys]`), the value count (`r[record_encoder.count_check]`) and reserved numbers (`r[record_encoder.reserved_rejection]`).
+r[record_encoder.info_methods+3]
+INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_strings`, `info_int_opts`, `info_float_opts`) MUST accept a `&FieldId` and the appropriate value. They perform no I/O — they write to in-memory buffers, which cannot fail. All of them nevertheless return `Result<(), VcfError>`, because they validate before writing: the key's header (`r[record_encoder.foreign_keys]`), the value count (`r[record_encoder.count_check]`) and reserved numbers (`r[record_encoder.reserved_rejection+2]`).
 
 r[record_encoder.string_list]
 `InfoKey<Str>::encode_list(&mut enc, &[&str])` MUST write a list of strings as one value: each element percent-encoded (so an element may hold `,`), joined with `,`, `.` for an empty list, the element count checked against the declared `Number` (`r[record_encoder.count_check+3]`). `encode` writes one string and percent-encodes its commas, so a caller-joined list (`vcf_0,vcf_1`) would come out as `vcf_0%2Cvcf_1`, as aardvark's `SOURCES` did.
 
-r[record_encoder.reserved_rejection]
-Every entry point that accepts a caller-supplied number destined for a BCF numeric field MUST reject the reserved bit patterns of `r[bcf_encoder.reserved_bands]` before writing any bytes, and MUST report `VcfEncodeError::ReservedIntValue` / `VcfEncodeError::ReservedFloatValue` wrapped in `VcfError`. The affected entry points are the INFO methods `info_int`, `info_ints`, `info_int_opts`, `info_float` and `info_floats`; the FORMAT methods `format_int`, `format_ints`, `format_float`, `format_floats` and `format_float_opts` (for concrete elements); and the `qual` argument of `begin_record`. `format_gt` needs no test: its BCF encoding is `(allele_index + 1) << 1 | phased` over a `u16` allele index, which is never negative, and the FILTER methods only ever write non-negative dictionary indices. Rejection MUST leave the encoder's buffers as they were, so a caller that handles the error can continue with the same record.
+r[record_encoder.reserved_rejection+2]
+Every entry point that accepts a caller-supplied number destined for a BCF numeric field MUST reject the reserved bit patterns of `r[bcf_encoder.reserved_bands]` before writing any bytes, and MUST report `VcfEncodeError::ReservedIntValue` / `VcfEncodeError::ReservedFloatValue` wrapped in `VcfError`. The affected entry points are the INFO methods `info_int`, `info_ints`, `info_int_opts`, `info_float`, `info_floats` and `info_float_opts`; the FORMAT methods `format_int`, `format_int_opt`, `format_ints`, `format_int_opts`, `format_float`, `format_float_opt`, `format_floats` and `format_float_opts` (the `_opt` forms for their concrete elements); and the `qual` argument of `begin_record`. `format_gt` needs no test: its BCF encoding is `(allele_index + 1) << 1 | phased` over a `u16` allele index, which is never negative, and the FILTER methods only ever write non-negative dictionary indices. Rejection MUST leave the encoder's buffers as they were, so a caller that handles the error can continue with the same record.
 
 r[record_encoder.count_check+3]
 Encoding an `Arr` or `OptArr` value (not a `Str`, which is one string whatever its `Number`) MUST check its length (missing elements included) against the field's declared `Number`: `A` expects the record's number of ALT alleles, `R` its number of alleles, `Count(n)` exactly `n`, and `G` the number of genotypes for the sample's own ploidy, `binomial(n_allele + ploidy - 1, ploidy)`, when the record's GT was already encoded (samples may differ in ploidy, `r[record_encoder.mixed_ploidy]`, so each sample is checked against its own GT; a sample whose GT has no alleles is not checked); before GT, and for INFO, `G` is not checked. `.`, `M`, `P` and the local numbers `LA`/`LR`/`LG` are not checked. FORMAT checks apply per sample, and a sample with no values is missing (`.`), which every `Number` allows. A mismatch MUST return `VcfError::CountMismatch { field, number, expected, found }` before any byte of the field is written, so the record stays valid and can still be emitted. htslib does not check this; a wrong count silently produces a file other tools misread (a reader indexing `Number=R` values by allele reads past the end, or the wrong allele).
@@ -160,14 +162,14 @@ If the same INFO field (identified by `FieldId`) is encoded more than once withi
 
 ## FormatEncoder Trait
 
-r[record_encoder.format_encoder]
-A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
+r[record_encoder.format_encoder+2]
+A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be implemented by `RecordEncoder<'_, WithSamples>` and `RecordEncoder<'_, Edit>`.
 
-r[record_encoder.format_methods+2]
-FORMAT methods (`format_gt`, `format_int`, `format_int_opt`, `format_float`, `format_float_opt`, `format_ints`, `format_floats`, `format_float_opts`, `format_string`) MUST accept a `&FieldId` and a **slice of per-sample values** — one element per sample for scalar/string/GT methods, or one inner slice per sample (`&[&[T]]`) for the multi-valued array methods. The outer slice length MUST equal the sample count declared by `begin_samples()`. These methods return `Result<(), VcfError>` because they validate the per-sample count before encoding. For single-sample records, callers pass a 1-element slice. For the multi-valued array methods, the BCF encoding stores a single column width equal to the longest inner slice; a sample with fewer values MUST be padded to the column width with the end-of-vector sentinel for the chosen type. A sample with **no** values (empty slice / empty string) MUST be encoded as the BCF missing value (so it renders as `.`, matching the VCF text path) — the per-type integer/float missing sentinel followed by end-of-vector padding, or the literal `.` char NUL-padded for strings. For multi-valued integers the BCF integer type MUST be chosen to fit every value across all samples (the column stores one type), not just the first sample.
+r[record_encoder.format_methods+3]
+FORMAT methods (`format_gt`, `format_int`, `format_int_opt`, `format_float`, `format_float_opt`, `format_ints`, `format_int_opts`, `format_floats`, `format_float_opts`, `format_string`) MUST accept a `&FieldId` and a **slice of per-sample values** — one element per sample for scalar/string/GT methods, or one inner slice per sample (`&[&[T]]`) for the multi-valued array methods. The outer slice length MUST equal the sample count the header declares: the typed `FormatKey` wrappers, the only way to call these methods from outside the crate (`FieldId` is crate-private), check it and fail with `VcfError::SampleCountMismatch`; the methods themselves only `debug_assert!` it. They return `Result<(), VcfError>` for what they do check: the key's header, the FORMAT field limit, value counts and reserved values. For single-sample records, callers pass a 1-element slice. For the multi-valued array methods, the BCF encoding stores a single column width equal to the longest inner slice; a sample with fewer values MUST be padded to the column width with the end-of-vector sentinel for the chosen type. A sample with **no** values (empty slice / empty string) MUST be encoded as the BCF missing value (so it renders as `.`, matching the VCF text path) — the per-type integer/float missing sentinel followed by end-of-vector padding, or the literal `.` char NUL-padded for strings. For multi-valued integers the BCF integer type MUST be chosen to fit every value across all samples (the column stores one type), not just the first sample.
 
 r[record_encoder.format_scalar_opt]
-`FormatKey<Scalar<i32>>` and `FormatKey<Scalar<f32>>` MUST provide `encode_opt(&self, enc, values: &[Option<T>])`, one element per sample (else `VcfError::SampleCountMismatch`), where `None` is that sample's missing value: `.` in VCF text, and in BCF the missing value of the width the column is stored in — `0x80`, `0x8000` or `0x80000000` for the integer type chosen to fit every concrete value (int8 when every sample is missing, as htslib chooses), `0x7F800001` for a float. Concrete values are checked for reserved patterns as `encode` checks them (`r[record_encoder.reserved_rejection]`); `None` never is.
+`FormatKey<Scalar<i32>>` and `FormatKey<Scalar<f32>>` MUST provide `encode_opt(&self, enc, values: &[Option<T>])`, one element per sample (else `VcfError::SampleCountMismatch`), where `None` is that sample's missing value: `.` in VCF text, and in BCF the missing value of the width the column is stored in — `0x80`, `0x8000` or `0x80000000` for the integer type chosen to fit every concrete value (int8 when every sample is missing, as htslib chooses), `0x7F800001` for a float. Concrete values are checked for reserved patterns as `encode` checks them (`r[record_encoder.reserved_rejection+2]`); `None` never is.
 
 r[record_encoder.mixed_ploidy]
 Samples of one record MAY differ in ploidy (a haploid chrX call next to a diploid one, a triploid sample in a diploid cohort): `FormatKey<Gt>::encode` MUST accept them and MUST NOT fail for it. VCF text writes each sample's own genotype (`r[vcf_writer.genotype_serialization+2]`); BCF stores the GT column at the largest ploidy and pads each shorter sample with the end-of-vector value of the column's integer type (`r[bcf_writer.gt_encoding]`), which is how htslib stores a ploidy mix and how it reads it back. A genotype with no alleles is the missing call `.`, a missing haploid allele in BCF.
@@ -176,7 +178,7 @@ r[record_encoder.format_single_sample]
 The multi-valued array FORMAT keys (`FormatKey<Arr<i32>>`, `FormatKey<Arr<f32>>`) MUST provide an `encode_single_sample` convenience that takes one sample's values as a flat `&[T]` (rather than `&[&[T]]`) and encodes them for a single-sample record. It MUST return [`VcfError::SampleCountMismatch`] if the header declares anything other than exactly one sample.
 
 r[record_encoder.format_state_queries]
-`FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record, and `n_samples()` returning the sample count the header declares — the same count the per-sample slice length is validated against in `r[record_encoder.format_methods]`.
+`FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record, and `n_samples()` returning the sample count the header declares — the same count the per-sample slice length is validated against in `r[record_encoder.format_methods+3]`.
 
 r[record_encoder.format_dedup+2]
 If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_format_*` semantics — for VCF text this means rewriting the corresponding colon-delimited subfield of every sample. The deduplication tracker SHOULD reuse its allocations across records. Detecting a duplicate SHOULD cost O(1) on the common path where each field is written once — a `FieldSet` keyed by `dict_idx` (`r[vcf_header.field_set]`), as `FieldTracker` keeps for INFO — rather than a name comparison against every key already written; the text path's per-record FORMAT key list SHOULD clone the header's names rather than rebuild them from `&str`.

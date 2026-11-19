@@ -951,7 +951,7 @@ fn the_encoder_state_queries_report_the_record_being_encoded(tc: TestCase) {
     enc.emit().unwrap();
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 /// A per-sample slice of the wrong length is refused by value: the error says
 /// how many samples the header declares and how many values it was handed.
 #[hegel::test]

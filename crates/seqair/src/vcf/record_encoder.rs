@@ -370,14 +370,14 @@ pub type FormatString = FormatKey<Str>;
 
 // ── InfoEncoder trait ──────────────────────────────────────────────────
 
-// r[impl record_encoder.info_methods+2]
+// r[impl record_encoder.info_methods+3]
 /// Object-safe trait for encoding INFO fields. Every method fails with
 /// [`VcfError::ForeignKey`] for a key of another header
 /// (`r[record_encoder.foreign_keys]`) and, for arrays, with
 /// [`VcfError::CountMismatch`] for a count its `Number` does not allow
 /// (`r[record_encoder.count_check+3]`), before writing anything.
 pub trait InfoEncoder {
-    // r[impl record_encoder.reserved_rejection]
+    // r[impl record_encoder.reserved_rejection+2]
     /// # Errors
     /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if `value` is a reserved BCF pattern.
     fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError>;
@@ -413,7 +413,7 @@ pub trait InfoEncoder {
 
 // ── FormatEncoder trait ────────────────────────────────────────────────
 
-// r[impl record_encoder.format_methods+2]
+// r[impl record_encoder.format_methods+3]
 /// Object-safe trait for encoding FORMAT fields. Every method fails with
 /// [`VcfError::ForeignKey`] for a key of another header and, for arrays, with
 /// [`VcfError::CountMismatch`] for a sample whose count its `Number` does not
@@ -1352,8 +1352,8 @@ mod tests {
         assert_eq!(filter_col, "lowDp", "filter_fail must write the filter name");
     }
 
-    // r[verify record_encoder.info_methods+2]
-    // r[verify record_encoder.format_methods+2]
+    // r[verify record_encoder.info_methods+3]
+    // r[verify record_encoder.format_methods+3]
     // r[verify record_encoder.key_encode+2]
     // r[verify record_encoder.bcf_encoding]
     #[test]
@@ -1501,7 +1501,7 @@ mod tests {
         (header, contig, dp_info, gt_fmt, dp_fmt)
     }
 
-    // r[verify record_encoder.format_methods+2]
+    // r[verify record_encoder.format_methods+3]
     #[test]
     fn multi_sample_bcf() {
         let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(!buf.is_empty());
     }
 
-    // r[verify record_encoder.format_methods+2]
+    // r[verify record_encoder.format_methods+3]
     #[test]
     fn multi_sample_vcf_text() {
         let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
@@ -1563,7 +1563,7 @@ mod tests {
         assert_eq!(cols[11], "1/1:38", "sample 3");
     }
 
-    // r[verify record_encoder.format_methods+2]
+    // r[verify record_encoder.format_methods+3]
     #[test]
     fn single_sample_slice_api() {
         let setup = TestSetup::new();

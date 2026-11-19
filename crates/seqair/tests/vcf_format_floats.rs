@@ -131,7 +131,7 @@ fn make_multi_setup(samples: &[&str]) -> MultiSetup {
     MultiSetup { header: Arc::new(builder.build().unwrap()), contig, gt_fmt, vl_fmt }
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn vcf_text_ragged_and_empty_format_floats() {
     let s = make_multi_setup(&["a", "b", "c"]);
@@ -156,7 +156,7 @@ fn vcf_text_ragged_and_empty_format_floats() {
 }
 
 // r[verify bcf_writer.end_of_vector]
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn bcf_ragged_and_empty_format_floats_roundtrips_through_bcftools() {
     if std::process::Command::new("bcftools").arg("--version").output().is_err() {

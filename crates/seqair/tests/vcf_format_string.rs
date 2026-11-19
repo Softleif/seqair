@@ -41,7 +41,7 @@ fn make_setup(samples: &[&str]) -> Setup {
     Setup { header: Arc::new(builder.build().unwrap()), contig, gt_fmt, lbl_fmt }
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn vcf_text_format_string() {
     let s = make_setup(&["a", "b", "c"]);
@@ -66,7 +66,7 @@ fn vcf_text_format_string() {
 }
 
 // r[verify bcf_writer.string_encoding]
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 #[test]
 fn bcf_format_string_roundtrips_through_bcftools() {
     if std::process::Command::new("bcftools").arg("--version").output().is_err() {
@@ -102,7 +102,7 @@ fn bcf_format_string_roundtrips_through_bcftools() {
     assert_eq!(lbl.trim(), "pass\tlo\t.", "bcftools read LBL back as: {lbl}");
 }
 
-// r[verify record_encoder.format_methods+2]
+// r[verify record_encoder.format_methods+3]
 // r[verify vcf_writer.percent_encoding]
 // r[verify bcf_writer.string_escape]
 /// A value containing the FORMAT subfield delimiter (`:`) and other reserved
