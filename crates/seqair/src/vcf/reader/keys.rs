@@ -22,8 +22,9 @@ use tracing::{debug, warn};
 /// Where an id's definition in one section comes from.
 #[derive(Debug)]
 enum Decl<D: 'static> {
-    /// The header declares it.
-    Header,
+    /// The header declares it: its place in the header's INFO or FORMAT
+    /// map, so a lookup by id reads it without hashing the name.
+    Header(usize),
     /// VCF 4.5 reserves it and the header leaves it out (VCF text only).
     Reserved(&'static str, &'static D),
 }
@@ -84,14 +85,14 @@ impl FieldTable {
         let header_len = dict.len();
         let mut info = vec![None; header_len];
         let mut format = vec![None; header_len];
-        for (name, def) in header.infos() {
+        for (at, (name, def)) in header.infos().iter().enumerate() {
             if let Some(i) = dict.get(name) {
-                set(&mut info, i, Declared { typ: def.typ, decl: Decl::Header });
+                set(&mut info, i, Declared { typ: def.typ, decl: Decl::Header(at) });
             }
         }
-        for (name, def) in header.formats() {
+        for (at, (name, def)) in header.formats().iter().enumerate() {
             if let Some(i) = dict.get(name) {
-                set(&mut format, i, Declared { typ: def.typ, decl: Decl::Header });
+                set(&mut format, i, Declared { typ: def.typ, decl: Decl::Header(at) });
             }
         }
         let mut reserved_names: Vec<&'static str> = Vec::new();
@@ -190,13 +191,10 @@ impl FieldTable {
         header: &'a VcfHeader,
         id: DictId,
     ) -> Option<(&'a str, &'a InfoDef)> {
-        let name = self.name(header, id)?;
         Some(match self.info.get(id.get() as usize).copied().flatten().map(|d| d.decl) {
-            Some(Decl::Header) => {
-                header.infos().get_key_value(name).map(|(n, d)| (n.as_str(), d))?
-            }
+            Some(Decl::Header(at)) => header.infos().get_index(at).map(|(n, d)| (n.as_str(), d))?,
             Some(Decl::Reserved(name, def)) => (name, def),
-            None => (name, &reserved::UNDECLARED_INFO),
+            None => (self.name(header, id)?, &reserved::UNDECLARED_INFO),
         })
     }
 
@@ -206,13 +204,12 @@ impl FieldTable {
         header: &'a VcfHeader,
         id: DictId,
     ) -> Option<(&'a str, &'a FormatDef)> {
-        let name = self.name(header, id)?;
         Some(match self.format.get(id.get() as usize).copied().flatten().map(|d| d.decl) {
-            Some(Decl::Header) => {
-                header.formats().get_key_value(name).map(|(n, d)| (n.as_str(), d))?
+            Some(Decl::Header(at)) => {
+                header.formats().get_index(at).map(|(n, d)| (n.as_str(), d))?
             }
             Some(Decl::Reserved(name, def)) => (name, def),
-            None => (name, &reserved::UNDECLARED_FORMAT),
+            None => (self.name(header, id)?, &reserved::UNDECLARED_FORMAT),
         })
     }
 
