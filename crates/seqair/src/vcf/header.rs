@@ -228,7 +228,7 @@ pub const MAX_SAMPLES: usize = 10_000_000;
 // r[impl vcf_header.parse.dictionary]
 /// A dictionary of header ids to BCF indices: FILTER/INFO/FORMAT ids in the
 /// string dictionary ([`VcfHeader::string_map`]), contig names in the contig
-/// dictionary ([`VcfHeader::contig_map`]).
+/// dictionary (`VcfHeader::contig_map`).
 ///
 /// A parsed header may leave holes (`IDX=` values with gaps, as htslib writes
 /// after removing a field), so an index names at most one id, and some none.
@@ -969,18 +969,18 @@ fn push_quoted(out: &mut String, value: &str) {
 // correct order (FILTER → INFO → FORMAT) — no runtime order check needed.
 
 /// Result of [`VcfHeaderBuilder::from_bam_header`]: a builder pre-populated
-/// with contigs and the resolved [`ContigId`](super::record_encoder::ContigId)
+/// with contigs and the resolved [`ContigId`]
 /// handles needed by the record encoder.
 #[derive(Debug)]
 pub struct FromBamHeader {
     /// The builder, ready for further field registration.
     pub builder: VcfHeaderBuilder<Contigs>,
-    /// One [`ContigId`](super::record_encoder::ContigId) per `@SQ` line, in BAM tid order.
+    /// One [`ContigId`] per `@SQ` line, in BAM tid order.
     pub contigs: Vec<super::record_encoder::ContigId>,
 }
 
 impl FromBamHeader {
-    /// Look up the [`ContigId`](super::record_encoder::ContigId) registered
+    /// Look up the [`ContigId`] registered
     /// for `tid`.
     ///
     /// `tid` is a validated index into the BAM header that produced this
@@ -1206,7 +1206,7 @@ impl VcfHeaderBuilder<Contigs> {
     }
 
     // r[impl record_encoder.register_contig]
-    /// Register a contig: adds the header entry and returns a resolved [`ContigId`](super::record_encoder::ContigId).
+    /// Register a contig: adds the header entry and returns a resolved [`ContigId`].
     pub fn register_contig(
         &mut self,
         name: impl Into<SmolStr>,
@@ -1230,7 +1230,7 @@ impl VcfHeaderBuilder<Contigs> {
     /// Build a `VcfHeaderBuilder` from a BAM header, copying contig names and lengths.
     ///
     /// Returns a [`FromBamHeader`] containing the builder and all resolved
-    /// [`ContigId`](super::record_encoder::ContigId) handles, so callers
+    /// [`ContigId`] handles, so callers
     /// can use them with the record encoder without re-registering.
     pub fn from_bam_header(header: &BamHeader) -> Result<FromBamHeader, VcfHeaderError> {
         let mut builder = Self::new();
@@ -1289,7 +1289,7 @@ impl VcfHeaderBuilder<Filters> {
     }
 
     // r[impl record_encoder.register]
-    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`](super::record_encoder::FilterId).
+    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`].
     pub fn register_filter(
         &mut self,
         def: &super::record_encoder::FilterFieldDef,
