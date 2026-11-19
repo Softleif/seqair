@@ -22,13 +22,21 @@ use std::sync::Arc;
 /// The 24 fixed bytes at the start of a BCF record's shared section.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fixed {
+    /// The contig's index in the header's contig dictionary.
     pub(crate) rid: i32,
+    /// 0-based POS, −1 for the telomere.
     pub(crate) pos: i32,
+    /// The stored reference length, read by spans and query verdicts.
     pub(crate) rlen: i32,
+    /// QUAL's `f32` bits, kept as bits so the missing pattern compares exactly.
     pub(crate) qual: u32,
+    /// The number of INFO entries `shared` holds after the site columns.
     pub(crate) n_info: u16,
+    /// REF and the ALTs.
     pub(crate) n_allele: u16,
+    /// The samples the individual section holds (24 bits on disk).
     pub(crate) n_sample: u32,
+    /// The number of FORMAT fields in the individual section.
     pub(crate) n_fmt: u8,
 }
 
@@ -77,11 +85,20 @@ impl Fixed {
 /// A BCF record's bytes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BcfRecord<'a> {
-    /// The whole record as stored: `l_shared`, `l_indiv`, the shared
-    /// section and the individual section (empty when no sample is read).
+    /// The whole record as stored: `l_shared`, `l_indiv`, then `shared`
+    /// and `indiv` below; read by [`RawRecord::bytes`] (and so
+    /// `FullRecord::raw_bytes`).
     pub(crate) bytes: &'a [u8],
+    /// The shared section: the fixed fields, ID, alleles, FILTER and INFO;
+    /// read by site decoding and the INFO view (from `info_start`).
     pub(crate) shared: &'a [u8],
+    /// The individual section: the FORMAT data, field-major (each FORMAT
+    /// key's typed vector holds every sample's value); handed to the sample
+    /// components through `FormatSource::Bcf`. Empty when the reader
+    /// skipped the samples, which it does for a record copied across input
+    /// batches that no component reads samples of.
     pub(crate) indiv: &'a [u8],
+    /// The 24 fixed bytes at the start of `shared`, decoded.
     pub(crate) fixed: Fixed,
     /// Where INFO starts in `shared`; found only when it is read.
     pub(crate) info_start: usize,
@@ -166,7 +183,9 @@ impl TextCols {
 /// A VCF text record: its line (without the newline) and columns.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TextRecord<'a> {
+    /// The line without its `\n` and a `\r` before it; every view's bytes.
     pub(crate) line: &'a [u8],
+    /// Where `line`'s columns are, found once by the reader for every view.
     pub(crate) cols: &'a TextCols,
 }
 
@@ -186,9 +205,13 @@ pub(crate) enum Repr<'a> {
 /// section on first access, once per record.
 #[derive(Debug, Clone, Copy)]
 pub struct RawRecord<'a> {
+    /// The file's shared state: header, field table, warn-once flags.
     pub(crate) file: &'a Arc<FileShared>,
+    /// The record's contig, from the file's contig table.
     pub(crate) contig: &'a ContigId,
+    /// Where the record is, for its errors.
     pub(crate) at: RecordAt,
+    /// What the `Fields` type asked for: a view of any other section fails.
     pub(crate) sections: Sections,
     /// The site columns, decoded when [`Sections::SITE`] is read.
     pub(crate) site: Option<&'a SiteParts>,
@@ -196,6 +219,7 @@ pub struct RawRecord<'a> {
     /// views; reset for every record.
     pub(crate) info_index: &'a LazyIndex,
     pub(crate) format_index: &'a LazyIndex<FormatIndex>,
+    /// The record's bytes, BCF or text.
     pub(crate) repr: Repr<'a>,
 }
 
