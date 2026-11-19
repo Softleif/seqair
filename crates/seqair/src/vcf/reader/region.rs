@@ -30,6 +30,12 @@ impl From<&ContigId> for RegionContig {
     }
 }
 
+impl From<ContigId> for RegionContig {
+    fn from(id: ContigId) -> Self {
+        Self::Id(id)
+    }
+}
+
 impl RegionContig {
     /// The contig's name.
     pub fn name(&self) -> &str {
