@@ -228,6 +228,7 @@ impl ReadKind for Gt {
     // r[impl vcf_values.gt+2]
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
+    #[inline]
     fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
         let gt = match value.0 {
             StoredRepr::Bcf(v) => {

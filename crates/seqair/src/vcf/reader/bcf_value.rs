@@ -227,6 +227,7 @@ impl<'a> TypedValue<'a> {
     /// One sample's GT vector. `first_phase_is_read` is false for VCF 4.3 and
     /// earlier, whose first allele's phase bit is treated as unphased
     /// (`r[vcf_record.gt_first_phase+3]`).
+    #[inline]
     pub(crate) fn gt(self, first_phase_is_read: bool) -> Result<BcfGt<'a>, BcfValueError> {
         let alleles = BcfVec::checked(self, |v| gt_allele(v).map(drop))?;
         Ok(BcfGt { alleles, first: true, first_phase_is_read })
@@ -299,6 +300,7 @@ impl<'a> FormatColumn<'a> {
     }
 
     /// Sample `i`'s values, `None` past the last sample.
+    #[inline]
     pub(crate) fn sample(&self, i: usize) -> Option<TypedValue<'a>> {
         let payload = self.sample_bytes(i)?;
         Some(TypedValue { ty: self.ty, count: self.per_sample, payload })
@@ -496,6 +498,7 @@ impl BcfGt<'_> {
 impl Iterator for BcfGt<'_> {
     type Item = GtAllele;
 
+    #[inline]
     fn next(&mut self) -> Option<GtAllele> {
         let element = self.alleles.next()?;
         let first = core::mem::replace(&mut self.first, false);
