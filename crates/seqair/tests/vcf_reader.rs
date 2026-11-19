@@ -999,6 +999,23 @@ fn a_failed_index_is_returned_on_every_access() {
     assert_eq!(values, [Some(5), None, Some(5)]);
 }
 
+// r[verify vcf_reader.file.header_only]
+/// A BCF whose header fills its first block opens with nothing readable
+/// after that block: the open inflates the header's block and no other.
+#[test]
+fn opening_reads_no_block_past_the_header() {
+    let bytes = std::fs::read(fixture("rastair.bcf")).unwrap();
+    let first = usize::from(u16::from_le_bytes([bytes[16], bytes[17]])) + 1;
+    let mut cut = bytes[..first].to_vec();
+    cut.extend_from_slice(b"not a BGZF block");
+    let file = VcfFile::from_bytes(cut, None).unwrap();
+    let mut reader = file.reader::<Locus>().open().unwrap();
+    assert!(reader.next_record().is_err(), "the records were cut off");
+    // The whole file reads from the same start.
+    let whole = VcfFile::from_bytes(bytes, None).unwrap();
+    assert!(whole.reader::<Locus>().open().unwrap().next_record().unwrap().is_some());
+}
+
 // r[verify vcf_reader.formats]
 #[test]
 fn formats_are_detected_and_refused_by_content() {

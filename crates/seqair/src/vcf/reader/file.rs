@@ -412,7 +412,9 @@ fn read_header(mut input: Input) -> Result<HeaderStart, VcfReadError> {
             } else {
                 read_text_header(&mut stream)?
             };
-            stream.fill()?;
+            // r[impl vcf_reader.file.header_only]
+            // No fill: where the header ends in its block, or at a block's end
+            // (the next block's start), is known without inflating more.
             let start = stream.virtual_offset().map_or(DataStart::After(len), DataStart::At);
             Ok((format, header, start, lines))
         }
