@@ -313,6 +313,13 @@ impl VcfFile {
         super::query::partitions(&self.0, n)
     }
 
+    // r[impl vcf_reader.contig_lookup]
+    /// The contig `name`, if the header or the index declares it or a
+    /// record named it: whether a query of `name` resolves.
+    pub fn contig(&self, name: &str) -> Option<ContigId> {
+        self.0.contigs.find(&self.0.header, name)
+    }
+
     // r[impl vcf_reader.reader]
     /// A reader of records into `F`, to configure and [`open`](ReaderBuilder::open).
     pub fn reader<F: Fields>(&self) -> ReaderBuilder<'_, F> {

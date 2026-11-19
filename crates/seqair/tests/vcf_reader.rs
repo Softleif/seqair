@@ -1199,18 +1199,25 @@ fn text_edge_cases_read_as_htslib_reads_them() {
 /// contigs, once, and keeps its id for every record of the file.
 #[test]
 fn undeclared_text_contigs_get_ids_after_the_headers() {
-    let recs = text_records(&[
+    let file = text_file(&[
         "chrUn\t1\t.\tA\t.\t.\t.\t.",
         "chrUn\t2\t.\tA\t.\t.\t.\t.",
         "chr1\t1\t.\tA\t.\t.\t.\t.",
         "chrM\t1\t.\tA\t.\t.\t.\t.",
         "chrUn\t3\t.\tA\t.\t.\t.\t.",
     ]);
+    assert_eq!(file.contig("chrUn"), None, "no record named it yet");
+    let recs: Vec<FullRecord> =
+        file.reader::<FullRecord>().open().unwrap().into_iter().collect::<Result<_, _>>().unwrap();
     let ids: Vec<(&str, u32)> = recs
         .iter()
         .map(|r| (r.locus().contig().name().as_str(), r.locus().contig().tid()))
         .collect();
     assert_eq!(ids, [("chrUn", 2), ("chrUn", 2), ("chr1", 0), ("chrM", 3), ("chrUn", 2)]);
+    // r[verify vcf_reader.contig_lookup]
+    assert_eq!(file.contig("chrUn").map(|c| c.tid()), Some(2));
+    assert_eq!(file.contig("chr1"), file.header().contig("chr1").ok());
+    assert_eq!(file.contig("chrX"), None);
 }
 
 // r[verify vcf_record.gt_first_phase+3]

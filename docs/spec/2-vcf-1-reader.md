@@ -42,6 +42,9 @@ Any number of readers opened from one `VcfFile`, on any threads, MUST yield the 
 r[vcf_reader.contigs]
 Records name their contig with a `ContigId` from the file's contig table. The table MUST start as the header's contigs in dictionary order, followed by contigs only the index names (a tabix index lists its own sequence names). A VCF text record whose CHROM is in neither MUST be added to the table at the end, with a single `warn!` per file naming the first such contig. ClinVar ships without `##contig` lines, so rejecting them would refuse a common file. The table is append-only and shared by all readers of the file; a reader MUST look a CHROM up only when it differs from the previous record's, since sorted files change contig rarely. A BCF record whose contig index is not in the header's contig dictionary MUST fail with a typed error.
 
+r[vcf_reader.contig_lookup]
+`VcfFile::contig(name) -> Option<ContigId>` MUST look a name up in the file's contig table — the header's contigs, the index's, and those records named — so a caller can ask whether a query of that contig would resolve before making it. `header().contig(name)` misses the contigs only the index names, and riker queries every contig its BAM has, most of which a VCF lacks.
+
 ## Regions
 
 r[vcf_reader.region]
