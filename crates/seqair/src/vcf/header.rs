@@ -558,6 +558,7 @@ impl VcfHeader {
         since.iter().flat_map(|(_, removed)| removed).any(|(k, r)| *k == kind && r == name)
     }
 
+    // r[impl vcf_header.file_format+2]
     /// The VCF version this header declares: [`Self::WRITE_VERSION`] for a
     /// built header, the file's own for a parsed one.
     pub fn version(&self) -> VcfVersion {
