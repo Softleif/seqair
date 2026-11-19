@@ -16,11 +16,11 @@ The access patterns this covers: riker reads only positions (`Locus`); aardvark 
 
 ## The trait
 
-> r[vcf_fields.trait+3]
+> r[vcf_fields.trait+4]
 > `Fields` MUST be a public trait implemented by every component, every tuple of components, `FullRecord`, and any user type:
 >
 > ```rust
-> pub trait Fields: Sized + Send + Sync + Clone {
+> pub trait Fields: Sized + Send + Clone {
 >     type Plan: Send + Sync;
 >     fn plan(cx: &PlanContext<'_>) -> Result<Self::Plan, PlanError>;
 >     fn needs(plan: &Self::Plan) -> Sections;
@@ -56,11 +56,11 @@ r[vcf_fields.tuples]
 r[vcf_fields.unused_options+2]
 The builder's options are consumed through the `PlanContext` (the sample selection, by `selected_sample()`). Opening MUST fail with `PlanError::UnusedOption { option }` when an option was set that nothing consumed, so `.sample("HG002")` on a reader without a `Sample` component — or with a plan given by `with_plan` — is an error, not silently ignored.
 
-r[vcf_fields.owned]
-Every component MUST be an owned value — `Clone + Send + Sync`, no lifetimes — holding its own reusable buffers. `fill` MUST reuse them, so `read_into` allocates nothing per record once the buffers have grown. A record read through one reader stays valid after the reader moves on or is dropped.
+r[vcf_fields.owned+2]
+Every component MUST be an owned value — `Clone + Send`, no lifetimes — holding its own reusable buffers. `fill` MUST reuse them, so `read_into` allocates nothing per record once the buffers have grown. A record read through one reader stays valid after the reader moves on or is dropped. A component need not be `Sync`, and the indexed ones are not (`r[vcf_fields.lazy+3]`): a record is read on one thread and moved, not shared by reference, so `&record` does not cross threads (no `par_iter()` over a `Vec` of records, no `Arc<FullRecord>` read from several threads; clone the record, or convert it to a value of your own first). None of the crate's own threading nor its consumers (aardvark, HiPhase, riker, rastair) shares a record that way.
 
-r[vcf_fields.lazy+2]
-A component that indexes its bytes (`Info`, the sample components) MUST build the index on first access, not in `fill`, so a record the caller rejects on its position, FILTER or alleles never pays for it. The component MUST stay `Sync`: concurrent first accesses MUST build once, the others waiting for that build. `fill` MUST keep the previous index's buffers for the next build. A failed build (malformed data) MUST be stored and returned as the same typed error on every access that reaches it (`r[vcf_values.index+2]`). The index lives in place behind one atomic state byte (empty, building, partly built, done), so an access costs at most one atomic exchange; a `std::sync::OnceLock` plus a lock for the spare buffers cost four locked atomics per record. The `unsafe` this takes MUST be covered by a multi-threaded test of racing first accesses.
+r[vcf_fields.lazy+3]
+A component that indexes its bytes (`Info`, the sample components) MUST build the index on first access, not in `fill`, so a record the caller rejects on its position, FILTER or alleles never pays for it. `fill` MUST keep the previous index's buffers for the next build. A failed build (malformed data) MUST be stored and returned as the same typed error on every access that reaches it (`r[vcf_values.index+2]`). The index lives in std's single-threaded cells, with no `unsafe`: a `Cell` holds the partly built index and where it stopped (taken out and put back by each lookup, so a build that panics leaves it to start over), and a `OnceCell` the whole index and the build's outcome, which every access after reads in place; `fill` takes it back out as the spare buffers. Both hold it boxed, so each of these moves copies a pointer: moving the index by value (about 200 bytes, twice per record for the reader's own two indexes even when nothing reads them) cost 6–12% on rastair's patterns on a 3950X. That is why the component is not `Sync`: an atomic state machine guarding the cells made it `Sync` with `unsafe` code and one atomic exchange per first access, and a `std::sync::OnceLock` plus a lock for the spare buffers cost four locked atomics per record.
 
 ## Components
 
@@ -88,7 +88,7 @@ r[vcf_fields.sample+2]
 `Sample` MUST read the sample the builder's `.sample(sel)` selects — a name (`&str`, `SmolStr`) or a `SampleIdx` — failing to plan with `PlanError::Key(KeyError::UnknownSample { name })` for a name the header lacks, `ForeignKey` for a `SampleIdx` of another header, and `SampleNotSelected { n }` when nothing was selected and the header has more than one sample (with exactly one, it reads that one). It exposes the same `get`/`has` as `OnlySample` and `name()`.
 
 r[vcf_fields.samples]
-`Samples` MUST hold every sample and expose both views of the field-major FORMAT data: `column(&FormatKey<V>)`, an `ExactSizeIterator` over all samples' values with `get(SampleIdx)`, and `sample(SampleIdx)`, one sample's view with the same `get` as `OnlySample`. For VCF text the per-sample column offsets are built lazily (`r[vcf_fields.lazy+2]`) in one vectorised pass.
+`Samples` MUST hold every sample and expose both views of the field-major FORMAT data: `column(&FormatKey<V>)`, an `ExactSizeIterator` over all samples' values with `get(SampleIdx)`, and `sample(SampleIdx)`, one sample's view with the same `get` as `OnlySample`. For VCF text the per-sample column offsets are built lazily (`r[vcf_fields.lazy+3]`) in one vectorised pass.
 
 r[vcf_fields.sample_idx]
 `SampleIdx` MUST be obtainable only from a header (`header.sample(name)`, `header.samples()`) and carry the header's `HeaderId`; using it with a record from another header MUST fail with `ForeignKey`. A raw `usize` cannot name a sample.

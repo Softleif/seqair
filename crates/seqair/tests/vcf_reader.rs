@@ -379,7 +379,7 @@ fn truth_vcf_gz_reads_as_noodles_reads_it() {
 // r[verify vcf_reader.next_record]
 // r[verify vcf_reader.records]
 // r[verify vcf_reader.passthrough_header]
-// r[verify vcf_fields.owned]
+// r[verify vcf_fields.owned+2]
 #[test]
 fn every_way_of_reading_yields_the_same_records() {
     let file = VcfFile::open(fixture("rastair.bcf")).unwrap();
@@ -466,10 +466,12 @@ fn readers_on_many_threads_read_the_same_records() {
 #[test]
 fn files_and_readers_cross_threads() {
     fn send_sync_clone<T: Send + Sync + Clone>() {}
+    fn send_clone<T: Send + Clone>() {}
     fn send<T: Send>() {}
     send_sync_clone::<VcfFile>();
     send::<seqair::vcf::Reader<FullRecord>>();
-    send_sync_clone::<FullRecord>();
+    // r[verify vcf_fields.owned+2]
+    send_clone::<FullRecord>();
 }
 
 // r[verify vcf_fields.sample+2]
@@ -716,7 +718,7 @@ impl Fields for Truth {
     }
 }
 
-// r[verify vcf_fields.trait+3]
+// r[verify vcf_fields.trait+4]
 // r[verify vcf_fields.user_types+2]
 // r[verify vcf_fields.sections]
 #[test]
@@ -1014,7 +1016,7 @@ fn a_text_line_over_the_limit_fails_every_later_read() {
 }
 
 // r[verify vcf_fields.only_sample]
-// r[verify vcf_fields.lazy+2]
+// r[verify vcf_fields.lazy+3]
 /// One sample's FORMAT data is copied whole, unchecked: malformed data (a
 /// truncated column, bytes after the last field) fails on access with the
 /// same typed error the multi-sample index gives, and the next record reads.
@@ -1046,7 +1048,7 @@ fn a_malformed_single_sample_fails_on_access() {
 }
 
 // r[verify vcf_fields.sample+2]
-// r[verify vcf_fields.lazy+2]
+// r[verify vcf_fields.lazy+3]
 /// One sample of a multi-sample BCF is copied out of each column: malformed
 /// data fails every access with the error the whole section's index gives,
 /// not the read, and the next record reads.
@@ -1082,7 +1084,7 @@ fn a_malformed_sample_of_many_fails_on_access() {
     assert!(one.next_record().unwrap().is_none());
 }
 
-// r[verify vcf_fields.lazy+2]
+// r[verify vcf_fields.lazy+3]
 // r[verify vcf_reader.field_table]
 /// An INFO key the dictionary does not declare fails the lazily built index,
 /// and every access returns the same error; the record's other parts read.

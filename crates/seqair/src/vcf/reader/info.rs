@@ -240,7 +240,7 @@ impl<'a> InfoRef<'a> {
 }
 
 // r[impl vcf_fields.info+2]
-// r[impl vcf_fields.owned]
+// r[impl vcf_fields.owned+2]
 /// A record's INFO column, owned; its index is built on first access, so a
 /// record rejected on its position or FILTER never pays for it.
 #[derive(Clone)]
@@ -340,7 +340,7 @@ mod tests {
     use crate::vcf::reader::{Locus, VcfFile};
     use crate::vcf::record_encoder::InfoInt;
 
-    // r[verify vcf_fields.lazy+2]
+    // r[verify vcf_fields.lazy+3]
     /// Filling a record does not index its INFO; the first access does, and
     /// the next fill drops that index (keeping its buffers).
     #[test]

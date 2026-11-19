@@ -45,7 +45,7 @@ struct FormatData {
     at: RecordAt,
     index: LazyIndex<FormatIndex>,
     /// The error copying one sample's values out of a multi-sample BCF
-    /// record met, returned by every access (`r[vcf_fields.lazy+2]`).
+    /// record met, returned by every access (`r[vcf_fields.lazy+3]`).
     failed: Option<RecordError>,
 }
 
@@ -90,7 +90,7 @@ impl FormatData {
                     self.bytes.extend_from_slice(indiv);
                     self.n_fmt = n_fmt;
                 }
-                // r[impl vcf_fields.lazy+2]
+                // r[impl vcf_fields.lazy+3]
                 // Malformed data fails the accesses, not the read, as it
                 // does for every other shape of FORMAT data.
                 Some(sample) => {

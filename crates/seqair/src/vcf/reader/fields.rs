@@ -11,7 +11,7 @@ use crate::vcf::record_encoder::{FieldKind, FilterId, FormatKey, InfoKey};
 use seqair_types::SmolStr;
 use std::cell::Cell;
 
-// r[impl vcf_fields.trait+3]
+// r[impl vcf_fields.trait+4]
 /// A type a reader reads records into. It names what is decoded: a field
 /// the type does not hold is never read.
 ///
@@ -26,7 +26,7 @@ use std::cell::Cell;
 /// value, as `struct Call(Result<VariantCall, CallError>)` or
 /// `Truth(Option<TruthSnv>)`. A record that makes 0..n values of yours is
 /// read as a tuple of components and turned into them afterwards.
-pub trait Fields: Sized + Send + Sync + Clone {
+pub trait Fields: Sized + Send + Clone {
     /// Everything that depends only on the header: resolved keys, the
     /// selected sample. A plan of your own with runtime context goes to
     /// [`ReaderBuilder::with_plan`](super::ReaderBuilder::with_plan).
