@@ -200,6 +200,7 @@ pub struct RawRecord<'a> {
 }
 
 impl<'a> RawRecord<'a> {
+    #[cold]
     fn error(&self, source: RecordError) -> VcfReadError {
         self.at.error(self.file, source)
     }
@@ -229,28 +230,39 @@ impl<'a> RawRecord<'a> {
     }
 
     /// The record's start and inclusive end.
+    #[inline]
     pub(crate) fn span(&self) -> Result<(VcfPos, VcfPos), VcfReadError> {
         match self.repr {
-            Repr::Bcf(r) => span_of(i64::from(r.fixed.pos), i64::from(r.fixed.rlen)),
-            // The reader parsed POS into `at` already.
-            Repr::Text(TextRecord { line, cols }) => self
-                .at
-                .pos
-                .ok_or_else(|| RecordError::Text {
-                    part: RecordPart::Pos,
-                    source: TextValueError::invalid_integer(cols.col(line, Col::Pos)),
-                })
-                .and_then(|pos0| {
-                    let rlen = RlenColumns {
-                        reference: cols.col(line, Col::Ref),
-                        alt: cols.col(line, Col::Alt),
-                        info: cols.col(line, Col::Info),
-                        format: cols.rest(line),
-                    };
-                    span_of(pos0, text_rlen(&rlen, self.file, pos0))
-                }),
+            Repr::Bcf(r) => {
+                span_of(i64::from(r.fixed.pos), i64::from(r.fixed.rlen)).map_err(|e| self.error(e))
+            }
+            Repr::Text(t) => self.text_span(t),
         }
-        .map_err(|e| self.error(e))
+    }
+
+    /// A VCF text record's span: POS, which the reader parsed into `at`
+    /// already, and the length htslib computes.
+    #[inline(never)]
+    fn text_span(
+        &self,
+        TextRecord { line, cols }: TextRecord<'a>,
+    ) -> Result<(VcfPos, VcfPos), VcfReadError> {
+        self.at
+            .pos
+            .ok_or_else(|| RecordError::Text {
+                part: RecordPart::Pos,
+                source: TextValueError::invalid_integer(cols.col(line, Col::Pos)),
+            })
+            .and_then(|pos0| {
+                let rlen = RlenColumns {
+                    reference: cols.col(line, Col::Ref),
+                    alt: cols.col(line, Col::Alt),
+                    info: cols.col(line, Col::Info),
+                    format: cols.rest(line),
+                };
+                span_of(pos0, text_rlen(&rlen, self.file, pos0))
+            })
+            .map_err(|e| self.error(e))
     }
 
     /// The ID, REF, ALT, QUAL and FILTER columns; needs [`Sections::SITE`].

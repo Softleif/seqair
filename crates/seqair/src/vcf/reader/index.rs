@@ -48,21 +48,33 @@ pub(crate) struct FieldIndex {
 
 impl FieldIndex {
     /// Start indexing a new section.
+    #[inline]
     pub(crate) fn begin(&mut self) {
         self.entries.clear();
         self.epoch = self.epoch.wrapping_add(1);
         if self.epoch == 0 {
-            self.table.fill(0);
-            self.epoch = 1;
+            self.wrap();
         }
+    }
+
+    #[cold]
+    fn wrap(&mut self) {
+        self.table.fill(0);
+        self.epoch = 1;
+    }
+
+    #[cold]
+    fn grow(&mut self, id: usize) {
+        self.table.resize(id.saturating_add(1), 0);
     }
 
     /// Add a field; `false`, leaving the index unchanged, when its id is
     /// already present (the first occurrence wins, `r[vcf_values.duplicates]`).
+    #[inline]
     pub(crate) fn push(&mut self, entry: Entry) -> bool {
         let id = entry.id.0 as usize;
         if id >= self.table.len() {
-            self.table.resize(id.saturating_add(1), 0);
+            self.grow(id);
         }
         let Some(stamp) = self.table.get_mut(id) else { return false };
         if *stamp >> 16 == u32::from(self.epoch) {
@@ -75,6 +87,7 @@ impl FieldIndex {
         true
     }
 
+    #[inline]
     pub(crate) fn get(&self, id: DictId) -> Option<Entry> {
         let stamp = *self.table.get(id.0 as usize)?;
         if stamp >> 16 != u32::from(self.epoch) {

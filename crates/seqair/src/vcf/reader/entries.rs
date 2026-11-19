@@ -29,7 +29,49 @@ impl<'a> BcfEntries<'a> {
         self.at
     }
 
+    #[inline]
     fn entry(&mut self) -> Result<(i32, Range<usize>), BcfValueError> {
+        match self.quick() {
+            Some((key, span)) => {
+                self.at = span.end;
+                Ok((key, span))
+            }
+            None => self.checked_entry(),
+        }
+    }
+
+    /// The common entry, read without building an error: a non-negative
+    /// int8 or int16 key, then a value of a known type whose count is inline
+    /// or a non-negative int8/int16, ending within the bytes. `None` sends
+    /// everything else, malformed entries included, to [`Self::checked_entry`],
+    /// which finds the same span or the error.
+    #[inline]
+    fn quick(&self) -> Option<(i32, Range<usize>)> {
+        let rest = self.bytes.get(self.at..)?;
+        let (key, key_len) = quick_int(rest)?;
+        let value = rest.get(key_len..)?;
+        let &descriptor = value.first()?;
+        let width = WIDTH.get(usize::from(descriptor & 0x0F)).copied().flatten()?;
+        let (count, header) = match descriptor >> 4 {
+            15 => {
+                let (count, used) = quick_int(value.get(1..)?)?;
+                (usize::try_from(count).ok()?, used.checked_add(1)?)
+            }
+            n => (usize::from(n), 1),
+        };
+        let per_sample = count.checked_mul(usize::from(width))?;
+        let len = match self.samples {
+            None => per_sample,
+            Some(n) => per_sample.checked_mul(n)?,
+        };
+        let start = self.at.checked_add(key_len)?;
+        let end = start.checked_add(header)?.checked_add(len)?;
+        (end <= self.bytes.len()).then_some((key, start..end))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn checked_entry(&mut self) -> Result<(i32, Range<usize>), BcfValueError> {
         let rest = self.bytes.get(self.at..).unwrap_or_default();
         let (key, key_len) = read_typed_int(rest)?;
         let value = rest.get(key_len..).unwrap_or_default();
@@ -44,9 +86,41 @@ impl<'a> BcfEntries<'a> {
     }
 }
 
+/// Bytes per element by BCF type code; `None` for a code with no type.
+const WIDTH: [Option<u8>; 16] = [
+    Some(0), // missing
+    Some(1), // int8
+    Some(2), // int16
+    Some(4), // int32
+    None,
+    Some(4), // float
+    None,
+    Some(1), // char
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+];
+
+/// A typed scalar int8 or int16 that is not negative (so neither missing
+/// nor end-of-vector), and its encoded length.
+#[inline]
+fn quick_int(bytes: &[u8]) -> Option<(i32, usize)> {
+    match *bytes {
+        [0x11, b, ..] if b < 0x80 => Some((i32::from(b), 2)),
+        [0x12, lo, hi, ..] if hi < 0x80 => Some((i32::from(i16::from_le_bytes([lo, hi])), 3)),
+        _ => None,
+    }
+}
+
 impl Iterator for BcfEntries<'_> {
     type Item = Result<(i32, Range<usize>), BcfValueError>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.left = self.left.checked_sub(1)?;
         let entry = self.entry();
@@ -77,7 +151,7 @@ pub(crate) fn index_bcf(
             return Err(RecordError::TooLarge { size: span.end as u64, max: u64::from(u32::MAX) });
         };
         if !index.push(Entry { id, start, end }) {
-            file.warn_duplicate(file.fields.name(&file.header, id).unwrap_or_default());
+            warn_duplicate_id(file, id);
         }
     }
     let len = entries.bytes.len().saturating_sub(entries.end());
@@ -85,6 +159,11 @@ pub(crate) fn index_bcf(
         return Err(RecordError::TrailingBytes { part, len });
     }
     Ok(())
+}
+
+#[cold]
+fn warn_duplicate_id(file: &FileShared, id: DictId) {
+    file.warn_duplicate(file.fields.name(&file.header, id).unwrap_or_default());
 }
 
 /// An index a [`LazyIndex`] builds and keeps the buffers of.
@@ -303,5 +382,83 @@ fn too_many(sample: usize, field: usize, n_samples: usize, n_keys: usize) -> Rec
         }
     } else {
         RecordError::SampleFields { sample, found: field.saturating_add(1), keys: n_keys }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::arithmetic_side_effects, reason = "test sizes below 1000")]
+
+    use super::*;
+    use crate::vcf::bcf_encoding::{encode_type_byte, encode_typed_int_key};
+    use hegel::prelude::*;
+
+    /// Walk `bytes` the quick way where it applies, and every entry the
+    /// checked way too: both must agree on each span, and the walk on the
+    /// first error.
+    fn walk(bytes: &[u8], n: usize, samples: Option<usize>) -> (usize, usize) {
+        let mut entries = BcfEntries::new(bytes, n, samples);
+        let mut quick = 0;
+        for _ in 0..n {
+            let mut checked = entries.clone();
+            let expected = checked.checked_entry();
+            if let Some(got) = entries.quick() {
+                assert_eq!(Ok(got), expected, "at {}", entries.at);
+                quick += 1;
+            }
+            match entries.entry() {
+                Ok(_) => assert_eq!(entries.at, checked.at),
+                Err(e) => {
+                    assert_eq!(Err(e), expected);
+                    break;
+                }
+            }
+        }
+        (quick, entries.at)
+    }
+
+    // r[verify vcf_values.bcf_sentinels]
+    /// Generated entries (keys and counts at every width, every type code,
+    /// cut short or with a byte flipped) read the same through the quick
+    /// path as through the checked one.
+    #[hegel::test]
+    fn the_quick_path_agrees_with_the_checked_one(tc: TestCase) {
+        let samples = tc.draw(gs::optional(gs::integers::<usize>().min_value(1).max_value(4)));
+        let n = tc.draw(gs::integers::<usize>().max_value(6));
+        let mut bytes = Vec::new();
+        for _ in 0..n {
+            let key = tc.draw(gs::sampled_from(vec![0u32, 1, 127, 128, 32767, 32768, 70000]));
+            encode_typed_int_key(&mut bytes, key);
+            let code = tc.draw(gs::integers::<u8>().max_value(15));
+            let count = tc.draw(gs::sampled_from(vec![0usize, 1, 3, 14, 15, 200, 40000]));
+            encode_type_byte(&mut bytes, count, code);
+            let width = WIDTH.get(usize::from(code)).copied().flatten().unwrap_or(1);
+            let len = count * usize::from(width) * samples.unwrap_or(1);
+            bytes.extend(std::iter::repeat_n(7u8, len.min(1000)));
+        }
+        if !bytes.is_empty() && tc.draw(gs::booleans()) {
+            let at = tc.draw(gs::integers::<usize>().max_value(bytes.len() - 1));
+            let flip = tc.draw(gs::integers::<u8>());
+            if let Some(b) = bytes.get_mut(at) {
+                *b ^= flip;
+            }
+        }
+        let cut = tc.draw(gs::integers::<usize>().max_value(bytes.len()));
+        walk(bytes.get(..cut).unwrap_or_default(), n, samples);
+    }
+
+    /// The common entries take the quick path, a flag ending the section
+    /// (three bytes, nothing after them) included.
+    #[test]
+    fn common_entries_take_the_quick_path() {
+        // DP=140 as int16, an int8 vector of 20 (overflow count), a flag.
+        let info = [0x11, 3, 0x12, 140, 0, 0x11, 9, 0xF1, 0x11, 20];
+        let mut bytes = info.to_vec();
+        bytes.extend(1..=20u8);
+        bytes.extend([0x11, 4, 0x00]);
+        assert_eq!(walk(&bytes, 3, None), (3, bytes.len()));
+        // A FORMAT column of two samples, int16 key.
+        let format = [0x12, 0x00, 0x01, 0x21, 1, 2, 3, 4];
+        assert_eq!(walk(&format, 1, Some(2)), (1, format.len()));
     }
 }
