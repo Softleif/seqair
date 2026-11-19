@@ -200,6 +200,7 @@ impl FileShared {
         if !self.warned_undeclared.swap(true, Ordering::Relaxed) {
             warn!(
                 filter = std::str::from_utf8(name).ok(),
+                path = ?self.path(),
                 "a record names a FILTER the header does not declare; the record fails it \
                  (further undeclared FILTERs in this file are not reported)"
             );
@@ -212,6 +213,7 @@ impl FileShared {
         if !self.warned_duplicate.swap(true, Ordering::Relaxed) {
             warn!(
                 field = name,
+                path = ?self.path(),
                 "a record holds the same field twice; the first occurrence is read \
                  (further duplicates in this file are not reported)"
             );
@@ -266,7 +268,10 @@ impl VcfFile {
             }
             _ => None,
         };
-        let fields = FieldTable::new(&header, format != VcfFormat::Bcf);
+        let mut fields = FieldTable::new(&header, format != VcfFormat::Bcf);
+        if let Source::Path(path) = &source {
+            fields.path = Some(path.clone());
+        }
         let shared = FileShared {
             rlen_keys: RlenKeys::new(&fields),
             fields,

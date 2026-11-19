@@ -321,7 +321,7 @@ field. `file.info_key` resolves what the header declares, in VCF text and
 BCF alike; a record using a key the header leaves out logs a warning.
 To read such keys anyway, ask for them through `file.lenient()`: a key VCF
 4.5 reserves (`SVTYPE`, `SVLEN`, `END`, `PS`, …) is typed as VCF defines
-it, any other reads as a String, and each name logs a warning. An optional
+it, any other reads as a String. An optional
 field is an `Option` of a key, decided once. And `has` tells a field the
 record does not hold from one it holds as `.`.
 

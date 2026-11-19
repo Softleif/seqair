@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{OnceLock, PoisonError, RwLock};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Where an id's definition in one section comes from.
 #[derive(Debug)]
@@ -67,23 +67,15 @@ pub(crate) struct FieldTable {
     header_len: usize,
     /// Names of the reserved ids, from `header_len`.
     reserved_names: Vec<&'static str>,
-    /// By reserved id: a lenient key resolved it, so records using it are
-    /// not reported.
-    reserved_resolved: Box<[AtomicBool]>,
     /// The id the table's keys carry when the header does not declare them:
     /// the file's readers accept it, every writer refuses it.
     pub(crate) id: HeaderId,
     /// Keys neither declares, by name; their names by id after the reserved.
-    extra: RwLock<HashMap<Box<[u8]>, Extra>>,
+    extra: RwLock<HashMap<Box<[u8]>, DictId>>,
     extra_names: Arena,
     warned: AtomicBool,
-}
-
-/// An undeclared key's id, and whether a caller resolved it (and was warned).
-#[derive(Debug, Clone, Copy)]
-struct Extra {
-    id: DictId,
-    resolved: bool,
+    /// The file's path, for the warning.
+    pub(crate) path: Option<std::path::PathBuf>,
 }
 
 impl FieldTable {
@@ -144,12 +136,12 @@ impl FieldTable {
             info,
             format,
             header_len,
-            reserved_resolved: reserved_names.iter().map(|_| AtomicBool::new(false)).collect(),
             reserved_names,
             id: HeaderId::next(),
             extra: RwLock::default(),
             extra_names: Arena::default(),
             warned: AtomicBool::new(false),
+            path: None,
         }
     }
 
@@ -224,81 +216,71 @@ impl FieldTable {
         })
     }
 
-    // r[impl vcf_reader.undeclared+3]
+    // r[impl vcf_reader.undeclared+4]
     /// The id of `key`, a VCF text record's `kind` key, appending it to the
-    /// table if neither the header nor VCF defines it. `None` only for a key
-    /// no id can be given: not UTF-8, or past 2^16 ids.
+    /// table if neither the header nor VCF defines it. A key the header does
+    /// not declare, reserved or not, is warned of once per file. `None` only
+    /// for a key no id can be given: not UTF-8, or past 2^16 ids.
     #[inline]
     pub(crate) fn text_id(&self, kind: KeyKind, key: &[u8]) -> Option<DictId> {
         match self.keys.get(key) {
             Some(id) if self.declared(kind, id).is_some() => {
-                if let Some(r) = (id.get() as usize).checked_sub(self.header_len)
-                    && self.reserved_resolved.get(r).is_some_and(|r| !r.load(Ordering::Relaxed))
-                {
+                if id.get() as usize >= self.header_len {
                     self.warn_record(kind, key);
                 }
                 Some(id)
             }
-            _ => self.undeclared(kind, key, false).map(|(id, _)| id),
+            _ => self.undeclared(kind, key, true),
         }
     }
 
-    /// The id of an undeclared key, appended on first use, and whether this
-    /// call is the first to resolve it. `resolved`: a caller asks for it;
-    /// otherwise a record uses it, warned once per file unless a caller
-    /// resolved it.
+    /// The id of an undeclared key, appended on first use; `record`: a
+    /// record uses it, which is warned of once per file.
     #[cold]
-    fn undeclared(&self, kind: KeyKind, key: &[u8], resolved: bool) -> Option<(DictId, bool)> {
-        let known = self.extra.read().unwrap_or_else(PoisonError::into_inner).get(key).copied();
-        if let Some(extra) = known
-            && (extra.resolved || !resolved)
-        {
-            if !extra.resolved {
-                self.warn_record(kind, key);
-            }
-            return Some((extra.id, false));
-        }
-        let Ok(name) = std::str::from_utf8(key) else {
+    fn undeclared(&self, kind: KeyKind, key: &[u8], record: bool) -> Option<DictId> {
+        if record {
             self.warn_record(kind, key);
-            return None;
-        };
+        }
+        if let Some(&id) = self.extra.read().unwrap_or_else(PoisonError::into_inner).get(key) {
+            return Some(id);
+        }
+        let name = std::str::from_utf8(key).ok()?;
         let mut extras = self.extra.write().unwrap_or_else(PoisonError::into_inner);
-        let (id, was_resolved) = match extras.get(key) {
-            Some(e) => (e.id, e.resolved),
-            None => match self.keys.get(key) {
-                Some(id) => (id, false),
-                None => {
-                    let index = self.extra_names.len();
-                    // r[impl vcf_reader.limits]
-                    let id =
-                        u32::try_from(self.base().saturating_add(index)).ok().and_then(DictId::new);
-                    let Some(id) = id else {
-                        drop(extras);
-                        self.warn_record(kind, key);
-                        return None;
-                    };
-                    self.extra_names.push(index, SmolStr::from(name));
-                    (id, false)
-                }
-            },
-        };
-        extras.insert(key.into(), Extra { id, resolved: resolved || was_resolved });
-        drop(extras);
-        if !resolved && !was_resolved {
-            self.warn_record(kind, key);
+        if let Some(&id) = extras.get(key) {
+            return Some(id);
         }
-        Some((id, resolved && !was_resolved))
+        let id = match self.keys.get(key) {
+            Some(id) => id,
+            None => {
+                let index = self.extra_names.len();
+                // r[impl vcf_reader.limits]
+                let id =
+                    u32::try_from(self.base().saturating_add(index)).ok().and_then(DictId::new)?;
+                self.extra_names.push(index, SmolStr::from(name));
+                id
+            }
+        };
+        extras.insert(key.into(), id);
+        Some(id)
     }
 
-    /// Log, once per file, that a record uses a key the header does not
-    /// declare, VCF does not reserve, and nobody resolved.
+    /// Log, once per file, that a record uses a key the header does not declare.
+    #[inline]
     pub(crate) fn warn_record(&self, kind: KeyKind, key: &[u8]) {
-        if !self.warned.load(Ordering::Relaxed) && !self.warned.swap(true, Ordering::Relaxed) {
+        if !self.warned.load(Ordering::Relaxed) {
+            self.warn_record_cold(kind, key);
+        }
+    }
+
+    #[cold]
+    fn warn_record_cold(&self, kind: KeyKind, key: &[u8]) {
+        if !self.warned.swap(true, Ordering::Relaxed) {
             warn!(
                 %kind,
                 key = std::str::from_utf8(key).ok(),
-                "a record uses a key the header does not declare; only a lenient key reads it \
-                 (further undeclared keys in this file are not reported)"
+                path = ?self.path,
+                "a record uses a key the header does not declare; plain keys do not read it, \
+                 lenient keys do (further undeclared keys in this file are not reported)"
             );
         }
     }
@@ -345,21 +327,10 @@ impl FieldTable {
         };
         // A VCF text table has the reserved ids; a BCF one gives the name an
         // id past the dictionary, which no record can name.
-        let (id, first) = self.undeclared(kind, name.as_bytes(), true).ok_or_else(unknown)?;
-        if let Some(r) = (id.get() as usize).checked_sub(self.header_len)
-            && let Some(r) = self.reserved_resolved.get(r)
-        {
-            r.store(true, Ordering::Relaxed);
-        }
-        if first {
-            warn!(
-                %kind,
-                key = name,
-                %typ,
-                %number,
-                "the key is not declared in the header; a lenient key reads it as this Type and Number"
-            );
-        }
+        let id = self.undeclared(kind, name.as_bytes(), false).ok_or_else(unknown)?;
+        // r[impl vcf_reader.undeclared+4]
+        // Warned of where a record uses it: most lenient keys find nothing.
+        debug!(%kind, key = name, %typ, %number, "a lenient key for a field the header does not declare");
         Ok(FieldId { dict_idx: id.get(), name: name.into(), number, header: self.id })
     }
 }
@@ -554,7 +525,7 @@ impl<'a> Keys<'a> {
 /// undeclared one VCF 4.5 reserves resolves with its reserved `Type` and
 /// `Number`; any other undeclared one resolves as `Type=String, Number=.`
 /// for a [`Str`](crate::vcf::Str) or [`Any`](crate::vcf::Any) marker only.
-/// Each undeclared name resolved logs one `warn!`. VCF text and BCF resolve
+/// A record using an undeclared key is warned of once per file. VCF text and BCF resolve
 /// the same names to the same definitions; a BCF record can only name
 /// declared fields, so in BCF such a key finds nothing. A writer refuses
 /// the key, as its header has no id for the field.
@@ -627,15 +598,15 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    // r[verify vcf_reader.undeclared+3]
+    // r[verify vcf_reader.undeclared+4]
     // r[verify vcf_values.lenient_keys]
-    /// A lenient key for an undeclared name warns once per name; a record's
-    /// undeclared key no lenient key resolved warns once per file, reserved
-    /// or not, and one a lenient key resolved not at all.
+    /// Resolving keys, strict or lenient, warns of nothing; the first record
+    /// using an undeclared key, reserved or not, warns once per file.
     #[test]
-    fn undeclared_keys_are_logged_once_where_they_are_met() {
+    fn undeclared_keys_are_logged_once_where_records_use_them() {
         let header = VcfHeader::parse(
-            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+            "##fileformat=VCFv4.3\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"d\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
         )
         .unwrap();
         let count = Arc::new(Count::default());
@@ -646,30 +617,25 @@ mod tests {
                 fields.key::<Str>(&header, KeyKind::Info, "SVTYPE", false),
                 Err(KeyError::UnknownField { .. })
             ));
-            assert_eq!(seen(), 0, "a strict key does not warn");
             fields.key::<Str>(&header, KeyKind::Info, "SVTYPE", true).unwrap();
-            assert_eq!(seen(), 1);
-            fields.key::<Str>(&header, KeyKind::Info, "TRID", true).unwrap();
-            fields.key::<Str>(&header, KeyKind::Info, "TRID", true).unwrap();
-            assert_eq!(seen(), 2, "once per name");
-            fields.text_id(KeyKind::Info, b"TRID").unwrap();
-            fields.text_id(KeyKind::Info, b"SVTYPE").unwrap();
-            assert_eq!(seen(), 2, "resolved: no record warning");
-            let xx = fields.text_id(KeyKind::Info, b"XX").unwrap();
-            fields.text_id(KeyKind::Format, b"YY").unwrap();
-            fields.text_id(KeyKind::Info, b"SVLEN").unwrap();
-            assert_eq!(seen(), 3, "once per file for records");
-            assert_eq!(fields.text_id(KeyKind::Format, b"XX"), Some(xx), "one id per name");
-            fields.key::<Str>(&header, KeyKind::Info, "XX", true).unwrap();
-            assert_eq!(seen(), 4, "a record's key resolved later is still warned of");
+            let trid = fields.key::<Str>(&header, KeyKind::Info, "TRID", true).unwrap();
+            assert_eq!(seen(), 0, "resolving warns of nothing");
+            fields.text_id(KeyKind::Info, b"DP").unwrap();
+            assert_eq!(seen(), 0, "a declared key");
             assert_eq!(
-                fields.name(&header, fields.text_id(KeyKind::Info, b"YY").unwrap()),
-                Some("YY")
+                fields.text_id(KeyKind::Info, b"TRID").map(DictId::get),
+                Some(trid.dict_idx)
             );
+            assert_eq!(seen(), 1, "a record's undeclared key, resolved or not");
+            let xx = fields.text_id(KeyKind::Info, b"XX").unwrap();
+            fields.text_id(KeyKind::Info, b"SVLEN").unwrap();
+            assert_eq!(seen(), 1, "once per file");
+            assert_eq!(fields.text_id(KeyKind::Format, b"XX"), Some(xx), "one id per name");
+            assert_eq!(fields.name(&header, xx), Some("XX"));
 
             let fields = FieldTable::new(&header, true);
             fields.text_id(KeyKind::Info, b"SVLEN").unwrap();
-            assert_eq!(seen(), 5, "an unresolved reserved key a record uses");
+            assert_eq!(seen(), 2, "a reserved key the header leaves out");
         });
     }
 
