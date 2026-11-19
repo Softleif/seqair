@@ -1625,7 +1625,7 @@ impl<S: InfoPhase> InfoEncoder for RecordEncoder<'_, S> {
         Ok(())
     }
     fn info_string(&mut self, id: &FieldId, value: &str) -> Result<(), VcfError> {
-        self.info_str(id, value, Escape::Percent)
+        self.info_str(id, value.as_bytes(), Escape::Percent)
     }
     // r[impl record_encoder.reserved_rejection]
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
@@ -1771,6 +1771,21 @@ pub(crate) enum Escape {
 }
 
 impl Escape {
+    // r[impl bcf_writer.string_escape]
+    /// The bytes BCF stores: what VCF text would hold, so that a BCF and a
+    /// VCF of the same record read back the same text. A copied value is
+    /// already as stored.
+    fn stored(self, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Percent if bytes.iter().any(|b| b":;=%,\t\n\r".contains(b)) => {
+                let mut buf = Vec::with_capacity(bytes.len().saturating_add(8));
+                percent_encode_into(&mut buf, bytes);
+                std::borrow::Cow::Owned(buf)
+            }
+            _ => std::borrow::Cow::Borrowed(bytes),
+        }
+    }
+
     fn write(self, buf: &mut Vec<u8>, bytes: &[u8]) {
         match self {
             // r[impl vcf_writer.percent_encoding]
@@ -1795,7 +1810,7 @@ impl<S: InfoPhase> RecordEncoder<'_, S> {
     pub(crate) fn info_str(
         &mut self,
         id: &FieldId,
-        value: &str,
+        value: &[u8],
         escape: Escape,
     ) -> Result<(), VcfError> {
         self.check_key(id)?;
@@ -1803,7 +1818,7 @@ impl<S: InfoPhase> RecordEncoder<'_, S> {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
-                encode_typed_string(enc.shared_buf, value.as_bytes());
+                encode_typed_string(enc.shared_buf, &escape.stored(value));
                 // r[impl bcf_encoder.info_counting]
                 enc.commit_info_field(id, start);
             }
@@ -1811,7 +1826,7 @@ impl<S: InfoPhase> RecordEncoder<'_, S> {
                 let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
-                escape.write(vcf.buf, value.as_bytes());
+                escape.write(vcf.buf, value);
                 vcf.commit_info_field(id, start);
             }
         }
@@ -1841,10 +1856,15 @@ impl<S: FormatPhase> RecordEncoder<'_, S> {
         // string-missing convention), so the column width must leave room for it.
         // Note: a *non-empty* value of exactly "." is indistinguishable from missing
         // on read-back — that ambiguity is inherent to BCF/VCF, not specific to us.
-        let width =
-            values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let stored: SmallVec<std::borrow::Cow<'_, [u8]>, 8> =
+                    values.iter().map(|s| escape.stored(s.as_bytes())).collect();
+                let width = stored
+                    .iter()
+                    .map(|s| if s.is_empty() { 1 } else { s.len() })
+                    .max()
+                    .unwrap_or(0);
                 let start = enc.indiv_buf.len();
                 // BCF FORMAT char vectors are fixed-width: every sample stores `width`
                 // bytes, shorter strings NUL-padded (htslib bcf_enc_vchar).
@@ -1852,10 +1872,10 @@ impl<S: FormatPhase> RecordEncoder<'_, S> {
                 // r[impl bcf_writer.indiv_field_major]
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, width, BCF_BT_CHAR);
-                for s in values {
+                for s in &stored {
                     // Match the VCF text path's `.`: an empty string is stored as the
                     // literal `.` char, which bcftools/noodles render as missing.
-                    let bytes = if s.is_empty() { b"." } else { s.as_bytes() };
+                    let bytes: &[u8] = if s.is_empty() { b"." } else { s };
                     enc.indiv_buf.extend_from_slice(bytes);
                     for _ in bytes.len()..width {
                         enc.indiv_buf.push(0);

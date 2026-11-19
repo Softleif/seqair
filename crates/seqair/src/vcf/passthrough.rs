@@ -426,7 +426,7 @@ fn copy_info(enc: &mut RecordEdit<'_>, id: &FieldId, value: DynValue<'_>) -> Res
     let mut scratch = std::mem::take(&mut enc.record.copy);
     let result = match value {
         DynValue::Flag => enc.info_flag(id),
-        DynValue::Str(s) => enc.info_str(id, s.unwrap_or("."), Escape::Structure(b';')),
+        DynValue::Str(s) => enc.info_str(id, s.unwrap_or(".").as_bytes(), Escape::Structure(b';')),
         DynValue::Int(values) => {
             scratch.ints.clear();
             scratch.ints.extend(values);

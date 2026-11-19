@@ -576,8 +576,9 @@ fn a_field_removed_and_registered_again_is_a_new_field() {
 }
 
 // r[verify vcf_passthrough.copy.values]
-/// A copied string keeps `%` and `,` as stored; only what would break the
-/// line is percent-encoded, here a `;` that only BCF can hold in INFO.
+/// A copied string keeps `%` and `,` as stored; a value encoded into BCF is
+/// stored as VCF text writes it (`r[bcf_writer.string_escape]`), so its copy
+/// is the same text.
 #[test]
 fn copied_strings_are_written_as_stored() {
     let file = small();
@@ -599,7 +600,7 @@ fn copied_strings_are_written_as_stored() {
     w.finish().unwrap();
     let bcf = VcfFile::from_bytes(bcf, None).unwrap();
     let line = text(&copy(&bcf, OutputFormat::Vcf), OutputFormat::Vcf);
-    assert!(line.contains("S1=x%3By:z"), "{line}");
+    assert!(line.contains("S1=x%3By%3Az"), "{line}");
 }
 
 // ── Removal and undeclared keys ─────────────────────────────────────────

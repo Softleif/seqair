@@ -100,10 +100,11 @@ fn bcf_format_string_roundtrips_through_bcftools() {
 
 // r[verify record_encoder.format_methods+2]
 // r[verify vcf_writer.percent_encoding]
+// r[verify bcf_writer.string_escape]
 /// A value containing the FORMAT subfield delimiter (`:`) and other reserved
 /// characters MUST be percent-encoded in VCF text — otherwise it corrupts the
-/// colon-separated sample column. The BCF path is length-prefixed, so the raw
-/// value survives; bcftools reads it back intact, proving the two formats agree.
+/// colon-separated sample column. BCF stores the same text, as bcftools does
+/// when it converts the VCF: `bcftools view` of the BCF prints a sound line.
 #[test]
 fn format_string_percent_encodes_reserved_chars() {
     let s = make_setup(&["a"]);
@@ -131,8 +132,7 @@ fn format_string_percent_encodes_reserved_chars() {
         eprintln!("bcftools not available, skipping BCF half");
         return;
     }
-    // BCF: the raw value round-trips (bcftools reads back `a:b;c`), confirming the
-    // VCF percent-encoding and BCF storage describe the same string.
+    // BCF: the stored text is the VCF text's, as bcftools stores it.
     let mut out = Vec::new();
     let writer = Writer::new(&mut out, OutputFormat::Bcf);
     let mut writer = writer.write_header(&s.header).unwrap();
@@ -152,5 +152,9 @@ fn format_string_percent_encodes_reserved_chars() {
         .output()
         .unwrap();
     assert!(q.status.success(), "bcftools stderr: {}", String::from_utf8_lossy(&q.stderr));
-    assert_eq!(String::from_utf8(q.stdout).unwrap().trim(), "a:b;c", "BCF value not preserved");
+    assert_eq!(String::from_utf8(q.stdout).unwrap().trim(), "a%3Ab%3Bc", "BCF stored text");
+    let v =
+        std::process::Command::new("bcftools").args(["view", "-H"]).arg(&path).output().unwrap();
+    let line = String::from_utf8(v.stdout).unwrap();
+    assert!(line.trim_end().ends_with("0/1:a%3Ab%3Bc"), "bcftools view: {line}");
 }

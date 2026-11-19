@@ -65,5 +65,8 @@ r[bcf_writer.finish]
 r[bcf_writer.string_encoding]
 Strings in BCF MUST be encoded as typed char vectors (type code 7). They are NOT NUL-terminated within the typed value encoding. Empty strings MUST have count=0.
 
+r[bcf_writer.string_escape]
+A string value a caller encodes MUST be stored in BCF as the VCF text writer writes it, percent-encoded (`r[vcf_writer.percent_encoding]`), as bcftools stores the text it converts. A raw `:` or `;` stored in BCF prints as a broken line in `bcftools view`, and a VCF and a BCF of the same record would read back as different strings. A copied value (`r[vcf_passthrough.copy.values]`) is stored as read.
+
 r[bcf_writer.flag_encoding]
 Flag-type INFO fields MUST be encoded with type=0, count=0 (the key's presence indicates the flag is set). Absent flags are simply not included in the INFO key-value pairs.
