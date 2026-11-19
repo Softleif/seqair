@@ -75,11 +75,10 @@ impl FieldMap {
 
     fn build(input: &VcfFile, output: Arc<VcfHeader>) -> Result<Self, FieldMapError> {
         let in_header = input.header();
-        // r[impl vcf_passthrough.field_map.removed]
+        // r[impl vcf_passthrough.field_map.removed+2]
         // A name removed from a header derived from the input's is a new
         // field if declared again, never the input's.
-        let derived = output.parent() == Some(in_header.id());
-        let replaced = |kind, name: &str| derived && output.was_removed(kind, name);
+        let replaced = |kind, name: &str| output.was_removed_since(in_header.id(), kind, name);
         let (ins, outs) = (in_header.samples(), output.samples());
         if ins != outs {
             let index = ins.iter().zip(outs).take_while(|(a, b)| a == b).count();
@@ -232,7 +231,7 @@ impl FieldMap {
             .map_err(|_| VcfError::UndeclaredContig { name: contig.name().clone() })
     }
 
-    // r[impl vcf_passthrough.field_map.removed]
+    // r[impl vcf_passthrough.field_map.removed+2]
     // r[impl vcf_passthrough.undeclared+2]
     /// The output filters a record failing `failed` fails.
     fn failed_filters(
@@ -342,7 +341,7 @@ impl ImplicitMap {
 }
 
 impl<W: Write> Writer<W, Ready> {
-    // r[impl vcf_passthrough.implicit_map]
+    // r[impl vcf_passthrough.implicit_map+2]
     /// Begin a copy of `record` into this writer, whose header is the
     /// record's (a conversion) or was derived from it with
     /// [`VcfHeader::to_builder`]: the [`FieldMap`] is built from the two on
@@ -360,7 +359,7 @@ impl<W: Write> Writer<W, Ready> {
             _ => {
                 let output = implicit.output.clone().ok_or(VcfError::HeaderNotWritten)?;
                 let id = record.header_id();
-                if output.id() != id && output.parent() != Some(id) {
+                if output.id() != id && !output.derives_from(id) {
                     return Err(VcfError::ForeignRecord);
                 }
                 let map = Arc::new(FieldMap::build(&record.file(), output)?);
@@ -412,7 +411,7 @@ impl<W: Write> Writer<W, Ready> {
             FilterStatus::Missing => enc.no_filter(),
             FilterStatus::Failed(failed) => {
                 let failed = map.failed_filters(record, failed)?;
-                // r[impl vcf_passthrough.field_map.removed]
+                // r[impl vcf_passthrough.field_map.removed+2]
                 if failed.is_empty() { enc.filter_pass() } else { enc.filter_fail(&failed)? }
             }
         };

@@ -461,10 +461,10 @@ pub struct VcfHeader {
     canonical: bool,
     string_map: StringMap,
     contig_map: StringMap,
-    /// The header `to_builder` derived this one from (`r[vcf_header.lineage]`).
-    parent: Option<HeaderId>,
-    /// Names removed from the builder since, by section.
-    removed: Vec<(KeyKind, SmolStr)>,
+    /// The headers `to_builder` derived this one from, nearest first, each
+    /// with the names removed from the builder derived from it, by section
+    /// (`r[vcf_header.lineage+2]`).
+    lineage: Vec<(HeaderId, Vec<(KeyKind, SmolStr)>)>,
 }
 
 impl VcfHeader {
@@ -526,26 +526,36 @@ impl VcfHeader {
     pub fn to_builder(&self) -> VcfHeaderBuilder<Contigs> {
         let mut header = self.clone();
         header.id = HeaderId::next();
-        // r[impl vcf_header.lineage]
-        header.parent = Some(self.id);
-        header.removed.clear();
+        // r[impl vcf_header.lineage+2]
+        header.lineage.insert(0, (self.id, Vec::new()));
         // r[impl vcf_header.line_order]
         header.canonical = false;
         VcfHeaderBuilder { header, _phase: PhantomData }
     }
 
-    // r[impl vcf_header.file_format+2]
-    // r[impl vcf_header.lineage]
+    // r[impl vcf_header.lineage+2]
     /// The header this one was derived from with [`to_builder`](Self::to_builder).
     pub fn parent(&self) -> Option<HeaderId> {
-        self.parent
+        self.lineage.first().map(|(id, _)| *id)
     }
 
-    // r[impl vcf_header.lineage]
+    // r[impl vcf_header.lineage+2]
+    /// Whether this header was derived from `ancestor`, through any number
+    /// of [`to_builder`](Self::to_builder)s.
+    pub fn derives_from(&self, ancestor: HeaderId) -> bool {
+        self.lineage.iter().any(|(id, _)| *id == ancestor)
+    }
+
+    // r[impl vcf_header.lineage+2]
     /// Whether `name` was removed from `kind`'s definitions since this
-    /// header was derived, whether or not it was declared again.
-    pub(crate) fn was_removed(&self, kind: KeyKind, name: &str) -> bool {
-        self.removed.iter().any(|(k, n)| *k == kind && n == name)
+    /// header's line left `ancestor`, whether or not it was declared again;
+    /// `false` when it does not derive from `ancestor`.
+    pub(crate) fn was_removed_since(&self, ancestor: HeaderId, kind: KeyKind, name: &str) -> bool {
+        let Some(n) = self.lineage.iter().position(|(id, _)| *id == ancestor) else {
+            return false;
+        };
+        let since = self.lineage.get(..=n).unwrap_or_default();
+        since.iter().flat_map(|(_, removed)| removed).any(|(k, r)| *k == kind && r == name)
     }
 
     /// The VCF version this header declares: [`Self::WRITE_VERSION`] for a
@@ -703,8 +713,7 @@ impl VcfHeader {
             other_keys: HashSet::from([SmolStr::from(format!("fileformat={version}"))]),
             lines: vec![Line::Def { kind: LineKind::Filter, id: pass.clone(), form: None }],
             canonical: true,
-            parent: None,
-            removed: Vec::new(),
+            lineage: Vec::new(),
             string_map: StringMap::default(),
             contig_map: StringMap::default(),
         };
@@ -1102,10 +1111,12 @@ impl<P> VcfHeaderBuilder<P> {
         removed
     }
 
-    // r[impl vcf_header.lineage]
+    // r[impl vcf_header.lineage+2]
     fn note_removed(&mut self, kind: KeyKind, id: &str, removed: bool) {
-        if removed && self.header.parent.is_some() && !self.header.was_removed(kind, id) {
-            self.header.removed.push((kind, SmolStr::from(id)));
+        if let (true, Some((_, names))) = (removed, self.header.lineage.first_mut())
+            && !names.iter().any(|(k, n)| *k == kind && n == id)
+        {
+            names.push((kind, SmolStr::from(id)));
         }
     }
 

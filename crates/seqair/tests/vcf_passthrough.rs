@@ -94,7 +94,7 @@ fn copy(file: &VcfFile, format: OutputFormat) -> Vec<u8> {
 }
 
 // r[verify vcf_passthrough.copy]
-// r[verify vcf_passthrough.implicit_map]
+// r[verify vcf_passthrough.implicit_map+2]
 // r[verify vcf_passthrough.copy.equivalence]
 /// The test files, copied unchanged into every format, print in bcftools as
 /// the originals do.
@@ -551,32 +551,49 @@ fn a_record_at_the_telomere_is_refused() {
     assert!(matches!(&err, VcfError::TelomereRecord { contig } if contig == "chr1"), "{err:?}");
 }
 
-// r[verify vcf_header.lineage]
+// r[verify vcf_header.lineage+2]
 // r[verify record_encoder.write_header+2]
-// r[verify vcf_passthrough.field_map.removed]
-// r[verify vcf_passthrough.implicit_map]
+// r[verify vcf_passthrough.field_map.removed+2]
+// r[verify vcf_passthrough.implicit_map+2]
 /// A field removed from a derived header and registered again is a new
 /// field: the input's values of that name are not copied into it, even
-/// where the definitions agree; edits write it.
+/// where the definitions agree; edits write it. The same when the output is
+/// derived in two steps (input → A → B), the removals made in A.
 #[test]
 fn a_field_removed_and_registered_again_is_a_new_field() {
     if !bcftools() {
         return;
     }
     let file = small();
-    let mut b = file.header().to_builder();
-    assert!(b.remove_format("PS"));
-    assert!(b.remove_info("S1"));
-    let mut b = b.infos();
-    b.register_info(&InfoFieldDef::<Str>::with_number("S1", Number::Count(1), "same as before"))
+    let ps_def = FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set");
+    for two_steps in [false, true] {
+        let mut b = file.header().to_builder();
+        assert!(b.remove_format("PS"));
+        assert!(b.remove_info("S1"));
+        let mut b = b.infos();
+        b.register_info(&InfoFieldDef::<Str>::with_number(
+            "S1",
+            Number::Count(1),
+            "same as before",
+        ))
         .unwrap();
-    let mut b = b.formats();
-    let ps = b.register_format(&FormatFieldDef::<Scalar<i32>>::new("PS", "Phase set")).unwrap();
-    let output = b.build().unwrap();
-    assert_eq!(output.parent(), Some(file.header().id()));
+        let mut b = if two_steps { b.build().unwrap().to_builder().formats() } else { b.formats() };
+        let ps = b.register_format(&ps_def).unwrap();
+        let output = b.build().unwrap();
+        assert!(output.derives_from(file.header().id()));
+        assert_eq!(output.parent() == Some(file.header().id()), !two_steps);
+        copies_leave_the_reregistered_fields_out(&file, &output, &ps);
+    }
+}
+
+fn copies_leave_the_reregistered_fields_out(
+    file: &VcfFile,
+    output: &VcfHeader,
+    ps: &seqair::vcf::FormatInt,
+) {
     for format in FORMATS {
         let mut out = Vec::new();
-        let mut writer = Writer::new(&mut out, format).write_header(&output).unwrap();
+        let mut writer = Writer::new(&mut out, format).write_header(output).unwrap();
         let mut reader = file.reader::<FullRecord>().open().unwrap();
         let mut first = true;
         while let Some(record) = reader.next_record().unwrap() {
@@ -629,7 +646,7 @@ fn copied_strings_are_written_as_stored() {
 
 // ── Removal and undeclared keys ─────────────────────────────────────────
 
-// r[verify vcf_passthrough.field_map.removed]
+// r[verify vcf_passthrough.field_map.removed+2]
 // r[verify vcf_passthrough.edit.remove]
 /// Fields removed from the output header, or from each copied record, leave
 /// the copy as `bcftools annotate -x` leaves the input; a record whose
