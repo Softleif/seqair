@@ -44,6 +44,9 @@ struct FormatData {
     file: Arc<FileShared>,
     at: RecordAt,
     index: LazyIndex<FormatIndex>,
+    /// The error copying one sample's values out of a multi-sample BCF
+    /// record met, returned by every access (`r[vcf_fields.lazy+2]`).
+    failed: Option<RecordError>,
 }
 
 impl FormatData {
@@ -56,6 +59,7 @@ impl FormatData {
             file: Arc::clone(raw.file),
             at: raw.at(),
             index: LazyIndex::default(),
+            failed: None,
         }
     }
 
@@ -66,6 +70,7 @@ impl FormatData {
         self.n_samples = n_samples;
         self.at = raw.at();
         self.index.reset();
+        self.failed = None;
         raw.keep_file(&mut self.file);
     }
 
@@ -85,11 +90,18 @@ impl FormatData {
                     self.bytes.extend_from_slice(indiv);
                     self.n_fmt = n_fmt;
                 }
+                // r[impl vcf_fields.lazy+2]
+                // Malformed data fails the accesses, not the read, as it
+                // does for every other shape of FORMAT data.
                 Some(sample) => {
                     self.begin(raw, 1);
                     self.n_fmt = n_fmt;
-                    copy_one_sample(&mut self.bytes, indiv, n_fmt, n_samples, sample.index())
-                        .map_err(|e| raw.at().error(raw.file, e))?;
+                    if let Err(e) =
+                        copy_one_sample(&mut self.bytes, indiv, n_fmt, n_samples, sample.index())
+                    {
+                        self.bytes.clear();
+                        self.failed = Some(e);
+                    }
                 }
             },
             FormatSource::Text { keys, samples, n_samples } => {
@@ -118,6 +130,7 @@ impl FormatData {
             n_fmt: self.n_fmt,
             n_samples: self.n_samples,
             index: &self.index,
+            failed: self.failed.as_ref(),
             file: &self.file,
             at: self.at,
         }
@@ -162,6 +175,8 @@ pub(crate) struct FormatView<'a> {
     n_fmt: usize,
     n_samples: usize,
     index: &'a LazyIndex<FormatIndex>,
+    /// Copying the data failed: every access returns this.
+    failed: Option<&'a RecordError>,
     file: &'a FileShared,
     at: RecordAt,
 }
@@ -178,11 +193,14 @@ impl<'a> FormatView<'a> {
             FormatSource::Bcf { indiv, n_fmt, n_samples } => (&[][..], indiv, n_fmt, n_samples),
             FormatSource::Text { keys, samples, n_samples } => (keys, samples, 0, n_samples),
         };
-        Self { keys, samples, n_fmt, n_samples, index, file, at }
+        Self { keys, samples, n_fmt, n_samples, index, failed: None, file, at }
     }
 
     fn index(&self) -> Result<&'a FormatIndex, VcfReadError> {
         let Self { keys, samples, n_fmt, n_samples, file, at, .. } = *self;
+        if let Some(e) = self.failed {
+            return Err(at.error(file, e.clone()));
+        }
         self.index
             .get(|index: &mut FormatIndex, cursor: &mut Cursor, _| {
                 if file.is_text() {

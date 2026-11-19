@@ -767,6 +767,7 @@ struct Rec {
     n_info: u16,
     indiv: Vec<u8>,
     n_fmt: u8,
+    n_sample: u32,
     /// Overrides the record's length fields.
     lengths: Option<(u32, u32)>,
 }
@@ -782,6 +783,7 @@ impl Default for Rec {
             n_info: 1,
             indiv: vec![0x11, 0x02, 0x21, 0x02, 0x04],
             n_fmt: 1,
+            n_sample: 1,
             lengths: None,
         }
     }
@@ -797,7 +799,7 @@ impl Rec {
         shared.extend_from_slice(
             &(u32::from(self.n_info) | (u32::from(self.n_allele) << 16)).to_le_bytes(),
         );
-        shared.extend_from_slice(&(1 | (u32::from(self.n_fmt) << 24)).to_le_bytes());
+        shared.extend_from_slice(&(self.n_sample | (u32::from(self.n_fmt) << 24)).to_le_bytes());
         shared.extend_from_slice(&self.site);
         shared.extend_from_slice(&self.info);
         let (l_shared, l_indiv) =
@@ -812,8 +814,12 @@ impl Rec {
 }
 
 fn bcf(records: &[Rec]) -> Vec<u8> {
+    bcf_with(HEADER, records)
+}
+
+fn bcf_with(header: &str, records: &[Rec]) -> Vec<u8> {
     let mut raw = b"BCF\x02\x02".to_vec();
-    let text = format!("{HEADER}\0");
+    let text = format!("{header}\0");
     raw.extend_from_slice(&(text.len() as u32).to_le_bytes());
     raw.extend_from_slice(text.as_bytes());
     for r in records {
@@ -968,6 +974,43 @@ fn a_malformed_single_sample_fails_on_access() {
     }
     let one = only.next_record().unwrap().unwrap();
     assert!(one.get(&gt).unwrap().is_some());
+}
+
+// r[verify vcf_fields.sample+2]
+// r[verify vcf_fields.lazy+2]
+/// One sample of a multi-sample BCF is copied out of each column: malformed
+/// data fails every access with the error the whole section's index gives,
+/// not the read, and the next record reads.
+#[test]
+fn a_malformed_sample_of_many_fails_on_access() {
+    let header = HEADER.replace("\tS1\n", "\tS1\tS2\n");
+    let gt = |bytes: &[u8]| Rec { indiv: bytes.to_vec(), n_sample: 2, ..Rec::default() };
+    let records = [
+        gt(&[0x11, 0x02, 0x21, 0x02, 0x04, 0x02, 0x02, 0x99]),
+        gt(&[0x11, 0x02, 0x21, 0x02, 0x04]),
+        gt(&[0x11, 0x02, 0x21, 0x02, 0x04, 0x04, 0x04]),
+    ];
+    let file = VcfFile::from_bytes(bcf_with(&header, &records), None).unwrap();
+    let key: FormatGt = file.header().format_key("GT").unwrap();
+    let s2 = file.header().sample("S2").unwrap();
+    let mut one = file.reader::<Sample>().sample("S2").open().unwrap();
+    let mut all = file.reader::<Samples>().open().unwrap();
+    for _ in 0..2 {
+        let sample = one.next_record().unwrap().unwrap();
+        let every = all.next_record().unwrap().unwrap();
+        let expected = record_error(every.sample(s2).get(&key).unwrap_err()).1;
+        assert!(
+            matches!(expected, RecordError::TrailingBytes { .. } | RecordError::Value { .. }),
+            "{expected:?}"
+        );
+        assert_eq!(record_error(sample.get(&key).unwrap_err()).1, expected);
+        assert_eq!(record_error(sample.get(&key).unwrap_err()).1, expected, "every access");
+        assert_eq!(record_error(sample.has(&key).unwrap_err()).1, expected);
+        assert!(matches!(sample.iter().next(), Some(Err(_))));
+    }
+    let sample = one.next_record().unwrap().unwrap();
+    assert!(sample.get(&key).unwrap().is_some());
+    assert!(one.next_record().unwrap().is_none());
 }
 
 // r[verify vcf_fields.lazy+2]
