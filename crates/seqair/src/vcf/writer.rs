@@ -290,20 +290,23 @@ fn strip_trailing_zeros(formatted: &[u8]) -> &[u8] {
     trimmed.strip_suffix(b".").unwrap_or(trimmed)
 }
 
+/// Whether VCF text gives `b` a meaning inside a value, so a string value
+/// percent-encodes it (§1.0.2).
+pub(crate) fn needs_percent(b: u8) -> bool {
+    matches!(b, b':' | b';' | b'=' | b'%' | b',' | b'\t' | b'\n' | b'\r')
+}
+
+/// Append `b` as `%XX`, upper-case hex.
+pub(crate) fn push_percent(buf: &mut Vec<u8>, b: u8) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let hex = |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
+    buf.extend_from_slice(&[b'%', hex(b >> 4), hex(b & 0xF)]);
+}
+
 /// Percent-encode special characters per VCF spec §1.0.2.
 pub(crate) fn percent_encode_into(buf: &mut Vec<u8>, data: &[u8]) {
     for &b in data {
-        match b {
-            b':' => buf.extend_from_slice(b"%3A"),
-            b';' => buf.extend_from_slice(b"%3B"),
-            b'=' => buf.extend_from_slice(b"%3D"),
-            b'%' => buf.extend_from_slice(b"%25"),
-            b',' => buf.extend_from_slice(b"%2C"),
-            b'\t' => buf.extend_from_slice(b"%09"),
-            b'\n' => buf.extend_from_slice(b"%0A"),
-            b'\r' => buf.extend_from_slice(b"%0D"),
-            _ => buf.push(b),
-        }
+        if needs_percent(b) { push_percent(buf, b) } else { buf.push(b) }
     }
 }
 

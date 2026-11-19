@@ -11,7 +11,7 @@ use super::record::Genotype;
 use super::record_encoder::{
     ContigId, FieldId, FilterId, FormatEncoder, FormatKey, InfoEncoder, InfoKey,
 };
-use super::writer::{percent_encode_into, write_float_g};
+use super::writer::{needs_percent, percent_encode_into, push_percent, write_float_g};
 use super::{IndexKind, OutputFormat};
 use crate::bam::bgzf_writer::BgzfSink;
 use crate::io::IndexBuilder;
@@ -1842,7 +1842,7 @@ impl Escape {
     /// already as stored.
     fn stored(self, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         match self {
-            Self::Percent if bytes.iter().any(|b| b":;=%,\t\n\r".contains(b)) => {
+            Self::Percent if bytes.iter().any(|&b| needs_percent(b)) => {
                 let mut buf = Vec::with_capacity(bytes.len().saturating_add(8));
                 percent_encode_into(&mut buf, bytes);
                 std::borrow::Cow::Owned(buf)
@@ -1857,12 +1857,9 @@ impl Escape {
             // r[impl vcf_writer.percent_encoding]
             Self::Percent => percent_encode_into(buf, bytes),
             Self::Structure(sep) => {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
                 for &b in bytes {
                     if matches!(b, b'\t' | b'\n' | b'\r') || b == sep {
-                        let hex =
-                            |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
-                        buf.extend_from_slice(&[b'%', hex(b >> 4), hex(b & 0xF)]);
+                        push_percent(buf, b);
                     } else {
                         buf.push(b);
                     }
