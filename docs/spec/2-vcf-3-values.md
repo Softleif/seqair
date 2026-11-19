@@ -73,8 +73,8 @@ r[vcf_values.gt_phased]
 r[vcf_values.qual]
 `qual()` MUST return `Option<f32>`: `None` for `.` or BCF's missing bit pattern, the stored `f32` otherwise, negative, huge and NaN values included. It MUST NOT return `Phred`: that type is `f64`, documented non-negative, and its `as_int` clamps to 0..=99, while QUAL values reach the thousands. BCF to BCF stays bit-exact.
 
-r[vcf_values.duplicates]
-When a record holds the same INFO or FORMAT key twice, the first occurrence MUST win, as htslib's lookups do, and the reader MUST log one `warn!` per file. (The writer keeps the last write of a key, `r[record_encoder.info_dedup+2]`; that is about writing, not reading.)
+r[vcf_values.duplicates+2]
+When a record holds the same INFO or FORMAT key twice, the first occurrence MUST win, as htslib's lookups do, and the reader MUST log one `warn!` per file when an index meets a repeated key (a lookup that stops early, `r[vcf_values.index+2]`, may not reach it). (The writer keeps the last write of a key, `r[record_encoder.info_dedup+2]`; that is about writing, not reading.)
 
 r[vcf_values.dynamic+2]
 `Info::iter()` and the sample views MUST offer untyped iteration over the fields present, yielding each field's name, its definition in the field table (the header's, a reserved one, or the undeclared `String` one) and a `DynValue` (`Int(OptValues<i32>)`, `Float(OptValues<f32>)`, `Flag`, `Str(Option<&str>)`, `Gt(Option<GenotypeRef>)`), for generic tools such as `convert` and `view`. The iterator MUST be one layer of `Result`: a section that does not index is its first item's error. `DynValue::is_missing()` MUST say whether the value is `.`, whatever its variant.
@@ -89,8 +89,10 @@ A record's end MUST be `start + rlen − 1`. For BCF, `rlen` is the stored field
 
 ## Per-record index
 
-r[vcf_values.index]
+r[vcf_values.index+2]
 A section's index MUST be one list of present fields in record order (`DictId`, kind, byte span) and an epoch-stamped table with one `u32` per dictionary id (`epoch << 16 | slot`), so a lookup is one table read, an epoch compare and one list read; an absent key is an epoch mismatch. Advancing the epoch replaces clearing; on wrap the table is zeroed. There is one representation for VCF and BCF and for every record size: on real files a linear scan beats the table by at most ~5 ns per record below ~16 keys, inside the noise, and a second code path is not worth it.
+
+The INFO index MUST be built incrementally: a lookup of one key (`get`, `has`) indexes the section no further than that key's first entry, resuming where the last lookup stopped; iteration, and a lookup of a key the section lacks, index the rest. On wide INFO columns (gnomAD's hundreds of keys) a lookup of an early key then skips most of the work. Malformed data fails only the accesses that reach it: a lookup of a key whose first entry precedes it reads that entry, whatever the order of accesses, and every other access returns the error. A property test MUST check lookups and whole-index accesses, in any order, against the index built whole.
 
 r[vcf_values.text_resolution+2]
 VCF text keys MUST be mapped to `DictId`s through a table built once per file from the header and the reserved keys it does not declare: open addressing at ≤ 50% load, each slot holding the key's first 8 bytes, its length and its id, keys longer than 8 bytes verified against one flat name buffer. The hash MUST be one 8-byte load (plus the last 8 bytes for longer keys). A perfect hash measured no faster than this table on real headers and is not used. Keys appended to the field table later are found in a second, locked map consulted only when the first misses, so a file whose keys are all declared never takes the lock.
