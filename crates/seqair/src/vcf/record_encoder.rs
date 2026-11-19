@@ -41,7 +41,7 @@
 //! ```
 
 use super::error::{KeyError, VcfError};
-use super::header::{HeaderId, Number, ValueType};
+use super::header::{DictId, HeaderId, Number, ValueType};
 use super::record::Genotype;
 use seqair_types::SmolStr;
 use std::marker::PhantomData;
@@ -210,25 +210,51 @@ pub(crate) fn check_kind<V: FieldKind>(
 
 // ── Field identifiers ──────────────────────────────────────────────────
 
-// r[impl record_encoder.field_id]
-/// Base field identifier carrying both a BCF dictionary index and a string name.
+// r[impl record_encoder.field_id+2]
+/// An INFO or FORMAT field as resolved from a header, once: everything a
+/// writer encodes it by and a reader looks it up and decodes it by, so
+/// neither consults the header per record. The marker `V` of the
+/// [`InfoKey<V>`]/[`FormatKey<V>`] around it was checked against `typ` and
+/// `number` when it was resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldId {
-    pub(crate) dict_idx: u32,
+    /// The BCF dictionary id: the BCF encoder's key, and the reader's slot
+    /// in a record's index.
+    pub(crate) id: DictId,
+    /// The VCF text encoder's key, and what errors name.
     pub(crate) name: SmolStr,
+    /// The declared `Type` (`String` for a field no header declares): what
+    /// an [`Any`](super::reader::Any) read decodes the value as.
+    pub(crate) typ: ValueType,
     /// The declared `Number`, which the writer checks a value's count against
     /// (`r[record_encoder.count_check+3]`).
     pub(crate) number: Number,
-    /// The header the index was resolved from (`r[vcf_values.header_brand]`).
+    /// The FORMAT `GT` field: an `Any` read decodes it as a genotype.
+    pub(crate) genotype: bool,
+    /// The header the id was resolved from (`r[vcf_values.header_brand]`).
     pub(crate) header: HeaderId,
 }
 
 impl FieldId {
+    /// The field `name` of `section`, declared `typ`/`number`, with
+    /// dictionary id `id` in header `header`.
+    pub(crate) fn new(
+        id: DictId,
+        name: SmolStr,
+        typ: ValueType,
+        number: Number,
+        section: Section,
+        header: HeaderId,
+    ) -> Self {
+        let genotype = section == Section::Format && name == "GT";
+        Self { id, name, typ, number, genotype, header }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
     pub fn dict_idx(&self) -> u32 {
-        self.dict_idx
+        self.id.get()
     }
     pub fn number(&self) -> Number {
         self.number
@@ -1199,30 +1225,36 @@ mod tests {
     #[test]
     fn typed_keys_prevent_misuse() {
         let _int_key: InfoInt = InfoKey(
-            FieldId {
-                dict_idx: 0,
-                name: SmolStr::from("DP"),
-                number: Number::Count(1),
-                header: HeaderId::next(),
-            },
+            FieldId::new(
+                DictId::new(0).unwrap(),
+                SmolStr::from("DP"),
+                ValueType::Integer,
+                Number::Count(1),
+                Section::Info,
+                HeaderId::next(),
+            ),
             PhantomData,
         );
         let _float_key: InfoFloat = InfoKey(
-            FieldId {
-                dict_idx: 1,
-                name: SmolStr::from("BQ"),
-                number: Number::Count(1),
-                header: HeaderId::next(),
-            },
+            FieldId::new(
+                DictId::new(1).unwrap(),
+                SmolStr::from("BQ"),
+                ValueType::Float,
+                Number::Count(1),
+                Section::Info,
+                HeaderId::next(),
+            ),
             PhantomData,
         );
         let _flag_key: InfoFlag = InfoKey(
-            FieldId {
-                dict_idx: 2,
-                name: SmolStr::from("CPG"),
-                number: Number::Count(0),
-                header: HeaderId::next(),
-            },
+            FieldId::new(
+                DictId::new(2).unwrap(),
+                SmolStr::from("CPG"),
+                ValueType::Flag,
+                Number::Count(0),
+                Section::Info,
+                HeaderId::next(),
+            ),
             PhantomData,
         );
     }
@@ -1271,7 +1303,7 @@ mod tests {
 
     // r[verify record_encoder.register]
     // r[verify record_encoder.register_contig]
-    // r[verify record_encoder.field_id]
+    // r[verify record_encoder.field_id+2]
     // r[verify record_encoder.contig_id]
     #[test]
     fn register_resolves_correct_dict_indices() {
@@ -1284,6 +1316,21 @@ mod tests {
         assert_eq!(map.get("BQ").unwrap(), setup.bq_info.id().dict_idx() as usize, "INFO BQ");
         assert_eq!(map.get("DB").unwrap(), setup.db_flag.id().dict_idx() as usize, "INFO DB");
         assert_eq!(map.get("GT").unwrap(), setup.gt_fmt.id().dict_idx() as usize, "FORMAT GT");
+
+        // The declared Type and the GT flag, from registering and from resolving.
+        let resolved = setup.header.format_key::<crate::vcf::reader::Any>("GT").unwrap();
+        for (id, typ, genotype) in [
+            (setup.dp_info.id(), ValueType::Integer, false),
+            (setup.bq_info.id(), ValueType::Float, false),
+            (setup.db_flag.id(), ValueType::Flag, false),
+            (setup.gt_fmt.id(), ValueType::String, true),
+            (&resolved.0, ValueType::String, true),
+            (setup.dp_fmt.id(), ValueType::Integer, false),
+        ] {
+            assert_eq!((id.typ, id.genotype), (typ, genotype), "{}", id.name());
+        }
+        let dp = setup.header.info_key::<crate::vcf::reader::Any>("DP").unwrap();
+        assert_eq!(dp.0, *setup.dp_info.id());
     }
 
     // r[verify record_encoder.field_def+5]

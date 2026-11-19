@@ -331,7 +331,7 @@ impl FieldTable {
         // r[impl vcf_reader.undeclared+5]
         // Warned of where a record uses it: most lenient keys find nothing.
         debug!(%kind, key = name, %typ, %number, "a lenient key for a field the header does not declare");
-        Ok(FieldId { dict_idx: id.get(), name: name.into(), number, header: self.id })
+        Ok(FieldId::new(id, name.into(), typ, number, section, self.id))
     }
 }
 
@@ -640,10 +640,7 @@ mod tests {
             assert_eq!(seen(), 0, "resolving warns of nothing");
             fields.text_id(KeyKind::Info, b"DP").unwrap();
             assert_eq!(seen(), 0, "a declared key");
-            assert_eq!(
-                fields.text_id(KeyKind::Info, b"TRID").map(DictId::get),
-                Some(trid.dict_idx)
-            );
+            assert_eq!(fields.text_id(KeyKind::Info, b"TRID"), Some(trid.id));
             assert_eq!(seen(), 1, "a record's undeclared key, resolved or not");
             let xx = fields.text_id(KeyKind::Info, b"XX").unwrap();
             fields.text_id(KeyKind::Info, b"SVLEN").unwrap();

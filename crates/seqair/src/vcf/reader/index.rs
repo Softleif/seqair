@@ -1,20 +1,6 @@
 //! A record section's index of present fields (`r[vcf_values.index+2]`).
 
-/// A string-dictionary index: a header declares at most
-/// [`MAX_DICT_ENTRIES`](crate::vcf::header::MAX_DICT_ENTRIES) = 2^16 ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct DictId(u16);
-
-impl DictId {
-    /// `None` for an index no header can declare.
-    pub(crate) fn new(index: u32) -> Option<Self> {
-        u16::try_from(index).ok().map(Self)
-    }
-
-    pub(crate) fn get(self) -> u32 {
-        u32::from(self.0)
-    }
-}
+pub(crate) use crate::vcf::header::DictId;
 
 /// One field present in a section: its id and the byte span of its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +58,7 @@ impl FieldIndex {
     /// already present (the first occurrence wins, `r[vcf_values.duplicates+2]`).
     #[inline]
     pub(crate) fn push(&mut self, entry: Entry) -> bool {
-        let id = entry.id.0 as usize;
+        let id = entry.id.get() as usize;
         if id >= self.table.len() {
             self.grow(id);
         }
@@ -89,7 +75,7 @@ impl FieldIndex {
 
     #[inline]
     pub(crate) fn get(&self, id: DictId) -> Option<Entry> {
-        let stamp = *self.table.get(id.0 as usize)?;
+        let stamp = *self.table.get(id.get() as usize)?;
         if stamp >> 16 != u32::from(self.epoch) {
             return None;
         }
@@ -131,12 +117,20 @@ mod tests {
             index.begin();
             let mut first = HashMap::new();
             for (i, &id) in ids.iter().enumerate() {
-                let entry = Entry { id: DictId(id), start: i as u32, end: i as u32 + 1 };
+                let entry = Entry {
+                    id: DictId::new(u32::from(id)).unwrap(),
+                    start: i as u32,
+                    end: i as u32 + 1,
+                };
                 assert_eq!(index.push(entry), !first.contains_key(&id));
                 first.entry(id).or_insert(entry);
             }
             for id in 0..=300u16 {
-                assert_eq!(index.get(DictId(id)), first.get(&id).copied(), "id {id}");
+                assert_eq!(
+                    index.get(DictId::new(u32::from(id)).unwrap()),
+                    first.get(&id).copied(),
+                    "id {id}"
+                );
             }
             let mut expected: Vec<_> = first.into_values().collect();
             expected.sort_by_key(|e| e.start);

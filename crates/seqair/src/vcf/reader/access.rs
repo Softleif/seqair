@@ -51,9 +51,10 @@ fn text_vec<'a, T: TextNumber>(
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeCx<'f> {
     pub(crate) first_phase_is_read: bool,
-    /// The field's `Type`; looked up only for a marker that reads it.
+    /// The field's declared `Type`, from its key ([`FieldId`](crate::vcf::record_encoder::FieldId))
+    /// or the field table: what [`Any`] decodes as.
     pub(crate) declared: ValueType,
-    /// Whether the field is FORMAT `GT`.
+    /// Whether the field is FORMAT `GT`, which [`Any`] decodes as a genotype.
     pub(crate) genotype: bool,
     /// The file to warn of a reserved integer read as missing, and the field's name.
     pub(crate) file: Option<&'f FileShared>,
@@ -80,10 +81,6 @@ mod sealed {
 /// absent: VCF lets a sample drop trailing FORMAT fields.
 pub trait ReadKind: FieldKind + sealed::Sealed {
     type Out<'a>;
-
-    /// Whether decoding needs the field's definition ([`Any`]).
-    #[doc(hidden)]
-    const DYNAMIC: bool = false;
 
     #[doc(hidden)]
     fn absent<'a>() -> Self::Out<'a>;
@@ -282,7 +279,6 @@ pub type FormatAny = FormatKey<Any>;
 impl sealed::Sealed for Any {}
 impl ReadKind for Any {
     type Out<'a> = Option<DynValue<'a>>;
-    const DYNAMIC: bool = true;
 
     fn absent<'a>() -> Self::Out<'a> {
         None

@@ -237,16 +237,14 @@ impl<'a> FormatView<'a> {
     /// Whether the record has field `key`.
     fn has(&self, key: &FieldId) -> Result<bool, VcfReadError> {
         check_brand(key, self.file)?;
-        let Some(id) = DictId::new(key.dict_idx) else { return Ok(false) };
-        Ok(self.index()?.keys.get(id).is_some())
+        Ok(self.index()?.keys.get(key.id).is_some())
     }
 
     /// Field `key`'s values, if the record has it.
     fn field(&self, key: &FieldId) -> Result<Option<FieldAt<'a>>, VcfReadError> {
         check_brand(key, self.file)?;
-        let Some(id) = DictId::new(key.dict_idx) else { return Ok(None) };
         let index = self.index()?;
-        index.keys.get(id).map(|e| self.field_at(index, e)).transpose()
+        index.keys.get(key.id).map(|e| self.field_at(index, e)).transpose()
     }
 }
 
@@ -320,7 +318,7 @@ impl<'a> SampleRef<'a> {
         check_sample(self.sample, file)?;
         let Some(field) = self.view.field(&key.0)? else { return Ok(V::absent()) };
         match field.sample(self.column) {
-            Some(value) => decode::<V>(value, &key.0, KeyKind::Format, file, self.view.at),
+            Some(value) => decode::<V>(value, &key.0, file, self.view.at),
             None => Ok(V::absent()),
         }
     }
@@ -457,7 +455,7 @@ impl<'a> SamplesRef<'a> {
         if !checked {
             for i in 0..n {
                 if let Some(value) = field.sample(i) {
-                    decode::<V>(value, &key.0, KeyKind::Format, file, at)?;
+                    decode::<V>(value, &key.0, file, at)?;
                 }
             }
         }
@@ -535,7 +533,7 @@ impl<'a, V: ReadKind> Column<'a, V> {
     pub fn get(&self, sample: SampleIdx) -> Result<V::Out<'a>, VcfReadError> {
         check_sample(Some(sample), self.file)?;
         match self.field.sample(sample.index()) {
-            Some(value) => decode::<V>(value, &self.key, KeyKind::Format, self.file, self.at),
+            Some(value) => decode::<V>(value, &self.key, self.file, self.at),
             None => Ok(V::absent()),
         }
     }
@@ -550,7 +548,7 @@ impl<'a, V: ReadKind> Iterator for Column<'a, V> {
         }
         let value = self.field.sample(self.next)?;
         self.next = self.next.saturating_add(1);
-        let decoded = decode::<V>(value, &self.key, KeyKind::Format, self.file, self.at);
+        let decoded = decode::<V>(value, &self.key, self.file, self.at);
         debug_assert!(decoded.is_ok(), "column() checked every sample");
         Some(decoded.unwrap_or_else(|_| V::absent()))
     }

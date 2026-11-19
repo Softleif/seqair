@@ -42,28 +42,20 @@ pub(crate) fn stored<'a>(
     })))
 }
 
-/// Decode `value`, the `kind` field `key`'s, as `V`.
+/// Decode `value`, the field `key`'s, as `V`.
 pub(crate) fn decode<'a, V: ReadKind>(
     value: Stored<'a>,
     key: &FieldId,
-    kind: KeyKind,
     file: &FileShared,
     at: RecordAt,
 ) -> Result<V::Out<'a>, VcfReadError> {
-    let mut cx = DecodeCx {
+    let cx = DecodeCx {
         first_phase_is_read: file.first_phase_is_read,
-        declared: ValueType::String,
-        genotype: false,
+        declared: key.typ,
+        genotype: key.genotype,
         file: Some(file),
         name: &key.name,
     };
-    if V::DYNAMIC {
-        // An undeclared field reads as a String.
-        if let Some(typ) = DictId::new(key.dict_idx).and_then(|id| file.fields.declared(kind, id)) {
-            cx.declared = typ;
-        }
-        cx.genotype = kind == KeyKind::Format && key.name == "GT";
-    }
     V::decode(value, cx)
         .map_err(|source| at.error(file, RecordError::Field { name: key.name.clone(), source }))
 }
@@ -186,11 +178,8 @@ impl<'a> InfoRef<'a> {
     /// [`VcfReadError::Record`] for malformed data.
     pub fn get<V: ReadKind>(&self, key: &InfoKey<V>) -> Result<V::Out<'a>, VcfReadError> {
         check_brand(&key.0, self.file)?;
-        let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(V::absent()) };
-        match self.find(id)? {
-            Some(entry) => {
-                decode::<V>(self.value(entry.span())?, &key.0, KeyKind::Info, self.file, self.at)
-            }
+        match self.find(key.0.id)? {
+            Some(entry) => decode::<V>(self.value(entry.span())?, &key.0, self.file, self.at),
             None => Ok(V::absent()),
         }
     }
@@ -203,8 +192,7 @@ impl<'a> InfoRef<'a> {
     /// As [`Self::get`].
     pub fn has<V>(&self, key: &InfoKey<V>) -> Result<bool, VcfReadError> {
         check_brand(&key.0, self.file)?;
-        let Some(id) = DictId::new(key.0.dict_idx) else { return Ok(false) };
-        Ok(self.find(id)?.is_some())
+        Ok(self.find(key.0.id)?.is_some())
     }
 
     // r[impl vcf_values.dynamic+2]

@@ -86,7 +86,7 @@ impl Number {
 
 // r[impl vcf_header.info_def]
 /// Value type for an INFO or FORMAT field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
     Integer,
     Float,
@@ -194,6 +194,23 @@ impl ContigDef {
 /// so every dictionary index fits a `u16`. Exceeding it returns
 /// [`VcfHeaderError::TooManyFields`].
 pub const MAX_DICT_ENTRIES: usize = 65_536;
+
+/// An id in the string dictionary: what a BCF record names a FILTER, INFO
+/// or FORMAT field by. 16 bits, as [`MAX_DICT_ENTRIES`] allows; a key
+/// narrows its index to one where it is resolved, so no access does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct DictId(u16);
+
+impl DictId {
+    /// `None` for an index no header can declare.
+    pub(crate) fn new(index: u32) -> Option<Self> {
+        u16::try_from(index).ok().map(Self)
+    }
+
+    pub(crate) fn get(self) -> u32 {
+        u32::from(self.0)
+    }
+}
 
 // r[impl vcf_header.parse.limits]
 /// Longest header text [`VcfHeader::parse`] accepts, as for a BAM header.
@@ -635,7 +652,7 @@ impl VcfHeader {
     pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
         let def = self.infos.get(name).ok_or_else(|| unknown_field(name, KeyKind::Info))?;
         check_kind::<V>(Section::Info, name, def.typ, def.number)?;
-        Ok(InfoKey(self.field_id(name, def.number, KeyKind::Info)?, PhantomData))
+        Ok(InfoKey(self.field_id(name, def.typ, def.number, Section::Info)?, PhantomData))
     }
 
     // r[impl vcf_values.keys+2]
@@ -643,12 +660,25 @@ impl VcfHeader {
     pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
         let def = self.formats.get(name).ok_or_else(|| unknown_field(name, KeyKind::Format))?;
         check_kind::<V>(Section::Format, name, def.typ, def.number)?;
-        Ok(FormatKey(self.field_id(name, def.number, KeyKind::Format)?, PhantomData))
+        Ok(FormatKey(self.field_id(name, def.typ, def.number, Section::Format)?, PhantomData))
     }
 
-    fn field_id(&self, name: &str, number: Number, kind: KeyKind) -> Result<FieldId, KeyError> {
-        let dict_idx = self.string_map.index(name).ok_or_else(|| unknown_field(name, kind))?;
-        Ok(FieldId { dict_idx, name: SmolStr::from(name), number, header: self.id })
+    /// The declared field `name` of `section`. Its index always narrows to a
+    /// [`DictId`]: the dictionary holds at most [`MAX_DICT_ENTRIES`] ids.
+    fn field_id(
+        &self,
+        name: &str,
+        typ: ValueType,
+        number: Number,
+        section: Section,
+    ) -> Result<FieldId, KeyError> {
+        let kind = if section == Section::Format { KeyKind::Format } else { KeyKind::Info };
+        let id = self
+            .string_map
+            .index(name)
+            .and_then(DictId::new)
+            .ok_or_else(|| unknown_field(name, kind))?;
+        Ok(FieldId::new(id, SmolStr::from(name), typ, number, section, self.id))
     }
 
     // r[impl vcf_values.keys+2]
@@ -1052,12 +1082,13 @@ impl<P> VcfHeaderBuilder<P> {
         VcfHeaderBuilder { header: self.header, _phase: PhantomData }
     }
 
-    /// The dictionary index `id` gets, without inserting it. The dictionary is
-    /// capped at [`MAX_DICT_ENTRIES`], so every index fits a `u16`.
-    fn push_dict_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
+    /// The dictionary id `id` gets, without inserting it. The dictionary is
+    /// capped at [`MAX_DICT_ENTRIES`], so every index fits a [`DictId`].
+    fn push_dict_entry(&mut self, id: &SmolStr) -> Result<DictId, VcfHeaderError> {
         self.header
             .string_map
             .push(id, MAX_DICT_ENTRIES)
+            .and_then(DictId::new)
             .ok_or(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
@@ -1245,7 +1276,7 @@ impl VcfHeaderBuilder<Filters> {
         let dict_idx = self.push_dict_entry(&id)?;
         self.header.push_line(Line::Def { kind: LineKind::Filter, id: id.clone(), form: None });
         self.header.filters.insert(id, def);
-        Ok(dict_idx)
+        Ok(dict_idx.get())
     }
 
     pub fn add_filter(
@@ -1288,9 +1319,9 @@ impl VcfHeaderBuilder<Filters> {
 
 impl VcfHeaderBuilder<Infos> {
     // r[impl vcf_header.info_def]
-    /// Insert an INFO definition, returning its BCF dict index. A refused
+    /// Insert an INFO definition, returning its BCF dictionary id. A refused
     /// definition leaves the builder unchanged.
-    fn insert_info(&mut self, id: SmolStr, def: InfoDef) -> Result<u32, VcfHeaderError> {
+    fn insert_info(&mut self, id: SmolStr, def: InfoDef) -> Result<DictId, VcfHeaderError> {
         if self.header.infos.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateInfo { id });
         }
@@ -1317,14 +1348,10 @@ impl VcfHeaderBuilder<Infos> {
     ) -> Result<super::record_encoder::InfoKey<V>, VcfHeaderError> {
         check_genotype::<V>(Section::Info, def.name)?;
         let id = SmolStr::from(def.name);
-        let dict_idx =
+        let dict_id =
             self.insert_info(id.clone(), InfoDef::new(def.number, V::VALUE_TYPE, def.description))?;
-        let field = super::record_encoder::FieldId {
-            dict_idx,
-            name: id,
-            number: def.number,
-            header: self.header.id,
-        };
+        let field =
+            FieldId::new(dict_id, id, V::VALUE_TYPE, def.number, Section::Info, self.header.id);
         Ok(super::record_encoder::InfoKey(field, PhantomData))
     }
 
@@ -1343,9 +1370,9 @@ impl VcfHeaderBuilder<Infos> {
 
 impl VcfHeaderBuilder<Formats> {
     // r[impl vcf_header.format_def]
-    /// Insert a FORMAT definition, returning its BCF dict index. A refused
+    /// Insert a FORMAT definition, returning its BCF dictionary id. A refused
     /// definition leaves the builder unchanged.
-    fn insert_format(&mut self, id: SmolStr, def: FormatDef) -> Result<u32, VcfHeaderError> {
+    fn insert_format(&mut self, id: SmolStr, def: FormatDef) -> Result<DictId, VcfHeaderError> {
         if self.header.formats.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateFormat { id });
         }
@@ -1376,16 +1403,12 @@ impl VcfHeaderBuilder<Formats> {
     ) -> Result<super::record_encoder::FormatKey<V>, VcfHeaderError> {
         check_genotype::<V>(Section::Format, def.name)?;
         let id = SmolStr::from(def.name);
-        let dict_idx = self.insert_format(
+        let dict_id = self.insert_format(
             id.clone(),
             FormatDef::new(def.number, V::VALUE_TYPE, def.description),
         )?;
-        let field = super::record_encoder::FieldId {
-            dict_idx,
-            name: id,
-            number: def.number,
-            header: self.header.id,
-        };
+        let field =
+            FieldId::new(dict_id, id, V::VALUE_TYPE, def.number, Section::Format, self.header.id);
         Ok(super::record_encoder::FormatKey(field, PhantomData))
     }
 

@@ -717,7 +717,8 @@ mod incremental {
                 match access {
                     Some(k) => {
                         let id = id(file, k);
-                        let expected = found(&whole, result.as_ref().err(), id).map_err(Clone::clone);
+                        let expected =
+                            found(&whole, result.as_ref().err(), id).map_err(Clone::clone);
                         assert_eq!(lazy.find(id, &step).map_err(Clone::clone), expected, "K{k}");
                     }
                     None => {
