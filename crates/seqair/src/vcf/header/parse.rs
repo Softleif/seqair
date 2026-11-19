@@ -5,8 +5,9 @@
 //! are accepted with a `warn!`.
 
 use super::{
-    Attribute, ContigDef, FilterDef, FormatDef, InfoDef, MAX_CONTIGS, MAX_DICT_ENTRIES,
-    MAX_HEADER_TEXT, MAX_SAMPLES, Number, StringMap, ValueType, VcfHeader, VcfVersion,
+    Attribute, ContigDef, FilterDef, FormatDef, InfoDef, Line, LineKind, MAX_CONTIGS,
+    MAX_DICT_ENTRIES, MAX_HEADER_TEXT, MAX_SAMPLES, Number, StringMap, ValueType, VcfHeader,
+    VcfVersion,
 };
 use crate::vcf::error::{MetaLineError, VcfHeaderError};
 use seqair_types::SmolStr;
@@ -44,7 +45,10 @@ impl VcfHeader {
             None => return Err(VcfHeaderError::MissingFileFormat),
         };
 
-        let mut parser = Parser { header: Self::empty(version), pass_declared: false };
+        let mut header = Self::empty(version);
+        // r[impl vcf_header.line_order]
+        header.canonical = false;
+        let mut parser = Parser { header, pass_declared: false };
         while let Some((line_no, line)) = lines.next() {
             if line.starts_with("#CHROM") {
                 parser.header.samples = parse_samples(line)?;
@@ -103,27 +107,21 @@ impl Parser {
             let body = value.strip_prefix('<')?;
             Some((key, body))
         });
-        let Some((key, body)) = structured else {
-            if meta.starts_with("fileformat=") {
-                warn!(line, "dropping a second ##fileformat line");
-            } else {
-                // r[impl vcf_header.parse.preserve]
-                self.header.other_lines.push(SmolStr::from(meta));
-            }
-            return Ok(());
-        };
-        match key {
-            "INFO" | "FORMAT" | "FILTER" | "contig" => {
+        match structured {
+            Some((key @ ("INFO" | "FORMAT" | "FILTER" | "contig"), body)) => {
                 let attributes = parse_structured(body)
                     .map_err(|reason| VcfHeaderError::MalformedLine { line, reason })?;
-                self.definition(line, key, attributes)
+                // r[impl vcf_header.line_form]
+                let form = form(&attributes, |key| key != "IDX").into_boxed_str();
+                let attributes = attributes.into_iter().map(|(attr, _)| attr).collect();
+                self.definition(line, key, attributes, form)
             }
+            // r[impl vcf_header.parse.preserve+2]
+            // A second ##fileformat included: htslib keeps it as a line.
             _ => {
-                if let Err(reason) = parse_structured(body) {
+                if let Some(reason) = self.header.push_other_line(meta) {
                     warn!(line, %reason, "keeping a malformed structured header line verbatim");
                 }
-                // r[impl vcf_header.parse.preserve]
-                self.header.other_lines.push(SmolStr::from(meta));
                 Ok(())
             }
         }
@@ -134,6 +132,7 @@ impl Parser {
         line: usize,
         key: &str,
         mut attributes: Vec<Attribute>,
+        form: Box<str>,
     ) -> Result<(), VcfHeaderError> {
         let id = take(&mut attributes, "ID")
             .ok_or_else(|| VcfHeaderError::MissingId { line, key: SmolStr::from(key) })?;
@@ -160,6 +159,9 @@ impl Parser {
                 assign(&mut header.contig_map, &id, idx, MAX_CONTIGS, || {
                     VcfHeaderError::TooManyContigs { max: MAX_CONTIGS }
                 })?;
+                let def_line =
+                    Line::Def { kind: LineKind::Contig, id: id.clone(), form: Some(form) };
+                header.lines.push(def_line);
                 header.contigs.insert(id, ContigDef { length, attributes });
             }
             "FILTER" => {
@@ -173,6 +175,16 @@ impl Parser {
                 let description = description(&mut attributes, line, &id);
                 assign_field(&mut header.string_map, &id, idx)?;
                 self.pass_declared |= is_pass;
+                // r[impl vcf_header.line_order]
+                // The file's PASS takes the default's place, after ##fileformat.
+                match header.lines.iter_mut().find(|l| l.is_def(LineKind::Filter, "PASS")) {
+                    Some(Line::Def { form: pass_form, .. }) if is_pass => *pass_form = Some(form),
+                    _ => header.lines.push(Line::Def {
+                        kind: LineKind::Filter,
+                        id: id.clone(),
+                        form: Some(form),
+                    }),
+                }
                 header.filters.insert(id, FilterDef { description, attributes });
             }
             _ => {
@@ -212,6 +224,8 @@ impl Parser {
                 }
                 let description = description(&mut attributes, line, &id);
                 assign_field(&mut header.string_map, &id, idx)?;
+                let kind = if is_info { LineKind::Info } else { LineKind::Format };
+                header.lines.push(Line::Def { kind, id: id.clone(), form: Some(form) });
                 if is_info {
                     header.infos.insert(id, InfoDef { number, typ, description, attributes });
                 } else {
@@ -348,8 +362,10 @@ fn parse_samples(line: &str) -> Result<Vec<SmolStr>, VcfHeaderError> {
 /// `<`. Grammar as htslib's `bcf_hdr_parse_line`: keys `[A-Za-z_][0-9A-Za-z_.]*`;
 /// a value double-quoted (with `\"` and `\\` escapes), bracketed (`[a, b]`,
 /// kept with its brackets) or bare up to the next `,` or `>` outside nested
-/// `<…>`; spaces around keys and values ignored.
-fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
+/// `<…>`; spaces around keys and values ignored, and trailing ones inside
+/// quotes. Each attribute comes with its value as written (escapes kept,
+/// without the quotes).
+pub(super) fn parse_structured(body: &str) -> Result<Vec<(Attribute, &str)>, MetaLineError> {
     let bytes = body.as_bytes();
     let at = |i: usize| bytes.get(i).copied();
     let skip_spaces = |mut i: usize| {
@@ -384,7 +400,7 @@ fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
         }
         i = skip_spaces(i.saturating_add(1));
 
-        let (value, quoted) = match at(i) {
+        let (value, quoted, raw) = match at(i) {
             Some(b'"') => {
                 let start = i.saturating_add(1);
                 i = start;
@@ -397,9 +413,13 @@ fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
                         Some(_) => i = i.saturating_add(1),
                     }
                 }
-                let value = unescape(slice(start, i));
+                // Trailing spaces dropped, as htslib drops them, unless that
+                // would leave a backslash to escape the closing quote.
+                let inner = slice(start, i);
+                let trimmed = inner.trim_end_matches(' ');
+                let inner = if trimmed.ends_with('\\') { inner } else { trimmed };
                 i = i.saturating_add(1);
-                (value, true)
+                (unescape(inner), true, inner)
             }
             Some(b'[') => {
                 let start = i;
@@ -408,7 +428,7 @@ fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
                     .and_then(|rest| rest.find(']'))
                     .ok_or(MetaLineError::UnterminatedBracket)?;
                 i = start.saturating_add(close).saturating_add(1);
-                (SmolStr::from(slice(start, i)), false)
+                (SmolStr::from(slice(start, i)), false, slice(start, i))
             }
             _ => {
                 let start = i;
@@ -423,10 +443,11 @@ fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
                     }
                     i = i.saturating_add(1);
                 }
-                (SmolStr::from(slice(start, i).trim_end_matches(' ')), false)
+                let raw = slice(start, i).trim_end_matches(' ');
+                (SmolStr::from(raw), false, raw)
             }
         };
-        attributes.push(Attribute { key, value, quoted });
+        attributes.push((Attribute { key, value, quoted }, raw));
 
         i = skip_spaces(i);
         match at(i) {
@@ -441,6 +462,28 @@ fn parse_structured(body: &str) -> Result<Vec<Attribute>, MetaLineError> {
             Some(_) => return Err(MetaLineError::JunkAfterValue),
         }
     }
+}
+
+// r[impl vcf_header.line_form]
+/// The attributes `keep` keeps, as htslib's `bcf_hrec_format` writes them:
+/// `key=value` with each value as written, joined by `,`.
+pub(super) fn form(attributes: &[(Attribute, &str)], keep: impl Fn(&str) -> bool) -> String {
+    let mut out = String::new();
+    for (attr, raw) in attributes.iter().filter(|(attr, _)| keep(&attr.key)) {
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(&attr.key);
+        out.push('=');
+        if attr.quoted {
+            out.push('"');
+            out.push_str(raw);
+            out.push('"');
+        } else {
+            out.push_str(raw);
+        }
+    }
+    out
 }
 
 /// Undo `\"` and `\\`; any other backslash is kept as written.
@@ -503,23 +546,38 @@ mod tests {
     }
 
     // r[verify vcf_header.parse]
+    // r[verify vcf_header.line_form]
+    /// A structured other line is kept as htslib writes it: without the
+    /// spaces around keys and values.
     #[test]
     fn spaces_brackets_and_nested_angles_are_read_as_htslib_reads_them() {
         let h = parse("##META=<ID=Assay, Type=String, Values=[WholeGenome, Exome]>\n##ALT=<ID=DEL,Description=\"<x>\">\n").unwrap();
         assert_eq!(
             h.other_lines(),
             [
-                "META=<ID=Assay, Type=String, Values=[WholeGenome, Exome]>",
+                "META=<ID=Assay,Type=String,Values=[WholeGenome, Exome]>",
                 "ALT=<ID=DEL,Description=\"<x>\">"
             ]
         );
+        let attrs =
+            parse_structured("ID=a , V = [x, y] ,N=<p,q>,D= \"a \\\"b\\x \",E=\"\\ \">").unwrap();
         assert_eq!(
-            parse_structured("ID=a , V = [x, y] ,N=<p,q>>").unwrap(),
+            attrs.iter().map(|(attr, _)| attr.clone()).collect::<Vec<_>>(),
             [
                 Attribute { key: "ID".into(), value: "a".into(), quoted: false },
                 Attribute { key: "V".into(), value: "[x, y]".into(), quoted: false },
                 Attribute { key: "N".into(), value: "<p,q>".into(), quoted: false },
+                Attribute { key: "D".into(), value: "a \"b\\x".into(), quoted: true },
+                Attribute { key: "E".into(), value: "\\ ".into(), quoted: true },
             ]
+        );
+        // r[verify vcf_header.line_form]
+        // As htslib keeps them: escapes untouched, trailing spaces in quotes
+        // dropped, but the one an escape would otherwise swallow the quote with.
+        assert_eq!(
+            form(&attrs, |_| true),
+            "ID=a,V=[x, y],N=<p,q>,D=\"a \\\"b\\x\",E=\"\\ \"",
+            "as written"
         );
     }
 
@@ -628,7 +686,11 @@ mod tests {
             "the file's PASS replaces the default"
         );
         assert_eq!(h.contig_defs()["c"].length, Some(5), "the first definition wins");
-        assert_eq!(h.other_lines(), ["no equals sign"]);
+        assert_eq!(
+            h.other_lines(),
+            ["no equals sign", "fileformat=VCFv4.1"],
+            "a second ##fileformat is a line, as htslib keeps it"
+        );
         assert_eq!(h.version(), VcfVersion::V4_5);
     }
 
@@ -671,13 +733,17 @@ mod tests {
         assert_eq!(h.contig_map().iter().collect::<Vec<_>>(), [(0, "b"), (1, "a")]);
         let names: Vec<_> = h.contigs().map(|(c, _)| c.name().clone()).collect();
         assert_eq!(names, ["b", "a"], "dictionary order");
-        // Written back in canonical order (FILTER, INFO, FORMAT), this order
-        // needs IDX to survive.
-        let again = VcfHeader::parse(&h.to_vcf_text()).unwrap();
+        // r[verify vcf_header.line_order]
+        // Written back in the order read, the lines give the same dictionary
+        // without IDX.
+        let text = h.to_vcf_text();
+        assert!(!text.contains("IDX="), "{text}");
+        let again = VcfHeader::parse(&text).unwrap();
         assert_eq!(again.string_map(), h.string_map());
+        assert_eq!(again.contig_map(), h.contig_map());
     }
 
-    // r[verify vcf_header.parse.preserve]
+    // r[verify vcf_header.parse.preserve+2]
     /// An id read quoted that a bare value cannot hold is written quoted
     /// (fuzzer-found).
     #[test]
@@ -692,15 +758,17 @@ mod tests {
     }
 
     // r[verify vcf_header.parse.dictionary]
-    // r[verify vcf_header.parse.preserve]
+    // r[verify vcf_header.parse.preserve+2]
+    // r[verify vcf_header.line_form]
     /// A repeated `IDX` (or `ID`) is read once, the first, and not written
     /// back as an attribute that would win the next read (fuzzer-found).
     #[test]
     fn a_repeated_reserved_key_reads_and_writes_as_the_first() {
         let h = parse("##FILTER=<ID=f,Description=\"\",IDX=7,x=y,IDX=2,ID=g>\n").unwrap();
         assert_eq!(h.string_map().get("f"), Some(7));
+        // As htslib writes it: every key as read, IDX last.
         let text = h.to_vcf_text();
-        assert!(text.contains("##FILTER=<ID=f,Description=\"\",x=y,IDX=7>"), "{text}");
+        assert!(text.contains("##FILTER=<ID=f,Description=\"\",x=y,ID=g,IDX=7>"), "{text}");
         let again = VcfHeader::parse(&text).unwrap();
         assert_eq!(again.string_map(), h.string_map());
     }

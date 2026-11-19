@@ -144,8 +144,9 @@ fn real_headers_round_trip() {
         assert_eq!(bcftools_dictionaries(&text), dictionaries(&header), "{name}");
         assert_eq!(again.to_vcf_text(), text, "{name}: a second round trip is a fixed point");
 
-        let reordered = matches!(name, "gnomad41_chr22.bcf.header" | "kgp_chr22.bcf.header");
-        assert_eq!(text.contains(",IDX="), reordered, "{name}: IDX only where needed");
+        // kgp declares FORMAT GT between INFO lines: its line order is its dictionary.
+        let gaps = name == "gnomad41_chr22.bcf.header";
+        assert_eq!(text.contains(",IDX="), gaps, "{name}: IDX only where needed");
     }
 }
 
@@ -176,7 +177,9 @@ fn a_parsed_header_keeps_its_version_and_attributes() {
 
 // ── Builder headers, round-tripped ─────────────────────────────────────
 
-const PRINTABLE: &str = r#"[ -~é]{0,16}"#;
+/// Printable text that does not end in a space: a quoted value's trailing
+/// spaces are dropped on reading, by htslib and by `VcfHeader::parse`.
+const PRINTABLE: &str = r#"([ -~é]{0,15}[!-~é])?"#;
 
 #[hegel::composite]
 fn attributes(tc: &TestCase) -> Vec<Attribute> {

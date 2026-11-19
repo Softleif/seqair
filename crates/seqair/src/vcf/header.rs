@@ -1,15 +1,16 @@
 //! VCF header model with builder, field definitions, and BCF string map.
 
-use super::error::{KeyError, KeyKind, VcfHeaderError};
+use super::error::{KeyError, KeyKind, MetaLineError, VcfHeaderError};
 use super::record_encoder::{
     ContigId, FieldId, FieldKind, FilterId, FormatKey, InfoKey, Section, check_genotype, check_kind,
 };
 use crate::bam::header::BamHeader;
 use indexmap::IndexMap;
 use seqair_types::SmolStr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::warn;
 
 mod parse;
 
@@ -320,6 +321,58 @@ impl StringMap {
     }
 }
 
+/// The kind of a definition line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    Filter,
+    Info,
+    Format,
+    Contig,
+}
+
+impl LineKind {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Filter => "FILTER",
+            Self::Info => "INFO",
+            Self::Format => "FORMAT",
+            Self::Contig => "contig",
+        }
+    }
+}
+
+// r[impl vcf_header.line_order]
+/// One `##` line of a header, in the header's line order.
+#[derive(Debug, Clone)]
+enum Line {
+    /// `other_lines[i]`.
+    Other(usize),
+    /// A definition. `form` is a parsed line's attributes as read (spaces
+    /// dropped, `IDX` removed, `r[vcf_header.line_form]`); `None` for a
+    /// definition a builder added, which is written in the canonical form.
+    Def { kind: LineKind, id: SmolStr, form: Option<Box<str>> },
+}
+
+impl Line {
+    /// Where a header from `VcfHeader::builder()` puts the line.
+    fn canonical_rank(&self) -> u8 {
+        match self {
+            Self::Def { kind: LineKind::Filter, id, .. } if id == "PASS" => 0,
+            Self::Other(_) => 1,
+            Self::Def { kind, .. } => match kind {
+                LineKind::Filter => 2,
+                LineKind::Info => 3,
+                LineKind::Format => 4,
+                LineKind::Contig => 5,
+            },
+        }
+    }
+
+    fn is_def(&self, of: LineKind, name: &str) -> bool {
+        matches!(self, Self::Def { kind, id, .. } if *kind == of && id == name)
+    }
+}
+
 // r[impl vcf_fields.sample_idx]
 /// One sample of one header: obtainable only from that header
 /// ([`VcfHeader::sample`], [`VcfHeader::sample_indices`]) and carrying its
@@ -399,6 +452,13 @@ pub struct VcfHeader {
     contigs: IndexMap<SmolStr, ContigDef>,
     samples: Vec<SmolStr>,
     other_lines: Vec<SmolStr>,
+    /// What makes an other line a repeat htslib drops (`r[vcf_header.line_form]`).
+    other_keys: HashSet<SmolStr>,
+    /// Every `##` line but `##fileformat`, in order; PASS first.
+    lines: Vec<Line>,
+    /// Lines go where `Line::canonical_rank` puts them, not at the end: a
+    /// header from `VcfHeader::builder()` (`r[vcf_header.line_order]`).
+    canonical: bool,
     string_map: StringMap,
     contig_map: StringMap,
     /// The header `to_builder` derived this one from (`r[vcf_header.lineage]`).
@@ -420,19 +480,20 @@ impl VcfHeader {
         VcfHeaderBuilder::new()
     }
 
-    // r[impl vcf_header.to_builder]
+    // r[impl vcf_header.to_builder+2]
     /// A builder seeded with every line of this header — version, other
-    /// lines, definitions, contigs, samples — and its dictionaries as they
-    /// are, under a fresh [`HeaderId`]: `h.to_builder().build()` is `h` but
-    /// for the id, so keys resolved from `h` must be resolved again from the
-    /// new header.
+    /// lines, definitions, contigs, samples, in their order and as written —
+    /// and its dictionaries as they are, under a fresh [`HeaderId`]:
+    /// `h.to_builder().build()` is `h` but for the id, so keys resolved from
+    /// `h` must be resolved again from the new header.
     ///
     /// The builder starts in the [`Contigs`] phase, so every phase is
-    /// reachable. A registration appends to the dictionary past every index
-    /// already taken (a new FILTER may land after the copied INFO ids), but an
-    /// id removed and registered again gets its old index back;
-    /// [`to_vcf_text`](Self::to_vcf_text) then writes `IDX=` so a reader
-    /// assigns the indices the writer encodes with.
+    /// reachable. As htslib's `bcf_hdr_append`, every line added goes after
+    /// the copied ones, in call order; a removed line is gone, and an id
+    /// removed and registered again gets its old dictionary index back. A new
+    /// id gets an index past every one taken (a new FILTER may land after the
+    /// copied INFO ids); [`to_vcf_text`](Self::to_vcf_text) then writes
+    /// `IDX=` so a reader assigns the indices the writer encodes with.
     ///
     /// ```
     /// use seqair::vcf::record_encoder::{FormatFieldDef, Scalar, Str};
@@ -454,8 +515,10 @@ impl VcfHeader {
     /// let header = builder.build()?;
     /// assert_eq!(header.samples(), ["S1"]);
     /// assert_eq!(header.version(), input.version());
-    /// // As htslib: PS gets its index back.
+    /// // As htslib: PS keeps its index, and its new line is the last one.
     /// assert_eq!(header.string_map().get("PS"), input.string_map().get("PS"));
+    /// let text = header.to_vcf_text();
+    /// assert!(text.contains("##phaser_version=1.0\n##FORMAT=<ID=PS,Number=1,Type=Integer"));
     /// # let _ = ps;
     /// # Ok(())
     /// # }
@@ -466,6 +529,8 @@ impl VcfHeader {
         // r[impl vcf_header.lineage]
         header.parent = Some(self.id);
         header.removed.clear();
+        // r[impl vcf_header.line_order]
+        header.canonical = false;
         VcfHeaderBuilder { header, _phase: PhantomData }
     }
 
@@ -624,6 +689,7 @@ impl VcfHeader {
 
     /// A header with nothing but PASS, version `version` and a fresh id.
     fn empty(version: VcfVersion) -> Self {
+        let pass = SmolStr::new_static("PASS");
         let mut header = Self {
             id: HeaderId::next(),
             version,
@@ -633,76 +699,116 @@ impl VcfHeader {
             contigs: IndexMap::new(),
             samples: Vec::new(),
             other_lines: Vec::new(),
+            other_keys: HashSet::new(),
+            lines: vec![Line::Def { kind: LineKind::Filter, id: pass.clone(), form: None }],
+            canonical: true,
             parent: None,
             removed: Vec::new(),
             string_map: StringMap::default(),
             contig_map: StringMap::default(),
         };
         // PASS is always the first filter and dict index 0.
-        let pass = SmolStr::new_static("PASS");
         header.filters.insert(pass.clone(), FilterDef::new("All filters passed"));
         header.string_map.push(&pass, MAX_DICT_ENTRIES);
         header
     }
 
+    // r[impl vcf_header.line_order]
+    /// Add `line` at the end, or where it belongs in a canonical header.
+    fn push_line(&mut self, line: Line) {
+        let at = if self.canonical {
+            let rank = line.canonical_rank();
+            self.lines.partition_point(|l| l.canonical_rank() <= rank)
+        } else {
+            self.lines.len()
+        };
+        self.lines.insert(at, line);
+    }
+
+    fn remove_line(&mut self, kind: LineKind, id: &str) {
+        self.lines.retain(|line| !line.is_def(kind, id));
+    }
+
+    // r[impl vcf_header.line_form]
+    /// Add an other line (`##` stripped) unless it repeats one, as htslib's
+    /// `bcf_hdr_add_hrec` drops it: the same `key=value`, or a structured
+    /// line with the same key and `ID`. A structured line is kept as htslib
+    /// writes it, spaces dropped. One that does not parse is kept as it is,
+    /// and its error returned for the caller to report.
+    fn push_other_line(&mut self, meta: &str) -> Option<MetaLineError> {
+        let structured = meta
+            .split_once('=')
+            .and_then(|(key, value)| Some((key, value.strip_prefix('<')?)))
+            .map(|(key, body)| parse::parse_structured(body).map(|attrs| (key, attrs)));
+        let (line, dedup, error) = match structured {
+            Some(Ok((key, attrs))) => {
+                let id = attrs.iter().find(|(attr, _)| attr.key == "ID");
+                let dedup = id.map(|(_, raw)| SmolStr::from(format!("{key}=<ID={raw}>")));
+                let form = parse::form(&attrs, |_| true);
+                (SmolStr::from(format!("{key}=<{form}>")), dedup, None)
+            }
+            Some(Err(error)) => (SmolStr::from(meta), None, Some(error)),
+            None => (SmolStr::from(meta), Some(SmolStr::from(meta)), None),
+        };
+        if let Some(dedup) = dedup
+            && !self.other_keys.insert(dedup)
+        {
+            return error;
+        }
+        self.push_line(Line::Other(self.other_lines.len()));
+        self.other_lines.push(line);
+        error
+    }
+
     // r[impl vcf_header.serialization]
     // r[impl vcf_header.parse.preserve]
-    /// Serialize as VCF header text (all ## lines + #CHROM line).
+    /// Serialize as VCF header text (all ## lines + #CHROM line), in the
+    /// header's line order.
     ///
-    /// A parsed header whose dictionary a reader of this text would not
-    /// reproduce (its file declared ids in another order than the emission
-    /// order below, or left `IDX` gaps) gets `IDX=` on every definition line,
-    /// as htslib writes BCF headers, so a re-read assigns the same indices.
+    /// A header whose dictionary a reader of this text would not reproduce
+    /// (its file declared ids with `IDX` gaps, or a removal left a hole) gets
+    /// `IDX=` on every definition line, as htslib writes BCF headers, so a
+    /// re-read assigns the same indices.
     pub fn to_vcf_text(&self) -> String {
-        let (field_idx, contig_idx) = self.needs_idx();
-        let field = |id: &str| if field_idx { self.string_map.get(id) } else { None };
+        self.text(true)
+    }
+
+    fn text(&self, bcf: bool) -> String {
+        let (field_idx, contig_idx) = if bcf { self.needs_idx() } else { (false, false) };
         let mut out = String::new();
 
         out.push_str("##fileformat=");
         out.push_str(&self.version.to_string());
         out.push('\n');
 
-        // PASS right after fileformat, before metadata, as htslib does: it is
-        // dictionary index 0.
-        if let Some(def) = self.filters.get("PASS") {
-            let line = DefLine { key: "FILTER", id: "PASS", kind: None, idx: field("PASS") };
-            line.push(&mut out, &def.description, &def.attributes);
-        }
-
-        for line in &self.other_lines {
-            out.push_str("##");
-            out.push_str(line);
-            out.push('\n');
-        }
-
-        for (id, def) in self.filters.iter().filter(|(id, _)| *id != "PASS") {
-            let line = DefLine { key: "FILTER", id, kind: None, idx: field(id) };
-            line.push(&mut out, &def.description, &def.attributes);
-        }
-        for (id, def) in &self.infos {
-            let kind = Some((def.number, def.typ));
-            let line = DefLine { key: "INFO", id, kind, idx: field(id) };
-            line.push(&mut out, &def.description, &def.attributes);
-        }
-        for (id, def) in &self.formats {
-            let kind = Some((def.number, def.typ));
-            let line = DefLine { key: "FORMAT", id, kind, idx: field(id) };
-            line.push(&mut out, &def.description, &def.attributes);
-        }
-
-        for (name, def) in &self.contigs {
-            out.push_str("##contig=<ID=");
-            push_value(&mut out, name);
-            if let Some(len) = def.length {
-                out.push_str(",length=");
-                out.push_str(&len.to_string());
+        for line in &self.lines {
+            match line {
+                Line::Other(i) => {
+                    if let Some(line) = self.other_lines.get(*i) {
+                        out.push_str("##");
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                Line::Def { kind, id, form } => {
+                    let (map, with_idx) = match kind {
+                        LineKind::Contig => (&self.contig_map, contig_idx),
+                        _ => (&self.string_map, field_idx),
+                    };
+                    out.push_str("##");
+                    out.push_str(kind.key());
+                    out.push_str("=<");
+                    match form {
+                        Some(form) => out.push_str(form),
+                        None => self.push_canonical(&mut out, *kind, id),
+                    }
+                    if let Some(idx) = map.get(id).filter(|_| with_idx) {
+                        out.push_str(",IDX=");
+                        out.push_str(&idx.to_string());
+                    }
+                    out.push_str(">\n");
+                }
             }
-            push_attributes(&mut out, &def.attributes);
-            if let Some(idx) = self.contig_map.get(name).filter(|_| contig_idx) {
-                out.push_str(",IDX=");
-                out.push_str(&idx.to_string());
-            }
-            out.push_str(">\n");
         }
 
         out.push_str("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO");
@@ -718,40 +824,35 @@ impl VcfHeader {
         out
     }
 
-    /// Whether the string and the contig dictionary differ from what a reader
-    /// assigns to `to_vcf_text`'s lines without `IDX` (in order of appearance).
-    fn needs_idx(&self) -> (bool, bool) {
-        let mut fields = StringMap::default();
-        let ids = std::iter::once("PASS")
-            .chain(self.filters.keys().map(SmolStr::as_str).filter(|id| *id != "PASS"))
-            .chain(self.infos.keys().map(SmolStr::as_str))
-            .chain(self.formats.keys().map(SmolStr::as_str));
-        for id in ids {
-            fields.push(&SmolStr::from(id), usize::MAX);
-        }
-        let mut contigs = StringMap::default();
-        for name in self.contigs.keys() {
-            contigs.push(name, usize::MAX);
-        }
-        (fields != self.string_map, contigs != self.contig_map)
-    }
-}
-
-/// `##KEY=<ID=id[,Number=n,Type=t],Description="d"[,attributes][,IDX=i]>`.
-struct DefLine<'a> {
-    key: &'a str,
-    id: &'a str,
-    kind: Option<(Number, ValueType)>,
-    idx: Option<usize>,
-}
-
-impl DefLine<'_> {
-    fn push(&self, out: &mut String, description: &str, attributes: &[Attribute]) {
-        out.push_str("##");
-        out.push_str(self.key);
-        out.push_str("=<ID=");
-        push_value(out, self.id);
-        if let Some((number, typ)) = self.kind {
+    /// `ID=id[,Number=n,Type=t],Description="d"[,attributes]`, or for a
+    /// contig `ID=id[,length=n][,attributes]`.
+    fn push_canonical(&self, out: &mut String, kind: LineKind, id: &str) {
+        out.push_str("ID=");
+        push_value(out, id);
+        let (kind, description, attributes) = match kind {
+            LineKind::Contig => {
+                let Some(def) = self.contigs.get(id) else { return };
+                if let Some(len) = def.length {
+                    out.push_str(",length=");
+                    out.push_str(&len.to_string());
+                }
+                push_attributes(out, &def.attributes);
+                return;
+            }
+            LineKind::Filter => {
+                let Some(def) = self.filters.get(id) else { return };
+                (None, &def.description, &def.attributes)
+            }
+            LineKind::Info => {
+                let Some(def) = self.infos.get(id) else { return };
+                (Some((def.number, def.typ)), &def.description, &def.attributes)
+            }
+            LineKind::Format => {
+                let Some(def) = self.formats.get(id) else { return };
+                (Some((def.number, def.typ)), &def.description, &def.attributes)
+            }
+        };
+        if let Some((number, typ)) = kind {
             out.push_str(",Number=");
             out.push_str(&number.as_str());
             out.push_str(",Type=");
@@ -760,11 +861,19 @@ impl DefLine<'_> {
         out.push_str(",Description=");
         push_quoted(out, description);
         push_attributes(out, attributes);
-        if let Some(idx) = self.idx {
-            out.push_str(",IDX=");
-            out.push_str(&idx.to_string());
+    }
+
+    /// Whether the string and the contig dictionary differ from what a reader
+    /// assigns to the lines without `IDX` (in order of appearance).
+    fn needs_idx(&self) -> (bool, bool) {
+        let (mut fields, mut contigs) = (StringMap::default(), StringMap::default());
+        for line in &self.lines {
+            if let Line::Def { kind, id, .. } = line {
+                let map = if *kind == LineKind::Contig { &mut contigs } else { &mut fields };
+                map.push(id, usize::MAX);
+            }
         }
-        out.push_str(">\n");
+        (fields != self.string_map, contigs != self.contig_map)
     }
 }
 
@@ -934,13 +1043,19 @@ impl<P> VcfHeaderBuilder<P> {
     }
 
     // r[impl vcf_header.set_samples]
+    // r[impl vcf_header.line_form]
     /// Append a `##key=value` metadata line, given without the `##` (e.g.
-    /// `source=myapp`).
+    /// `source=myapp`), unless the header has it already: the same line, or
+    /// a structured `key=<ID=…>` line with the same key and `ID`, as htslib's
+    /// `bcf_hdr_append` drops it.
     ///
     /// Available from any phase — metadata does not affect BCF string
     /// dictionary ordering.
     pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
-        self.header.other_lines.push(line.into());
+        let line = line.into();
+        if let Some(reason) = self.header.push_other_line(&line) {
+            warn!(%reason, line = %line, "keeping a malformed structured header line as it is");
+        }
     }
 
     // r[impl vcf_header.remove+2]
@@ -948,6 +1063,7 @@ impl<P> VcfHeaderBuilder<P> {
     /// dictionary slot becomes a hole unless a FILTER or FORMAT `id` keeps it.
     pub fn remove_info(&mut self, id: &str) -> bool {
         let removed = self.header.infos.shift_remove(id).is_some();
+        self.header.remove_line(LineKind::Info, id);
         self.release(id);
         self.note_removed(KeyKind::Info, id, removed);
         removed
@@ -958,6 +1074,7 @@ impl<P> VcfHeaderBuilder<P> {
     /// dictionary slot becomes a hole unless a FILTER or INFO `id` keeps it.
     pub fn remove_format(&mut self, id: &str) -> bool {
         let removed = self.header.formats.shift_remove(id).is_some();
+        self.header.remove_line(LineKind::Format, id);
         self.release(id);
         self.note_removed(KeyKind::Format, id, removed);
         removed
@@ -971,6 +1088,7 @@ impl<P> VcfHeaderBuilder<P> {
             return false;
         }
         let removed = self.header.filters.shift_remove(id).is_some();
+        self.header.remove_line(LineKind::Filter, id);
         self.release(id);
         self.note_removed(KeyKind::Filter, id, removed);
         removed
@@ -1052,6 +1170,7 @@ impl VcfHeaderBuilder<Contigs> {
             .push(&name, MAX_CONTIGS)
             .ok_or(VcfHeaderError::TooManyContigs { max: MAX_CONTIGS })?;
         self.header.contigs.insert(name.clone(), def);
+        self.header.push_line(Line::Def { kind: LineKind::Contig, id: name.clone(), form: None });
         Ok(super::record_encoder::ContigId { tid, name, header: self.header.id })
     }
 
@@ -1103,6 +1222,7 @@ impl VcfHeaderBuilder<Filters> {
             return Err(VcfHeaderError::DuplicateFilter { id });
         }
         let dict_idx = self.push_dict_entry(&id)?;
+        self.header.push_line(Line::Def { kind: LineKind::Filter, id: id.clone(), form: None });
         self.header.filters.insert(id, def);
         Ok(dict_idx)
     }
@@ -1158,6 +1278,7 @@ impl VcfHeaderBuilder<Infos> {
         }
         self.check_number_version(&id, def.number)?;
         let dict_idx = self.push_dict_entry(&id)?;
+        self.header.push_line(Line::Def { kind: LineKind::Info, id: id.clone(), form: None });
         self.header.infos.insert(id, def);
         Ok(dict_idx)
     }
@@ -1212,6 +1333,7 @@ impl VcfHeaderBuilder<Formats> {
         }
         self.check_number_version(&id, def.number)?;
         let dict_idx = self.push_dict_entry(&id)?;
+        self.header.push_line(Line::Def { kind: LineKind::Format, id: id.clone(), form: None });
         self.header.formats.insert(id, def);
         Ok(dict_idx)
     }
