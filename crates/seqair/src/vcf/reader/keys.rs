@@ -497,6 +497,55 @@ impl VcfFile {
     }
 }
 
+// r[impl vcf_values.reader_keys]
+/// A reader's key resolution, from [`Reader::keys`](super::Reader::keys):
+/// what [`VcfFile::info_key`] and its siblings resolve, for a reader
+/// whose file is not at hand (a [`VcfStream`](super::VcfStream)'s).
+#[derive(Debug, Clone, Copy)]
+pub struct Keys<'a>(pub(crate) &'a FileShared);
+
+impl<'a> Keys<'a> {
+    /// As [`VcfFile::info_key`].
+    ///
+    /// # Errors
+    /// As [`VcfFile::info_key`].
+    pub fn info_key<V: FieldKind>(&self, name: &str) -> Result<InfoKey<V>, KeyError> {
+        self.0.info_key(name, false)
+    }
+
+    /// As [`VcfFile::format_key`].
+    ///
+    /// # Errors
+    /// As [`VcfFile::format_key`].
+    pub fn format_key<V: FieldKind>(&self, name: &str) -> Result<FormatKey<V>, KeyError> {
+        self.0.format_key(name, false)
+    }
+
+    /// As [`VcfFile::info_key_opt`].
+    ///
+    /// # Errors
+    /// As [`Self::info_key`], but for `UnknownField`.
+    pub fn info_key_opt<V: FieldKind>(&self, name: &str) -> Result<Option<InfoKey<V>>, KeyError> {
+        optional(self.info_key(name))
+    }
+
+    /// As [`VcfFile::format_key_opt`].
+    ///
+    /// # Errors
+    /// As [`Self::format_key`], but for `UnknownField`.
+    pub fn format_key_opt<V: FieldKind>(
+        &self,
+        name: &str,
+    ) -> Result<Option<FormatKey<V>>, KeyError> {
+        optional(self.format_key(name))
+    }
+
+    /// As [`VcfFile::lenient`].
+    pub fn lenient(&self) -> LenientKeys<'a> {
+        LenientKeys(self.0)
+    }
+}
+
 // r[impl vcf_values.lenient_keys]
 /// Key resolution that accepts fields the header does not declare, from
 /// [`VcfFile::lenient`] or [`PlanContext::lenient`](super::PlanContext::lenient).

@@ -118,3 +118,39 @@ fn stream_options_and_errors() {
         Err(VcfReadError::NoIndex)
     ));
 }
+
+// r[verify vcf_values.reader_keys]
+/// A stream reader resolves keys as its file would, and they read its
+/// records as the file's keys read the file's.
+#[test]
+fn a_stream_readers_keys_read_its_records() {
+    let path = fixture("rastair.bcf");
+    let file = VcfFile::open(&path).unwrap();
+    let dp: seqair::vcf::InfoInt = file.info_key("DP").unwrap();
+    let want: Vec<Option<i32>> = file
+        .reader::<seqair::vcf::Info>()
+        .open()
+        .unwrap()
+        .into_iter()
+        .map(|info| info.unwrap().get(&dp).unwrap())
+        .collect();
+
+    let mut reader = VcfStream::new(std::fs::File::open(&path).unwrap())
+        .reader::<seqair::vcf::Info>()
+        .open()
+        .unwrap();
+    let keys = reader.keys();
+    let dp: seqair::vcf::InfoInt = keys.info_key("DP").unwrap();
+    assert_eq!(keys.info_key_opt::<seqair::vcf::Str>("NOPE").unwrap(), None);
+    assert!(keys.lenient().info_key_opt::<seqair::vcf::Str>("NOPE").unwrap().is_some());
+    assert!(matches!(
+        keys.info_key::<seqair::vcf::Str>("DP"),
+        Err(seqair::vcf::KeyError::TypeMismatch { .. })
+    ));
+    let mut got = Vec::new();
+    while let Some(info) = reader.next_record().unwrap() {
+        got.push(info.get(&dp).unwrap());
+    }
+    assert!(got.iter().any(Option::is_some));
+    assert_eq!(got, want);
+}

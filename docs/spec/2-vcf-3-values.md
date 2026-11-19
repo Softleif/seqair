@@ -33,6 +33,9 @@ r[vcf_values.field_kind]
 r[vcf_values.header_brand+2]
 Every key and `SampleIdx` MUST carry its header's `HeaderId` (`r[vcf_header.brand]`), and every access MUST compare it with the record's, in release builds too, failing with `ForeignKey`. A key of a file's field table that its header does not declare carries a second id, the file's own, which that file's records accept as well. Without it, a key from another file reads whatever field holds the same dictionary index. Moving records between headers goes through an explicit mapping, never a portable key.
 
+r[vcf_values.reader_keys]
+`Reader::keys()` MUST return a `Keys` view resolving as `file.info_key`, `format_key`, their `_opt` forms and `lenient()` do, for the reader's file: a `VcfStream` reader has no `VcfFile` at hand, and without it a caller re-implements `_opt` by matching `UnknownField`.
+
 ## Access
 
 > r[vcf_values.access+2]

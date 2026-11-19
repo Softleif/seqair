@@ -50,7 +50,7 @@ pub use fields::{
 pub use file::VcfFile;
 pub use full::FullRecord;
 pub use info::{Info, InfoRef};
-pub use keys::LenientKeys;
+pub use keys::{Keys, LenientKeys};
 pub use locus::{Locus, VcfPos};
 pub use query::Partition;
 pub use raw::RawRecord;

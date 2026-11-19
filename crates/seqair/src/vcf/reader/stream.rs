@@ -7,6 +7,7 @@ use super::fields::{
     Fields, PlanContext, PlanError, ReadOption, ReadOptions, SampleSel, SampleSelection, Sections,
 };
 use super::file::{DataStart, FileShared, Input, VcfFile};
+use super::keys::Keys;
 use super::query::{self, Partition, Query, RegionInput, Verdict};
 use super::raw::{BcfRecord, Col, Fixed, RawRecord, Repr, TextCols, TextRecord, parse_pos};
 use super::region::{Match, Region};
@@ -811,6 +812,14 @@ impl<F: Fields> Reader<F> {
     /// The file's header, as [`Writer::write_header`](crate::vcf::Writer::write_header) takes it.
     pub fn header(&self) -> &VcfHeader {
         &self.core.file.header
+    }
+
+    // r[impl vcf_values.reader_keys]
+    /// Keys for reading this reader's records, resolved as its file
+    /// resolves them: for a [`VcfStream`](super::VcfStream), whose file
+    /// exists only inside its reader.
+    pub fn keys(&self) -> Keys<'_> {
+        Keys(&self.core.file)
     }
 
     // r[impl vcf_reader.query+2]

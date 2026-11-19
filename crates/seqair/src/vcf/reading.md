@@ -373,6 +373,12 @@ assert_eq!(
 # Ok(()) }
 ```
 
+The turbofish of `info_key::<V>` names the value marker (`Str`,
+`Scalar<i32>`, `OptArr<f32>`), not a key alias such as `InfoString`; with
+an alias, annotate the binding instead (`let k: Option<InfoString> =
+file.info_key_opt("X")?`). A reader of a `VcfStream` has no `VcfFile` at
+hand: `reader.keys()` resolves keys as the file would.
+
 A key the header does not declare reads only this file: a writer refuses it,
 since the header it writes has no id for the field. BCF names fields by the
 header's dictionary, so a BCF file has exactly the header's fields: there a
