@@ -93,8 +93,8 @@ r[vcf_fields.samples]
 r[vcf_fields.sample_idx]
 `SampleIdx` MUST be obtainable only from a header (`header.sample(name)`, `header.samples()`) and carry the header's `HeaderId`; using it with a record from another header MUST fail with `ForeignKey`. A raw `usize` cannot name a sample.
 
-r[vcf_fields.full_record]
-`FullRecord` MUST hold every section (`Locus`, `Site`, `Info`, `Samples`) plus the raw record bytes and the `HeaderId`, so a later writer can copy a record unchanged when the output header is the same, and expose each part by reference.
+r[vcf_fields.full_record+2]
+`FullRecord` MUST hold every section (`Locus`, `Site`, `Info`, `Samples`) plus the raw record bytes and the `HeaderId`, and expose each part by reference. The `HeaderId` is what a copy checks the record against (`r[vcf_passthrough.copy]`). The raw bytes are the record as stored, for tools and tests that compare what files hold; a copy re-encodes the values (`r[vcf_passthrough.copy.encoder]`) and does not read them.
 
 ## Reading guide
 

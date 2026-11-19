@@ -1,4 +1,4 @@
-//! [`FullRecord`]: every part of a record (`r[vcf_fields.full_record]`).
+//! [`FullRecord`]: every part of a record (`r[vcf_fields.full_record+2]`).
 
 use super::error::VcfReadError;
 use super::fields::{Fields, PlanContext, PlanError, Sections};
@@ -9,9 +9,9 @@ use super::samples::Samples;
 use super::site::Site;
 use crate::vcf::header::HeaderId;
 
-// r[impl vcf_fields.full_record]
-/// Every part of a record, plus its bytes as stored and its header's id, so
-/// a writer with the same header can copy it unchanged.
+// r[impl vcf_fields.full_record+2]
+/// Every part of a record, plus its bytes as stored and its header's id,
+/// which [`Writer::copy_record`](crate::vcf::Writer::copy_record) checks.
 #[derive(Clone)]
 pub struct FullRecord {
     locus: Locus,
@@ -52,7 +52,8 @@ impl FullRecord {
     }
 
     /// The record as stored: for BCF, `l_shared`, `l_indiv` and both
-    /// sections.
+    /// sections; for VCF text, the line. For comparing what files hold: a
+    /// copy re-encodes the values instead.
     pub fn raw_bytes(&self) -> &[u8] {
         &self.bytes
     }

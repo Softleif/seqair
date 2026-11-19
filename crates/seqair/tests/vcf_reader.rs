@@ -129,7 +129,7 @@ fn render_alt(a: Allele<'_>) -> String {
 // r[verify vcf_values.access+2]
 // r[verify vcf_values.dynamic+2]
 // r[verify vcf_values.qual]
-// r[verify vcf_fields.full_record]
+// r[verify vcf_fields.full_record+2]
 /// Every field of every record of a BCF fixture, read through `FullRecord`,
 /// equals what `bcftools view` prints for it; the end equals `%END`.
 fn check_against_bcftools(name: &str) {
