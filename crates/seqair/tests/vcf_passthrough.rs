@@ -1041,3 +1041,34 @@ fn removing_end_takes_it_out_of_the_length() {
     assert_eq!(ends(&kept), "10 10\n20 120\n");
     assert_eq!(ends(&removed), "10 10\n20 21\n");
 }
+
+// r[verify vcf_passthrough.edit.remove]
+/// Removing GT forgets the ploidy `Number=G` counts are checked against: a
+/// copy's diploid GT asks three PL values of a biallelic site, none is
+/// checked without a GT, and a haploid GT encoded after removing it asks two.
+#[test]
+fn removing_gt_checks_number_g_against_the_new_ploidy() {
+    let text = "##fileformat=VCFv4.3\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"g\">\n\
+                ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"p\">\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\n\
+                chr1\t10\t.\tA\tG\t.\t.\t.\tGT:PL\t0/1:0,1,2\n";
+    let file = VcfFile::from_bytes(text.as_bytes().to_vec(), None).unwrap();
+    let gt: FormatGt = file.header().format_key("GT").unwrap();
+    let pl: seqair::vcf::FormatInts = file.header().format_key("PL").unwrap();
+    let count = |e: VcfError| match e {
+        VcfError::CountMismatch { expected, found, .. } => (expected, found),
+        e => panic!("{e:?}"),
+    };
+    let map = FieldMap::new(&file, file.header()).unwrap();
+    copy_with(&file, &map, OutputFormat::Vcf, |_, edit| {
+        assert_eq!(count(pl.encode(edit, &[&[0, 1][..]]).unwrap_err()), (3, 2), "diploid");
+        assert!(edit.remove_format(&gt).unwrap());
+        pl.encode(edit, &[&[0][..]]).unwrap(); // no GT: G is not checked
+        gt.encode(edit, &[Genotype::haploid(1)]).unwrap();
+        pl.encode(edit, &[&[0, 1][..]]).unwrap();
+        assert_eq!(count(pl.encode(edit, &[&[0, 1, 2][..]]).unwrap_err()), (2, 3), "haploid");
+    })
+    .unwrap();
+}
