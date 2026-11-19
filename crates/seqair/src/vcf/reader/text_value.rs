@@ -7,6 +7,7 @@ use std::str::Utf8Error;
 
 use super::values::GtAllele;
 use crate::io::text_scan::find_byte;
+use crate::vcf::bcf_encoding::reserved_int;
 
 // r[impl vcf_reader.errors+3]
 /// The bytes of a malformed value, for its error message: at most the first
@@ -105,15 +106,17 @@ impl TextNumber for f32 {
     }
 }
 
-// r[impl vcf_values.text_numbers]
-/// An optional sign and decimal digits, nothing else; `.` is missing.
+// r[impl vcf_values.text_numbers+2]
+/// An optional sign and decimal digits, nothing else; `.` is missing, and so
+/// is a value in BCF's reserved band, as htslib stores it.
 pub(crate) fn parse_i32(token: &[u8]) -> Result<Option<i32>, TextValueError> {
     if token == b"." {
         return Ok(None);
     }
     // `i32::from_str` is exactly this grammar: `[+-]?[0-9]+`, no whitespace.
     let s = std::str::from_utf8(token).map_err(|_| TextValueError::invalid_integer(token))?;
-    s.parse::<i32>().map(Some).map_err(|e| match e.kind() {
+    let value = |v| reserved_int(v).is_none().then_some(v);
+    s.parse::<i32>().map(value).map_err(|e| match e.kind() {
         IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => {
             TextValueError::IntegerOutOfRange { value: Offending::new(token) }
         }
@@ -121,7 +124,7 @@ pub(crate) fn parse_i32(token: &[u8]) -> Result<Option<i32>, TextValueError> {
     })
 }
 
-// r[impl vcf_values.text_numbers]
+// r[impl vcf_values.text_numbers+2]
 /// A float as `f32::from_str` reads it (correctly rounded), which also takes
 /// VCF's `Inf`, `Infinity` and `NaN` in any case with an optional sign; `.`
 /// is missing.
@@ -157,26 +160,35 @@ pub(crate) struct TextVec<'a, T> {
     /// The elements not yet yielded; `None` once all are.
     rest: Option<&'a [u8]>,
     len: usize,
+    /// An element other than `.` reads as missing: an integer in BCF's
+    /// reserved band.
+    reserved: bool,
     _t: PhantomData<T>,
 }
 
 impl<'a, T: TextNumber> TextVec<'a, T> {
     /// No elements: an INFO key written without a value.
     pub(crate) fn empty() -> Self {
-        Self { rest: None, len: 0, _t: PhantomData }
+        Self { rest: None, len: 0, reserved: false, _t: PhantomData }
     }
 
     /// Checks every element of `value` (`""` is one empty, invalid element).
     pub(crate) fn new(value: &'a [u8]) -> Result<Self, TextValueError> {
         let mut len = 0usize;
+        let mut reserved = false;
         let mut rest = Some(value);
         while let Some(r) = rest {
             let (token, tail) = split_comma(r);
-            T::parse_text(token)?;
+            reserved |= T::parse_text(token)?.is_none() && token != b".";
             len = len.saturating_add(1);
             rest = tail;
         }
-        Ok(Self { rest: Some(value), len, _t: PhantomData })
+        Ok(Self { rest: Some(value), len, reserved, _t: PhantomData })
+    }
+
+    /// Whether an element other than `.` reads as missing (a reserved integer).
+    pub(crate) fn has_reserved(&self) -> bool {
+        self.reserved
     }
 
     /// Element `i` of those not yet yielded; `None` past the end.
@@ -337,20 +349,25 @@ mod tests {
         }
     }
 
-    // r[verify vcf_values.text_numbers]
-    /// Any `i32` std prints, with an optional `+` and leading zeros, reads back.
+    // r[verify vcf_values.text_numbers+2]
+    /// Any `i32` std prints, with an optional `+` and leading zeros, reads
+    /// back; one in BCF's reserved band reads as missing.
     #[hegel::test]
     fn integers_read_back_as_printed(tc: TestCase) {
-        let v = tc.draw(gs::integers::<i32>());
+        let v = tc.draw(hegel::one_of!(
+            gs::integers::<i32>(),
+            gs::integers::<i32>().max_value(i32::MIN + 9)
+        ));
         let zeros = "0".repeat(tc.draw(gs::integers::<usize>().max_value(3)));
         let plus = if v >= 0 && tc.draw(gs::booleans()) { "+" } else { "" };
         let digits = v.unsigned_abs().to_string();
         let sign = if v < 0 { "-" } else { plus };
         let text = format!("{sign}{zeros}{digits}");
-        assert_eq!(parse_i32(text.as_bytes()).unwrap(), Some(v), "{text}");
+        let expected = (v >= i32::MIN + 8).then_some(v);
+        assert_eq!(parse_i32(text.as_bytes()).unwrap(), expected, "{text}");
     }
 
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     /// Any `f32` std prints, plainly or in exponent form, reads back bit for
     /// bit (NaN as some NaN: the text has no payload).
     #[hegel::test]
@@ -365,12 +382,15 @@ mod tests {
         }
     }
 
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     #[test]
     fn integers_are_strict() {
         assert_eq!(parse_i32(b".").unwrap(), None);
         assert_eq!(parse_i32(b"-0").unwrap(), Some(0));
-        assert_eq!(parse_i32(b"-2147483648").unwrap(), Some(i32::MIN));
+        // BCF's reserved band reads as missing, as htslib stores it.
+        assert_eq!(parse_i32(b"-2147483648").unwrap(), None);
+        assert_eq!(parse_i32(b"-2147483641").unwrap(), None);
+        assert_eq!(parse_i32(b"-2147483640").unwrap(), Some(i32::MIN + 8));
         for bad in
             [&b""[..], b"-", b"+", b" 1", b"1 ", b"1.0", b"1e3", b"0x1", b"..", b"\xff", b"1,2"]
         {
@@ -387,7 +407,7 @@ mod tests {
         }
     }
 
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     #[test]
     fn floats_take_the_vcf_special_forms_in_any_case() {
         for (text, expected) in [
@@ -424,19 +444,22 @@ mod tests {
         tokens.join(",")
     }
 
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     #[hegel::test]
     fn int_vectors_read_back_as_joined(tc: TestCase) {
         let values =
             tc.draw(gs::vecs(gs::optional(gs::integers::<i32>())).min_size(1).max_size(40));
         let text = join(&values.iter().map(|v| v.map(|v| v.to_string())).collect::<Vec<_>>());
         let v = TextVec::<i32>::new(text.as_bytes()).unwrap();
+        // BCF's reserved band reads as missing.
+        let read: Vec<_> = values.iter().map(|v| v.filter(|&v| v >= i32::MIN + 8)).collect();
+        assert_eq!(v.has_reserved(), read != values);
         assert_eq!(v.len(), values.len());
-        for (i, &expected) in values.iter().enumerate() {
+        for (i, &expected) in read.iter().enumerate() {
             assert_eq!(v.get(i), Some(expected), "element {i}");
         }
         assert_eq!(v.get(values.len()), None);
-        assert_eq!(v.collect::<Vec<_>>(), values);
+        assert_eq!(v.collect::<Vec<_>>(), read);
     }
 
     #[test]

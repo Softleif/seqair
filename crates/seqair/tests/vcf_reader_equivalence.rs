@@ -643,7 +643,7 @@ fn read_back(s: &Setup, records: &[Record], format: OutputFormat) -> (Setup, Vec
 // r[verify vcf_values.access+2]
 // r[verify vcf_values.dynamic.missing]
 // r[verify vcf_values.bcf_sentinels]
-// r[verify vcf_values.text_numbers]
+// r[verify vcf_values.text_numbers+2]
 // r[verify vcf_values.text_strings]
 // r[verify vcf_values.gt+2]
 // r[verify vcf_values.qual]

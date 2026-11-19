@@ -67,8 +67,7 @@ fn int_or_zero(token: &[u8]) -> i64 {
 
 /// [`int_or_zero`], with `None` for what counts as 0 there.
 fn int(token: &[u8]) -> Option<i64> {
-    let reserved = i32::MIN.saturating_add(8);
-    parse_i32(token).ok().flatten().filter(|&v| v >= reserved).map(i64::from)
+    parse_i32(token).ok().flatten().map(i64::from)
 }
 
 /// The columns [`text_rlen`] reads.

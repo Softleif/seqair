@@ -58,8 +58,8 @@ r[vcf_values.reader_keys]
 r[vcf_values.bcf_sentinels]
 BCF values MUST be decoded at their stored width (int8, int16, int32, float) and widened. The per-width missing value (`0x80`, `0x8000`, `0x8000_0000`; float bits `0x7F80_0001`) MUST become `None`, and the end-of-vector value (`0x81`, `0x8001`, `0x8000_0001`; float bits `0x7F80_0002`) MUST end the vector, never yielded. Floats MUST be compared by bit pattern: any other NaN is a value, `Some(NaN)`.
 
-r[vcf_values.text_numbers]
-VCF text integers MUST parse as an optional sign and decimal digits into `i32`; anything else, or a value out of range, is a typed error naming the field. Floats MUST parse with `f32::from_str` (correctly rounded) and accept the VCF forms `Inf`, `Infinity`, `NaN` in any case with an optional sign. `.` is missing.
+r[vcf_values.text_numbers+2]
+VCF text integers MUST parse as an optional sign and decimal digits into `i32`; anything else, or a value out of range, is a typed error naming the field. A value in BCF's reserved band (−2147483648 … −2147483641) MUST read as missing, with a single `warn!` per file naming the field and the file's path: htslib stores it as missing when it parses the text ("Extreme … value encountered and set to missing"), so the BCF of the same record reads `None`, and the formats must agree (`r[vcf_values.equivalence]`); a copy of the record then writes it missing rather than failing on a value BCF cannot hold. Floats MUST parse with `f32::from_str` (correctly rounded) and accept the VCF forms `Inf`, `Infinity`, `NaN` in any case with an optional sign. `.` is missing.
 
 r[vcf_values.text_strings]
 String values MUST be returned as stored, after UTF-8 validation (`from_utf8`, typed error); percent-encoding (`%3A`, …) MUST NOT be decoded, matching htslib, so VCF and BCF reads agree. BCF strings MUST be trimmed at their first NUL (padding).

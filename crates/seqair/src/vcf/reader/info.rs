@@ -54,6 +54,8 @@ pub(crate) fn decode<'a, V: ReadKind>(
         first_phase_is_read: file.first_phase_is_read,
         declared: ValueType::String,
         genotype: false,
+        file: Some(file),
+        name: &key.name,
     };
     if V::DYNAMIC {
         // An undeclared field reads as a String.
@@ -75,7 +77,13 @@ pub(crate) fn dyn_decode<'a>(
     file: &FileShared,
     at: RecordAt,
 ) -> Result<DynValue<'a>, VcfReadError> {
-    let cx = DecodeCx { first_phase_is_read: file.first_phase_is_read, declared, genotype };
+    let cx = DecodeCx {
+        first_phase_is_read: file.first_phase_is_read,
+        declared,
+        genotype,
+        file: Some(file),
+        name,
+    };
     DynValue::decode(value, declared, genotype, cx)
         .map_err(|source| at.error(file, RecordError::Field { name: name.into(), source }))
 }

@@ -374,7 +374,7 @@ mod tests {
     }
 
     // r[verify vcf_values.bcf_sentinels]
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     /// One float vector as BCF stores it and as VCF prints it reads the same
     /// through both views (floats by value after the text round trip).
     #[hegel::test]
@@ -403,7 +403,7 @@ mod tests {
     }
 
     // r[verify vcf_values.bcf_sentinels]
-    // r[verify vcf_values.text_numbers]
+    // r[verify vcf_values.text_numbers+2]
     #[hegel::test]
     fn bcf_and_text_int_vectors_agree(tc: TestCase) {
         let values = tc

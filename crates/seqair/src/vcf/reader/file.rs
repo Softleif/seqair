@@ -146,6 +146,7 @@ pub(crate) struct FileShared {
     warned_duplicate: AtomicBool,
     warned_undeclared: AtomicBool,
     warned_end_before_pos: AtomicBool,
+    warned_reserved_int: AtomicBool,
 }
 
 // r[impl vcf_reader.debug]
@@ -205,6 +206,20 @@ impl FileShared {
                 path = ?self.path(),
                 "a record names a FILTER the header does not declare; the record fails it \
                  (further undeclared FILTERs in this file are not reported)"
+            );
+        }
+    }
+
+    // r[impl vcf_values.text_numbers+2]
+    /// Log, once per file, that field `name` holds an integer in BCF's
+    /// reserved band, read as missing.
+    pub(crate) fn warn_reserved_int(&self, name: &str) {
+        if !self.warned_reserved_int.swap(true, Ordering::Relaxed) {
+            warn!(
+                field = name,
+                path = ?self.path(),
+                "a VCF text integer in BCF's reserved band (below -2147483640) is read as missing, \
+                 as htslib stores it (further such values in this file are not reported)"
             );
         }
     }
@@ -378,6 +393,7 @@ impl VcfFile {
             warned_duplicate: AtomicBool::new(false),
             warned_undeclared: AtomicBool::new(false),
             warned_end_before_pos: AtomicBool::new(false),
+            warned_reserved_int: AtomicBool::new(false),
             format,
             source,
             header,

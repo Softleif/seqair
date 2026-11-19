@@ -1378,6 +1378,64 @@ fn warnings<F: Fields>(file: &VcfFile, mut visit: impl FnMut(&F)) -> usize {
     warns.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// r[verify vcf_values.text_numbers+2]
+// r[verify vcf_values.equivalence]
+/// A text integer in BCF's reserved band reads as missing, as the BCF
+/// bcftools writes from the same text does, with one warning per file; a
+/// copy of the record writes it missing instead of failing.
+#[test]
+fn reserved_band_integers_in_text_read_as_bcftools_stores_them() {
+    let lines = [
+        "chr1\t10\t.\tA\tC\t.\tPASS\tDP=-2147483645\tGT:DP:AD\t0/1:-2147483648:1,-2147483641\t1/1:5:2,3",
+        "chr1\t11\t.\tA\tC\t.\tPASS\tDP=-2147483640\tGT:DP:AD\t0/1:-2147483641:.,4\t1/1:5:2,3",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let (vcf, bcf) = (dir.path().join("in.vcf"), dir.path().join("in.bcf"));
+    std::fs::write(&vcf, TEXT_HEADER.to_owned() + &lines.join("\n") + "\n").unwrap();
+    let (vcf_str, bcf_str) = (vcf.to_str().unwrap(), bcf.to_str().unwrap());
+    if bcftools(&["view", "-Ob", "-o", bcf_str, vcf_str]).is_none() {
+        return;
+    }
+    let shown = |path: &PathBuf| -> Vec<String> {
+        let file = VcfFile::open(path).unwrap();
+        let mut reader = file.reader::<FullRecord>().open().unwrap();
+        let mut out = Vec::new();
+        while let Some(r) = reader.next_record().unwrap() {
+            let samples = file.header().sample_indices().map(|i| r.samples().sample(i));
+            out.push(format!("{:?} {:?}", r.info(), samples.collect::<Vec<_>>()));
+        }
+        out
+    };
+    let text = shown(&vcf);
+    assert_eq!(text, shown(&bcf));
+    assert!(text[0].contains("\"DP\": Int([])"), "{}", text[0]);
+    assert!(text[1].contains("\"DP\": Int([Some(-2147483640)])"), "{}", text[1]);
+
+    let file = VcfFile::open(&vcf).unwrap();
+    let dp: InfoInt = file.header().info_key("DP").unwrap();
+    let ad: seqair::vcf::FormatIntOpts = file.header().format_key("AD").unwrap();
+    let s1 = file.header().sample("S1").unwrap();
+    assert_eq!(
+        warnings::<FullRecord>(&file, |r| {
+            assert!(matches!(r.info().get(&dp).unwrap(), None | Some(-2147483640)));
+            r.samples().sample(s1).get(&ad).unwrap().map(|v| v.count());
+        }),
+        1,
+        "once per file"
+    );
+    let mut out = Vec::new();
+    let mut writer = seqair::vcf::Writer::new(&mut out, seqair::vcf::OutputFormat::Bcf)
+        .write_header(file.header())
+        .unwrap();
+    let mut reader = file.reader::<FullRecord>().open().unwrap();
+    while let Some(record) = reader.next_record().unwrap() {
+        writer.copy_record(record).unwrap().emit().unwrap();
+    }
+    writer.finish().unwrap();
+    std::fs::write(&bcf, out).unwrap();
+    assert_eq!(shown(&bcf), text, "the copy");
+}
+
 // r[verify vcf_reader.undeclared+5]
 // r[verify vcf_reader.undeclared.filter+2]
 /// Undeclared FILTER names warn once per file wherever `Site` reads them;

@@ -3,6 +3,7 @@
 
 use super::bcf_value::{TypedValue, gt_allele};
 use super::error::FieldError;
+use super::file::FileShared;
 use super::text_value::{TextGt, TextNumber, TextVec, text_str};
 use super::values::{GenotypeRef, GtAlleles, OptValues, Values};
 use crate::vcf::header::ValueType;
@@ -30,22 +31,33 @@ fn text_value(value: &[u8]) -> &[u8] {
     if value.is_empty() { b"." } else { value }
 }
 
-fn text_vec<T: TextNumber>(value: Option<&[u8]>) -> Result<TextVec<'_, T>, FieldError> {
-    Ok(match value {
-        None => TextVec::empty(),
-        Some(v) => TextVec::new(text_value(v))?,
-    })
+fn text_vec<'a, T: TextNumber>(
+    value: Option<&'a [u8]>,
+    cx: DecodeCx<'_>,
+) -> Result<TextVec<'a, T>, FieldError> {
+    let Some(v) = value else { return Ok(TextVec::empty()) };
+    let v = TextVec::new(text_value(v))?;
+    // r[impl vcf_values.text_numbers+2]
+    if v.has_reserved()
+        && let Some(file) = cx.file
+    {
+        file.warn_reserved_int(cx.name);
+    }
+    Ok(v)
 }
 
 /// How to decode: what a `Gt` needs from the file, and what an [`Any`]
 /// needs from the field's definition.
 #[derive(Debug, Clone, Copy)]
-pub struct DecodeCx {
+pub struct DecodeCx<'f> {
     pub(crate) first_phase_is_read: bool,
     /// The field's `Type`; looked up only for a marker that reads it.
     pub(crate) declared: ValueType,
     /// Whether the field is FORMAT `GT`.
     pub(crate) genotype: bool,
+    /// The file to warn of a reserved integer read as missing, and the field's name.
+    pub(crate) file: Option<&'f FileShared>,
+    pub(crate) name: &'f str,
 }
 
 mod sealed {
@@ -77,7 +89,7 @@ pub trait ReadKind: FieldKind + sealed::Sealed {
     fn absent<'a>() -> Self::Out<'a>;
 
     #[doc(hidden)]
-    fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError>;
+    fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError>;
 
     /// `true` if every sample's value decodes, as the type of the whole
     /// column (`column`, every sample's elements, `per_sample` each) alone
@@ -88,17 +100,17 @@ pub trait ReadKind: FieldKind + sealed::Sealed {
     }
 }
 
-fn ints(value: Stored<'_>) -> Result<OptValues<'_, i32>, FieldError> {
+fn ints<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<OptValues<'a, i32>, FieldError> {
     Ok(match value.0 {
         StoredRepr::Bcf(v) => OptValues::bcf(v.ints()?),
-        StoredRepr::Text(t) => OptValues::text(text_vec(t)?),
+        StoredRepr::Text(t) => OptValues::text(text_vec(t, cx)?),
     })
 }
 
-fn floats(value: Stored<'_>) -> Result<OptValues<'_, f32>, FieldError> {
+fn floats<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<OptValues<'a, f32>, FieldError> {
     Ok(match value.0 {
         StoredRepr::Bcf(v) => OptValues::bcf(v.floats()?),
-        StoredRepr::Text(t) => OptValues::text(text_vec(t)?),
+        StoredRepr::Text(t) => OptValues::text(text_vec(t, cx)?),
     })
 }
 
@@ -116,8 +128,8 @@ macro_rules! numeric_kinds {
                 matches!(column.0, StoredRepr::Bcf(v) if per_sample <= 1 && v.reads_as::<$t>())
             }
 
-            fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
-                let v = $read(value)?;
+            fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
+                let v = $read(value, cx)?;
                 match v.len() {
                     0 => Ok(None),
                     1 => Ok(v.get(0).flatten()),
@@ -134,8 +146,8 @@ macro_rules! numeric_kinds {
                 None
             }
 
-            fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
-                let v = $read(value)?;
+            fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
+                let v = $read(value, cx)?;
                 if v.is_missing() {
                     return Ok(None);
                 }
@@ -155,8 +167,8 @@ macro_rules! numeric_kinds {
                 matches!(column.0, StoredRepr::Bcf(v) if v.reads_as::<$t>())
             }
 
-            fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
-                let v = $read(value)?;
+            fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
+                let v = $read(value, cx)?;
                 Ok((!v.is_missing()).then_some(v))
             }
         }
@@ -178,7 +190,7 @@ impl ReadKind for Flag {
     }
 
     /// Present is set, whatever value a writer gave it.
-    fn decode<'a>(_: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
+    fn decode<'a>(_: Stored<'a>, _: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
         Ok(true)
     }
 }
@@ -191,7 +203,7 @@ impl ReadKind for Str {
         None
     }
 
-    fn decode<'a>(value: Stored<'a>, _: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
+    fn decode<'a>(value: Stored<'a>, _: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
         let s = match value.0 {
             StoredRepr::Bcf(v) => v.str()?,
             StoredRepr::Text(t) => text_str(t.unwrap_or_default())?,
@@ -216,7 +228,7 @@ impl ReadKind for Gt {
     // r[impl vcf_values.gt+2]
     /// No alleles, or a lone missing one, is `.`; a missing diploid `./.`
     /// keeps its ploidy.
-    fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
+    fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
         let gt = match value.0 {
             StoredRepr::Bcf(v) => {
                 check_ploidy(v.count())?;
@@ -276,7 +288,7 @@ impl ReadKind for Any {
         None
     }
 
-    fn decode<'a>(value: Stored<'a>, cx: DecodeCx) -> Result<Self::Out<'a>, FieldError> {
+    fn decode<'a>(value: Stored<'a>, cx: DecodeCx<'_>) -> Result<Self::Out<'a>, FieldError> {
         DynValue::decode(value, cx.declared, cx.genotype, cx).map(Some)
     }
 }
@@ -335,14 +347,14 @@ impl<'a> DynValue<'a> {
         value: Stored<'a>,
         declared: ValueType,
         genotype: bool,
-        cx: DecodeCx,
+        cx: DecodeCx<'_>,
     ) -> Result<Self, FieldError> {
         if genotype {
             return Ok(Self::Gt(Gt::decode(value, cx)?));
         }
         Ok(match declared {
-            ValueType::Integer => Self::Int(whole(ints(value)?)),
-            ValueType::Float => Self::Float(whole(floats(value)?)),
+            ValueType::Integer => Self::Int(whole(ints(value, cx)?)),
+            ValueType::Float => Self::Float(whole(floats(value, cx)?)),
             ValueType::Flag => Self::Flag,
             ValueType::String | ValueType::Character => Self::Str(Str::decode(value, cx)?),
         })
@@ -362,8 +374,13 @@ mod tests {
     /// decoding every sample.
     fn vouches<V: ReadKind>(column: &FormatColumn<'_>, n: usize) -> bool {
         let (all, per_sample) = column.all();
-        let cx =
-            DecodeCx { first_phase_is_read: true, declared: ValueType::String, genotype: false };
+        let cx = DecodeCx {
+            first_phase_is_read: true,
+            declared: ValueType::String,
+            genotype: false,
+            file: None,
+            name: "",
+        };
         let vouched = V::column_decodes(Stored(StoredRepr::Bcf(all)), per_sample);
         if vouched {
             for i in 0..n {
