@@ -11,7 +11,9 @@
 //! records) `convert` (locus, FILTER, two INFO keys, GT and `FMT` of the
 //! only sample: rastair's `convert --bed`) `sample` (`.sample(SAMPLE)`)
 //! `only_sample` `column` (GT of every sample) `full` `all` (every value,
-//! decoded dynamically).
+//! decoded dynamically) `open` (200 opens; ns per open) `requery` (2000
+//! open-ended requeries every 25 kb of `CONTIG` or the first contig, one
+//! record each, as `HiPhase` reads; ns per requery).
 #![allow(
     clippy::unwrap_used,
     clippy::unwrap_in_result,
@@ -29,8 +31,9 @@ use rust_htslib::bcf::{self as hts, Read as _};
 use seqair::vcf::{
     DynValue, Fields, FilterStatus, FormatGt, FormatInt, FullRecord, GenotypeRef, Info, InfoFlag,
     InfoFloat, InfoFloats, InfoInt, InfoInts, Locus, OnlySample, PlanContext, PlanError, RawRecord,
-    Sample, Samples, Sections, Site, VcfFile, VcfPos, VcfReadError,
+    Region, Sample, Samples, Sections, Site, VcfFile, VcfPos, VcfReadError,
 };
+use seqair_types::Pos0;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::time::Instant;
@@ -211,6 +214,25 @@ fn seqair(pattern: &str, path: &str, threads: usize) -> (u64, u64) {
             Ok(s.column(gt.as_ref().unwrap())?.map_or(0, |c| c.map(gt_sum).sum()))
         }),
         "full" => seqair_run::<FullRecord>(&file, t, None, |r| Ok(start(r.locus().start()))),
+        "open" => {
+            let n = 200;
+            let x = (0..n).map(|_| VcfFile::open(path).unwrap().header().samples().len() as u64);
+            (n, x.sum())
+        }
+        "requery" => {
+            // HiPhase's shape: open-ended regions, one after another on one reader.
+            let contig = std::env::var("CONTIG")
+                .unwrap_or_else(|_| h.contigs().next().unwrap().0.name().to_string());
+            let first = Region::new(contig.as_str(), Pos0::ZERO..).unwrap();
+            let mut r = file.reader::<Locus>().query(first).unwrap();
+            let (n, mut x) = (2000u64, 0u64);
+            for i in 0..n {
+                let at = Pos0::new((i * 25_000) as u32).unwrap();
+                r.requery(Region::new(contig.as_str(), at..).unwrap()).unwrap();
+                x += r.next_record().unwrap().map_or(0, |l| start(l.start()));
+            }
+            (n, x)
+        }
         "all" => {
             let idx: Vec<_> = h.sample_indices().collect();
             seqair_run::<FullRecord>(&file, t, None, |r| {
