@@ -449,8 +449,11 @@ pub fn arb_record(tc: &TestCase, profile: Profile) -> GenRecord {
                 .fold(0u32, |a, &o| a.saturating_add(o >> 4))
                 .clamp(1, (1 << 28) - 1);
             let placeholder = vec![op(seq_len as u32, OP_S), op(rlen, OP_N)];
-            let subtype =
-                if profile.exotic { tc.draw_silent(gs::sampled_from(b"Ii".to_vec())) } else { b'I' };
+            let subtype = if profile.exotic {
+                tc.draw_silent(gs::sampled_from(b"Ii".to_vec()))
+            } else {
+                b'I'
+            };
             let bytes: Vec<u8> = real.iter().flat_map(|o| o.to_le_bytes()).collect();
             let cg = array_tag(*b"CG", subtype, &bytes, real.len() as u32);
             let at = tc.draw_silent(n(0, tags.len()));
