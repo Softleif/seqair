@@ -706,6 +706,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef8ae57c4978a2acd8b869ce6b9ca1dfe817bff704c220209fdef2c0b75a01b9"
 
 [[package]]
+name = "dashu-base"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "861a614e79388a4c72aa66b0bdabc91e3a4f30d53e0c8d962953e207d75884d0"
+dependencies = [
+ "num-modular",
+]
+
+[[package]]
+name = "dashu-int"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64a0490b40a6a3f6427970035f17f76fd59c01d3cd9f9140809672863a0d64c8"
+dependencies = [
+ "cfg-if",
+ "dashu-base",
+ "num-modular",
+ "static_assertions",
+]
+
+[[package]]
 name = "derefable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -890,7 +911,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
 
@@ -1104,19 +1125,38 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hegeltest"
-version = "0.52.7"
+version = "0.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "232b46870427f7f76f1ff2b82126e541fb65b391519910051b3ac3ed635c72ea"
+checksum = "b51bc1d7cb7864bf784bb94718f7127a56acddf7d231c21dbf51468e54189fc1"
 dependencies = [
+ "hegeltest-c",
  "hegeltest-macros",
  "parking_lot",
 ]
 
 [[package]]
-name = "hegeltest-macros"
-version = "0.52.7"
+name = "hegeltest-c"
+version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fd608dd09861134f31dcafa065e2e7b716904089da2e3c1bb2c1a8464ab39ca"
+checksum = "72ba221d8f81fd1585c4650e19583c7387224acc5d6e19aa567d93dea12f3b0b"
+dependencies = [
+ "dashu-int",
+ "hashbrown 0.17.2",
+ "libm",
+ "miniz_oxide 0.8.9",
+ "once_cell",
+ "rand 0.10.4",
+ "rustc-hash 2.1.3",
+ "rustix",
+ "toml",
+ "windows-sys",
+]
+
+[[package]]
+name = "hegeltest-macros"
+version = "0.54.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c976993a9dcd79d584eb16276272ee6a79235bea5548466d9ad0bc3445e475b9"
 dependencies = [
  "proc-macro2 1.0.107",
  "quote 1.0.47",
@@ -1550,9 +1590,9 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lzma-rust2"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490750560fa7851fbbf5d3ab1a8750f09350ed361ed8aed85b1e1e40587812ee"
+checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
 dependencies = [
  "sha2",
 ]
@@ -1605,6 +1645,15 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -1674,7 +1723,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "rand",
+ "rand 0.8.8",
  "rand_distr",
  "simba",
  "typenum",
@@ -1737,9 +1786,9 @@ dependencies = [
 
 [[package]]
 name = "noodles"
-version = "0.119.0"
+version = "0.120.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eab154a241a84fdf9f4f9413bc5b90c335bbae9fa6f2268e0716b6ae05ece03"
+checksum = "9b571e3012fe68056d6ee5be31408c81fc293745b23a3d1cfe4a99763fe053f9"
 dependencies = [
  "noodles-bam",
  "noodles-bcf",
@@ -1754,9 +1803,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bam"
-version = "0.98.0"
+version = "0.99.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9695fd6594a78ecfaaa0c2c365412fed0f69388479504a588a6ba330db82923e"
+checksum = "dc8a7152ad9db858b2be790ce419643e7c8824125ba4d549960a88e1cd6144f1"
 dependencies = [
  "bstr",
  "indexmap",
@@ -1769,9 +1818,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bcf"
-version = "0.94.0"
+version = "0.95.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bd63276b0815584d896ea0b93f5e8ea43650c35ef4993419b8865999b38da4f"
+checksum = "ac7bced31a04cf521fa820c0260626d804ecd28258bea852b9b2f43c7a3680aa"
 dependencies = [
  "indexmap",
  "memchr",
@@ -1783,9 +1832,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bgzf"
-version = "0.52.0"
+version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "950a8570bb43a68697bb34ba39a44f1171faacceb852104d4a35701b86d7ef29"
+checksum = "49afecf3d87ea6d470322baba6023f3304aaa63f399cf9cc19f27e68e6f6a4e0"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -1805,9 +1854,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-cram"
-version = "0.102.0"
+version = "0.103.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa3bac67d31e91e981c73da2fcd3a9b676ee27de1d42e7b7b08d083d8db0f74"
+checksum = "9faf23749eb5e1cc1e7f8d4a966b3bbe6217df5e1ed4e89e587f708d8c6a8f0d"
 dependencies = [
  "bitflags",
  "bstr",
@@ -1825,9 +1874,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-csi"
-version = "0.62.0"
+version = "0.63.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a08a8df410c420e7282328537e003de1bf4d88f45de891e7acfd2be80171a33"
+checksum = "4f6aed296e989f23824a9e1dbbc9248e522cfa650119502b35ad255ebc9820c2"
 dependencies = [
  "bit-vec 0.10.2",
  "bstr",
@@ -1838,9 +1887,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-fasta"
-version = "0.68.0"
+version = "0.69.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d1b38e048d6cca1588172581f1aac9bfeba784d93da4b671c456aac96e26c16"
+checksum = "618a72cc0b3a8ebfce6bc45f84bd9d903ce4d5fd7eb3c9fb756e34a9c4e5773d"
 dependencies = [
  "bstr",
  "memchr",
@@ -1860,9 +1909,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-sam"
-version = "0.93.0"
+version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a562af0b8f8e82a939fa4ce311cdddea95cf7f265917e474d75ba0827e09a9a"
+checksum = "029184ec3aad923832cb2bd64a07046736cdcac41bd09a64d5b48bb3aa02e46a"
 dependencies = [
  "bitflags",
  "bstr",
@@ -1876,9 +1925,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-tabix"
-version = "0.68.0"
+version = "0.69.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c69ae6443a067aff18ed8ecb2b614bbc7e72cb2c39d639c19cee3850555a5314"
+checksum = "1989354cd7a0992541adb8bb75d4fdf61a3c22a00db788896a83398238ebd3d4"
 dependencies = [
  "bstr",
  "indexmap",
@@ -1889,9 +1938,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-util"
-version = "0.88.0"
+version = "0.89.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f8b407a0bcbc4bedaf68468efa66091e6bffa56e94a242eb8be1b0f5e26a8c8"
+checksum = "4a7a007b628ac1e1c27604dd3b14ae110d3e229f99b17e4da5828498f466c105"
 dependencies = [
  "bstr",
  "flate2",
@@ -1906,9 +1955,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-vcf"
-version = "0.96.0"
+version = "0.97.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f83bfcf066b7a26bcd7d9e831e8e14aaccea845bc2196c929521eb29636df2b"
+checksum = "e5c7f3f07c58280d3e79514ce76dec560fa09e62dd285a3ede4f34ef0fd6672c"
 dependencies = [
  "indexmap",
  "memchr",
@@ -1946,6 +1995,12 @@ checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "num-modular"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44"
 
 [[package]]
 name = "num-rational"
@@ -2294,7 +2349,16 @@ checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha",
- "rand_core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2304,7 +2368,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -2317,13 +2381,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
 name = "rand_distr"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2636,6 +2706,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2753,7 +2832,7 @@ dependencies = [
  "approx",
  "nalgebra",
  "num-traits",
- "rand",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2935,6 +3014,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "pin-project-lite",
+]
+
+[[package]]
+name = "toml"
+version = "1.2.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5426cb1b964690d913f6c5c1a1ae0b42f428ec506bb4d452876d7a209c9bca3b"
+dependencies = [
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
 ]
 
 [[package]]

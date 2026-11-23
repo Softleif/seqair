@@ -11,7 +11,7 @@ readme = "README.md"
 exclude = ["fuzz/*", "tests/*", "benches/*"]
 
 [dependencies]
-seqair-types = { version = "^0.4.0", path = "../seqair-types" }
+seqair-types = { version = "0.4.2", path = "../seqair-types" }
 thiserror = { workspace = true }
 fearless_simd = { workspace = true }
 fearless_simd_macros = { workspace = true }

@@ -51,7 +51,9 @@ pub struct Profile {
     /// rejects: any non-NUL byte in names and `A`/`Z`/`H` values, a NUL inside
     /// a read name, `@` in one, FLAG bits above 0x800, position `i32::MAX`, quality bytes above 93, reserved CIGAR op codes
     /// 9–15, an unmapped record's CIGAR that does not cover its sequence,
-    /// NaN and infinite floats, and `d` (double) tags.
+    /// NaN and infinite floats, `d` (double) tags, TLEN `i32::MIN`, a
+    /// single base of quality 9 (QUAL `*`, which noodles writes as Q10),
+    /// `CG:B:i`, and a second `CG` tag (noodles drops every `CG`).
     pub exotic: bool,
     /// NaNs with their sign bit set, which glibc prints `-nan` and macOS's
     /// libc `nan`.
@@ -357,6 +359,9 @@ fn arb_qual(tc: &TestCase, profile: Profile, len: usize) -> Vec<u8> {
         let at = tc.draw_silent(n(1, len - 1));
         qual[at] = 0xFF;
     }
+    if !profile.exotic && qual == [9] {
+        qual[0] = 10;
+    }
     qual
 }
 
@@ -444,13 +449,14 @@ pub fn arb_record(tc: &TestCase, profile: Profile) -> GenRecord {
                 .fold(0u32, |a, &o| a.saturating_add(o >> 4))
                 .clamp(1, (1 << 28) - 1);
             let placeholder = vec![op(seq_len as u32, OP_S), op(rlen, OP_N)];
-            let subtype = tc.draw_silent(gs::sampled_from(b"Ii".to_vec()));
+            let subtype =
+                if profile.exotic { tc.draw_silent(gs::sampled_from(b"Ii".to_vec())) } else { b'I' };
             let bytes: Vec<u8> = real.iter().flat_map(|o| o.to_le_bytes()).collect();
             let cg = array_tag(*b"CG", subtype, &bytes, real.len() as u32);
             let at = tc.draw_silent(n(0, tags.len()));
             tags.insert(at, cg);
             // Sometimes a second CG after it, which stays a tag.
-            if tc.draw_silent(gs::weighted_booleans(0.1)) {
+            if profile.exotic && tc.draw_silent(gs::weighted_booleans(0.1)) {
                 let at = tc.draw_silent(n(at + 1, tags.len()));
                 tags.insert(at, array_tag(*b"CG", b'I', &op(3, OP_M).to_le_bytes(), 1));
             }
@@ -473,7 +479,11 @@ pub fn arb_record(tc: &TestCase, profile: Profile) -> GenRecord {
         flags,
         next_refid,
         next_pos,
-        tlen: tc.draw_silent(gs::integers::<i32>()),
+        tlen: tc.draw_silent(gs::integers::<i32>().min_value(if profile.exotic {
+            i32::MIN
+        } else {
+            i32::MIN + 1
+        })),
         qname: arb_qname(tc, profile),
         cigar,
         seq,

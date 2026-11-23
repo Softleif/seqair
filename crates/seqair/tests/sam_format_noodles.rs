@@ -8,11 +8,9 @@
 //! - Floats (`f`, `B:f`): noodles prints the shortest decimal that reads back
 //!   as the same `f32`, htslib (and seqair) six significant digits. Compared
 //!   by value, to six significant digits.
-//! - Long CIGARs: noodles also reads the real CIGAR out of `CG`, but keeps the
-//!   `CG` tag in its output; htslib drops it. The first `CG` tag is removed
-//!   from noodles' tags before comparing. (noodles also takes the CIGAR from
-//!   `CG` for unplaced records and for any array subtype, where htslib does
-//!   not; the generator only builds long CIGARs both read alike.)
+//!
+//! noodles drops every `CG` tag and htslib only the one it took the CIGAR
+//! from, so the profile builds only that one.
 //!
 //! Everything else — the eleven mandatory fields and every other tag — must
 //! be identical.
@@ -110,18 +108,11 @@ fn format_agrees_with_noodles(tc: TestCase) {
         let mut ours = Vec::new();
         format_sam_record(record, &header, &mut ours).unwrap();
         let ours: Vec<&[u8]> = ours.split(|&b| b == b'\t').collect();
-        let mut theirs: Vec<&[u8]> = theirs.split(|&b| b == b'\t').collect();
+        let theirs: Vec<&[u8]> = theirs.split(|&b| b == b'\t').collect();
         assert!(ours.len() >= 11 && theirs.len() >= 11);
         let mandatory =
             |f: &[&[u8]]| f[..11].iter().map(|f| f.escape_ascii().to_string()).collect::<Vec<_>>();
         assert_eq!(mandatory(&ours), mandatory(&theirs));
-        if record.has_cg_placeholder() {
-            let cg = theirs[11..]
-                .iter()
-                .position(|t| t.starts_with(b"CG:B:"))
-                .expect("noodles keeps CG");
-            theirs.remove(11 + cg);
-        }
         assert_eq!(ours.len(), theirs.len(), "same tags");
         for (a, b) in ours[11..].iter().zip(&theirs[11..]) {
             assert_same_tag(a, b);
