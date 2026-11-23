@@ -577,6 +577,9 @@ After all records in a slice are decoded, the decoder MUST resolve attached mate
 4. The first record gets `+tlen` if it is leftmost and either not rightmost or the only leftmost; if it is leftmost and rightmost with ties at both ends, `+tlen` when it is READ1 (0x40), else `-tlen`; otherwise `-tlen`. Every other record of the chain gets the opposite of the first's.
 5. Each record takes its ring successor as its mate: mate reference and position are the mate's (position -1, `None`, for an unplaced mate), FLAG gains 0x1, 0x8 when the mate is unmapped and 0x20 when it is reversed, and TLEN is 0 when the mate or the record itself is unmapped.
 
+r[cram.record.mate_tlen_range]
+A chain whose `tlen` (step 3) is not within `[-2^31+1, 2^31-1]` MUST fail the slice with `CramError::TemplateLenOutOfRange`, never be truncated: it would give one end `-2^31`, outside the SAM range (`r[bam.record.tlen_min]`), and the other a value no `i32` holds. Only positions past the end of the reference give such a span. htslib keeps the 64-bit value and fails later, when `bam_write1` writes the record.
+
 r[cram.record.mate_flags]
 A detached record's `MF` MUST be applied to its FLAG as htslib does: bit 1 adds 0x1 and 0x20, bit 2 adds 0x8; a record that is not paired after that has no mate reference, whatever `NS` said. For htslib-written files these are no-ops (`BF` holds the whole FLAG); other writers may clear the mate bits from `BF`.
 

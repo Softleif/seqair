@@ -852,7 +852,7 @@ fn decode_slice_records(
 
     // Post-process: resolve template_len for attached/downstream mates.
     // Follow mate_line chains to compute alignment span, then assign signed TLEN.
-    resolve_mates(&mut mate_infos, &mut out, names);
+    resolve_mates(&mut mate_infos, &mut out, names)?;
     out.shrink_to_fit();
     Ok((out, mate_infos))
 }
@@ -1583,7 +1583,7 @@ fn resolve_mates(
     infos: &mut [SliceMateInfo],
     out: &mut DecodedSlice,
     names: Option<NameRecords<'_>>,
-) {
+) -> Result<(), CramError> {
     let n = infos.len();
     let line = |ml: i32| usize::try_from(ml).ok().filter(|&m| m < n);
     let mut tlen: Vec<Option<i64>> = vec![None; n];
@@ -1619,8 +1619,16 @@ fn resolve_mates(
         r.flags = flags;
         r.mate_fields.tid = mate_tid;
         r.mate_fields.pos = Pos0::try_from(mate_pos).ok();
-        r.mate_fields.template_len =
-            tlen[rec].and_then(|t| NonZeroI32::new(i32::try_from(t).unwrap_or(0)));
+        // r[impl cram.record.mate_tlen_range]
+        r.mate_fields.template_len = match tlen[rec] {
+            None => None,
+            Some(t) => NonZeroI32::new(
+                i32::try_from(t)
+                    .ok()
+                    .filter(|&t| t != i32::MIN)
+                    .ok_or_else(|| CramError::TemplateLenOutOfRange { tlen: t })?,
+            ),
+        };
     }
     for info in infos.iter() {
         if let (Some(t), Some(r)) =
@@ -1632,6 +1640,7 @@ fn resolve_mates(
     if let Some(names) = names {
         name_records(infos, out, names);
     }
+    Ok(())
 }
 
 /// The extent of a chain of mates on one reference: its leftmost start and
@@ -2854,7 +2863,7 @@ mod tests {
 
     /// A slice of two records and the mate infos htslib's decode leaves:
     /// `(pos, end, tid, flags, mate_line)` each.
-    fn mates(records: [(i64, i64, Option<Tid>, u16, i32); 2]) -> DecodedSlice {
+    fn mates(records: [(i64, i64, Option<Tid>, u16, i32); 2]) -> Result<DecodedSlice, CramError> {
         let mut slice = DecodedSlice::default();
         let mut infos: Vec<SliceMateInfo> = records
             .iter()
@@ -2889,8 +2898,8 @@ mod tests {
                 }
             })
             .collect();
-        resolve_mates(&mut infos, &mut slice, Some(NameRecords { prefix: "x", first_record: 7 }));
-        slice
+        resolve_mates(&mut infos, &mut slice, Some(NameRecords { prefix: "x", first_record: 7 }))?;
+        Ok(slice)
     }
 
     // r[verify cram.record.mate_tlen_reconstruction+2]
@@ -2898,7 +2907,8 @@ mod tests {
     /// other's reference as its mate's, and both the first one's name.
     #[test]
     fn a_chain_over_two_references_has_no_tlen() {
-        let slice = mates([(10, 30, Some(tid(0)), 0x41, 1), (50, 70, Some(tid(1)), 0x81, -1)]);
+        let slice =
+            mates([(10, 30, Some(tid(0)), 0x41, 1), (50, 70, Some(tid(1)), 0x81, -1)]).unwrap();
         let [a, b] = [&slice.records[0], &slice.records[1]];
         assert_eq!((a.mate_fields.template_len, b.mate_fields.template_len), (None, None));
         assert_eq!((a.mate_fields.tid, b.mate_fields.tid), (Some(tid(1)), Some(tid(0))));
@@ -2913,7 +2923,7 @@ mod tests {
     /// position -1, the mate-unmapped flag and TLEN 0.
     #[test]
     fn an_unplaced_attached_mate_has_position_minus_one() {
-        let slice = mates([(10, 30, Some(tid(0)), 0x41, 1), (-1, 0, None, 0x85, -1)]);
+        let slice = mates([(10, 30, Some(tid(0)), 0x41, 1), (-1, 0, None, 0x85, -1)]).unwrap();
         let [a, b] = [&slice.records[0], &slice.records[1]];
         assert_eq!(a.mate_fields.pos, None);
         assert_eq!(a.mate_fields.tid, None);
@@ -2921,6 +2931,28 @@ mod tests {
         assert_eq!(a.mate_fields.template_len, None);
         assert_eq!(b.mate_fields.pos, Pos0::new(10));
         assert_eq!(b.mate_fields.template_len, None);
+    }
+
+    // r[verify cram.record.mate_tlen_range]
+    /// A chain spanning `2^31 - 1` bases gives its ends `±(2^31 - 1)`; one base
+    /// more fails the slice rather than giving `i32::MIN` to one end and 0 to
+    /// the other.
+    #[test]
+    fn a_chain_too_long_for_tlen_fails_the_slice() {
+        let max = i64::from(i32::MAX);
+        let slice =
+            mates([(0, 10, Some(tid(0)), 0x41, 1), (max - 10, max, Some(tid(0)), 0x81, -1)])
+                .unwrap();
+        let tlens = slice.records.iter().map(|r| r.mate_fields.template_len.map(i32::from));
+        assert_eq!(tlens.collect::<Vec<_>>(), [Some(i32::MAX), Some(-i32::MAX)]);
+
+        let err =
+            mates([(0, 10, Some(tid(0)), 0x41, 1), (max - 9, max + 1, Some(tid(0)), 0x81, -1)])
+                .unwrap_err();
+        assert!(
+            matches!(err, CramError::TemplateLenOutOfRange { tlen } if tlen.abs() == max + 1),
+            "{err}"
+        );
     }
 
     // r[verify cram.feature.quality_score+2]

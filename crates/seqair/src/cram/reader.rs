@@ -162,6 +162,11 @@ pub enum CramError {
     #[error("CRAM record read group {read_group} is not one of the header's {count}")]
     ReadGroupOutOfRange { read_group: i32, count: usize },
 
+    /// An attached mate chain spans more than a TLEN can hold, which only
+    /// positions past the end of the reference give.
+    #[error("CRAM mate chain gives TLEN {tlen}, outside [-2^31+1, 2^31-1]")]
+    TemplateLenOutOfRange { tlen: i64 },
+
     /// A record whose features rebuild a different number of bases than
     /// its qualities.
     #[error("CRAM record has {bases} bases but {qualities} qualities")]
