@@ -36,7 +36,6 @@ use crate::io::text_scan;
 use crate::reader::{AuxTags, ResolveTid, Tid};
 use core::range::RangeInclusive;
 use seqair_types::{IupacBase, MappingQuality, Pos0, Pos1};
-use std::num::NonZeroI32;
 use std::{
     convert::Infallible,
     fs::File,
@@ -854,7 +853,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     let template_len = parse_i64(tlen_field)
         .and_then(|t| i32::try_from(t).ok())
         .ok_or_else(|| SamRecordError::InvalidTlen { value: tlen_field.into() })?;
-    let template_len = NonZeroI32::new(template_len);
+    let template_len = crate::bam::mate::wire_template_len(template_len);
 
     let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_buf);
 
@@ -1209,6 +1208,34 @@ mod tests {
             let rec = store.record(crate::bam::RecordIdx::ZERO).unwrap();
             assert_eq!((rec.mate_fields.tid, rec.mate_fields.pos), (want_ref, want_pos), "{line}");
         }
+    }
+
+    // r[verify bam.record.tlen_min]
+    /// TLEN `-2^31`, below the SAM range but within BAM's `int32`, is kept.
+    #[test]
+    fn tlen_min_is_kept() {
+        let header = make_header();
+        let line = b"r\t1\tchr1\t100\t60\t4M\t=\t200\t-2147483648\tACGT\t~~~~";
+        let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
+            make_store_and_bufs();
+        parse_sam_line(
+            line,
+            &header,
+            tid(0),
+            0,
+            10000,
+            &mut store,
+            &mut cigar_buf,
+            &mut bases_buf,
+            &mut qual_buf,
+            &mut aux_buf,
+            &AuxTags::All,
+            &mut (),
+        )
+        .unwrap()
+        .unwrap();
+        let rec = store.record(crate::bam::RecordIdx::ZERO).unwrap();
+        assert_eq!(rec.mate_fields.template_len.map(i32::from), Some(i32::MIN));
     }
 
     // r[verify sam.record.mate_fields]

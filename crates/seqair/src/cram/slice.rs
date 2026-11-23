@@ -24,6 +24,7 @@ use crate::bam::{
     BamHeader, MateFields,
     cigar::{self, CigarOp},
     long_cigar,
+    mate::wire_template_len,
     record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
 };
@@ -1192,7 +1193,7 @@ fn decode_record(
                     .to_zero_based(),
             ),
         };
-        mate_fields.template_len = NonZeroI32::new(ds.template_size.decode(ctx)?);
+        mate_fields.template_len = wire_template_len(ds.template_size.decode(ctx)?);
         // r[impl cram.record.mate_flags]
         if mate_flags & 0x1 != 0 {
             bam_flags = bam_flags.with(0x1).with(0x20);
@@ -1625,7 +1626,7 @@ fn resolve_mates(
         if let (Some(t), Some(r)) =
             (info.explicit_tlen, info.slot.and_then(|slot| out.records.get_mut(slot as usize)))
         {
-            r.mate_fields.template_len = NonZeroI32::new(t);
+            r.mate_fields.template_len = wire_template_len(t);
         }
     }
     if let Some(names) = names {

@@ -17,7 +17,6 @@ use crate::io::text_scan;
 use crate::reader::{AuxTags, Tid};
 use seqair_types::{IupacBase, MappingQuality, Pos0};
 use std::fmt;
-use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
@@ -320,7 +319,7 @@ impl SamRecordEncoder {
             mate_fields: MateFields {
                 tid: mate_tid,
                 pos: mate_pos,
-                template_len: NonZeroI32::new(template_len),
+                template_len: crate::bam::mate::wire_template_len(template_len),
             },
             qname,
             cigar: &[],

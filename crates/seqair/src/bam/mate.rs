@@ -3,6 +3,8 @@
 use crate::reader::Tid;
 use seqair_types::Pos0;
 use std::num::NonZeroI32;
+use std::sync::Once;
+use tracing::warn;
 
 // r[impl bam.record.mate_fields+2]
 /// A record's mate fields — SAM's RNEXT, PNEXT and TLEN, bytes 20–32 of a BAM
@@ -24,4 +26,22 @@ pub struct MateFields {
     /// Signed template length; `None` when unavailable or for a
     /// single-segment template.
     pub template_len: Option<NonZeroI32>,
+}
+
+// r[impl bam.record.tlen_min]
+/// TLEN as a file stores it (`0` is `None`). `i32::MIN` is outside the SAM
+/// range but kept, as htslib keeps it; the first one per process is logged.
+pub(crate) fn wire_template_len(tlen: i32) -> Option<NonZeroI32> {
+    if tlen == i32::MIN {
+        warn_tlen_min();
+    }
+    NonZeroI32::new(tlen)
+}
+
+#[cold]
+fn warn_tlen_min() {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        warn!(tlen = i32::MIN, "TLEN is outside the SAM range [-2^31+1, 2^31-1]; kept as is");
+    });
 }

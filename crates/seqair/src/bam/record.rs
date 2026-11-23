@@ -146,7 +146,7 @@ impl WireRefs {
             mate_fields: MateFields {
                 tid: next_ref_id,
                 pos: next_pos,
-                template_len: NonZeroI32::new(self.template_len),
+                template_len: super::mate::wire_template_len(self.template_len),
             },
         })
     }
